@@ -124,11 +124,11 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "warn"
 missing_panics_doc = "warn"
-# Casting is common and intentional in low-level database code
-cast_possible_truncation = "allow"
-cast_sign_loss = "allow"
+# Cast lints: warn to catch real truncation bugs, allow per-site where safe
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
 cast_precision_loss = "allow"
-cast_possible_wrap = "allow"
+cast_possible_wrap = "warn"
 cast_lossless = "allow"
 # Style preferences
 uninlined_format_args = "allow"

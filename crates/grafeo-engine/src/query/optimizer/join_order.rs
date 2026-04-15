@@ -361,6 +361,12 @@ impl<'a> DPccp<'a> {
             });
         }
 
+        // BitSet uses u64, so we can only handle up to 64 relations.
+        // For larger queries, return None to fall back to heuristic ordering.
+        if n > 64 {
+            return None;
+        }
+
         // Initialize with single relations
         for (i, node) in self.graph.nodes.iter().enumerate() {
             let subset = BitSet::singleton(i);
@@ -375,12 +381,6 @@ impl<'a> DPccp<'a> {
                     cardinality,
                 },
             );
-        }
-
-        // BitSet uses u64, so we can only handle up to 64 relations.
-        // For larger queries, return None to fall back to heuristic ordering.
-        if n > 64 {
-            return None;
         }
 
         // Enumerate connected subgraph pairs (ccp)

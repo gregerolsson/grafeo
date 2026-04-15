@@ -1567,6 +1567,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "crc32fast",
+ "criterion",
  "crossbeam",
  "fs2",
  "grafeo-common",

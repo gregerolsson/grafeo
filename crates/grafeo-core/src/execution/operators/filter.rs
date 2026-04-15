@@ -45,7 +45,7 @@ fn temporal_i32(value: i64) -> Option<i32> {
 /// Safely converts an f64 to i64 for integer coercion.
 /// Returns `None` for NaN, infinity, or values outside i64 range.
 fn safe_f64_to_i64(f: f64) -> Option<i64> {
-    if f.is_nan() || f.is_infinite() || f > i64::MAX as f64 || f < i64::MIN as f64 {
+    if f.is_nan() || f.is_infinite() || f >= i64::MAX as f64 || f < i64::MIN as f64 {
         return None;
     }
     Some(f as i64)

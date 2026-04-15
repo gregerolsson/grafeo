@@ -49,6 +49,15 @@ benchmarks = [
     "regression_fan_out_*",
 ]
 
+[categories.wal]
+threshold_pct = 10
+fail_ci = false
+benchmarks = [
+    "wal_write_*",
+    "wal_batch_*",
+    "wal_recovery_*",
+]
+
 [categories.serialization]
 threshold_pct = 12
 fail_ci = false
