@@ -79,6 +79,8 @@ pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
                 if let (Some(Value::Int64(id)), Some(Value::List(labels))) =
                     (map.get("_id"), map.get("_labels"))
                 {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     let node_id = NodeId(*id as u64);
                     if seen_node_ids.insert(node_id) {
                         let label_strings: Vec<String> = labels
@@ -115,6 +117,8 @@ pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
                     map.get("_source"),
                     map.get("_target"),
                 ) {
+                    // reason: IDs originate as u64 counters stored in i64; roundtrip is lossless
+                    #[allow(clippy::cast_sign_loss)]
                     let edge_id = EdgeId(*id as u64);
                     if seen_edge_ids.insert(edge_id) {
                         let properties: HashMap<PropertyKey, Value> = map
@@ -122,6 +126,8 @@ pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
                             .filter(|(k, _)| !k.as_str().starts_with('_'))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
+                        // reason: value is non-negative by preceding validation
+                        #[allow(clippy::cast_sign_loss)]
                         edges.push(RawEdge {
                             id: edge_id,
                             edge_type: edge_type.to_string(),

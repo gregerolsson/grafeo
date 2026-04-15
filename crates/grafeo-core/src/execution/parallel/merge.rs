@@ -523,6 +523,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test values 1..=9 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_merge_sorted_runs_multiple() {
         // Run 1: [1, 4, 7]
         // Run 2: [2, 5, 8]

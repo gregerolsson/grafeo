@@ -665,6 +665,8 @@ impl_algorithm! {
         let mut result = AlgorithmResult::new(vec!["node_id".to_string()]);
 
         for node in points {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![Value::Int64(node.0 as i64)]);
         }
 
@@ -693,6 +695,8 @@ impl_algorithm! {
         let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 
         for (src, dst) in bridge_list {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
         }
 
@@ -732,12 +736,14 @@ impl GraphAlgorithm for KCoreAlgorithm {
         kcore_params()
     }
 
+    // reason: node IDs and core numbers are bounded by graph size
+    #[allow(clippy::cast_possible_wrap)]
     fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
         let decomposition = kcore_decomposition(store);
 
         if let Some(k) = params.get_int("k") {
             // Return nodes in the k-core
-            let k_core_nodes = decomposition.k_core(k as usize);
+            let k_core_nodes = decomposition.k_core(usize::try_from(k).unwrap_or(0));
 
             let mut result =
                 AlgorithmResult::new(vec!["node_id".to_string(), "in_k_core".to_string()]);
@@ -801,12 +807,14 @@ impl GraphAlgorithm for KTrussAlgorithm {
         ktruss_params()
     }
 
+    // reason: node IDs and truss numbers are bounded by graph size
+    #[allow(clippy::cast_possible_wrap)]
     fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
         let decomposition = ktruss_decomposition(store);
 
         if let Some(k) = params.get_int("k") {
             // Return edges in the k-truss
-            let edges = decomposition.k_truss(k as usize);
+            let edges = decomposition.k_truss(usize::try_from(k).unwrap_or(0));
 
             let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 

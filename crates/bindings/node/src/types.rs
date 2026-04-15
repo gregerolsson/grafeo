@@ -36,6 +36,8 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
             let n: f64 = val.coerce_to_number()?.get_double()?;
             // If the number is an integer within safe range, store as Int64
             if n.fract() == 0.0 && n.abs() < (1i64 << 53) as f64 {
+                // reason: Value is a whole number in (-2^53, 2^53), fits in i64
+                #[allow(clippy::cast_possible_truncation)]
                 Ok(Value::Int64(n as i64))
             } else {
                 Ok(Value::Float64(n))
@@ -53,6 +55,8 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
             } else {
                 bigint.words[0]
             };
+            // reason: BigInt word represents a value that fits i64 (single u64 word)
+            #[allow(clippy::cast_possible_wrap)]
             let signed = if bigint.sign_bit {
                 -(word as i64)
             } else {
@@ -96,6 +100,8 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         // SAFETY: obj.is_date() returned true, and env/obj are valid in this scope
         let date: JsDate = unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
         let ms = date.value_of()?;
+        // reason: JS Date.valueOf() returns ms since epoch; *1000 gives microseconds, fits in i64
+        #[allow(clippy::cast_possible_truncation)]
         let micros = (ms * 1000.0) as i64;
         return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
     }
@@ -179,6 +185,8 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             for (i, item) in items.iter().enumerate() {
                 let val = value_to_napi(env, item)?;
                 // SAFETY: env, arr, and val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements, so index fits u32
+                #[allow(clippy::cast_possible_truncation)]
                 check_napi(unsafe { sys::napi_set_element(env, arr, i as u32, val) })?;
             }
             Ok(arr)
@@ -245,6 +253,8 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             for (i, node) in nodes.iter().enumerate() {
                 let val = value_to_napi(env, node)?;
                 // SAFETY: env, nodes_arr, and val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements
+                #[allow(clippy::cast_possible_truncation)]
                 check_napi(unsafe { sys::napi_set_element(env, nodes_arr, i as u32, val) })?;
             }
 
@@ -257,6 +267,8 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             for (i, edge) in edges.iter().enumerate() {
                 let val = value_to_napi(env, edge)?;
                 // SAFETY: env, edges_arr, and val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements
+                #[allow(clippy::cast_possible_truncation)]
                 check_napi(unsafe { sys::napi_set_element(env, edges_arr, i as u32, val) })?;
             }
 
@@ -312,7 +324,11 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             let mut obj = std::ptr::null_mut();
             // SAFETY: env is valid; napi_create_object writes to our out-pointer
             check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
+            // reason: individual CRDT counter values are small, sum fits i64
+            #[allow(clippy::cast_possible_wrap)]
             let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
+            // reason: individual CRDT counter values are small, sum fits i64
+            #[allow(clippy::cast_possible_wrap)]
             let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
             let pncounter_key =
                 CString::new("$pncounter").expect("static string has no null bytes");

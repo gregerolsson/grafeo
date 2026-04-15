@@ -364,8 +364,11 @@ impl<'a> Lexer<'a> {
         }
 
         if is_float {
-            match value.parse() {
-                Ok(f) => TokenKind::Float(f),
+            match value.parse::<f64>() {
+                Ok(f) if f.is_finite() => TokenKind::Float(f),
+                Ok(_) => TokenKind::Error(format!(
+                    "Float literal '{value}' overflows to a non-finite value"
+                )),
                 Err(_) => TokenKind::Error(format!("Invalid float literal: '{value}'")),
             }
         } else {
@@ -537,5 +540,41 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::LBrace);
         assert_eq!(tokens[1].kind, TokenKind::Name("user".to_string()));
         assert_eq!(tokens[2].kind, TokenKind::RBrace);
+    }
+
+    #[test]
+    fn test_float_overflow_rejected() {
+        // Positive overflow
+        let mut lexer = Lexer::new("1e999");
+        let token = lexer.next_token();
+        assert!(
+            matches!(token.kind, TokenKind::Error(ref msg) if msg.contains("non-finite")),
+            "Expected non-finite error for 1e999, got {:?}",
+            token.kind
+        );
+
+        // Negative overflow
+        let mut lexer = Lexer::new("-1e999");
+        let token = lexer.next_token();
+        assert!(
+            matches!(token.kind, TokenKind::Error(ref msg) if msg.contains("non-finite")),
+            "Expected non-finite error for -1e999, got {:?}",
+            token.kind
+        );
+    }
+
+    #[test]
+    fn test_valid_float_accepted() {
+        let mut lexer = Lexer::new("2.72");
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::Float(2.72));
+
+        let mut lexer = Lexer::new("1e10");
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::Float(1e10));
+
+        let mut lexer = Lexer::new("-2.5e3");
+        let token = lexer.next_token();
+        assert_eq!(token.kind, TokenKind::Float(-2.5e3));
     }
 }

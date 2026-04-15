@@ -453,8 +453,10 @@ fn edge_to_map(edge: &Edge) -> Value {
     // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let edge_id_i64 = edge.id.as_u64() as i64;
+    // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let src_id_i64 = edge.src.as_u64() as i64;
+    // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let dst_id_i64 = edge.dst.as_u64() as i64;
     map.insert(PropertyKey::new("_id"), Value::Int64(edge_id_i64));
@@ -683,6 +685,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_project_node_resolve() {
         // Create a store with a test node
         let store = LpgStore::new().unwrap();
@@ -729,6 +733,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_project_edge_resolve() {
         let store = LpgStore::new().unwrap();
         let src = store.create_node(&["Person"]);

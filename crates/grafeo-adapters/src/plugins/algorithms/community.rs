@@ -724,7 +724,7 @@ impl_algorithm! {
     description: "Label Propagation community detection",
     params: label_prop_params,
     execute(store, params) {
-        let max_iter = params.get_int("max_iterations").unwrap_or(100) as usize;
+        let max_iter = usize::try_from(params.get_int("max_iterations").unwrap_or(100)).unwrap_or(0);
 
         let communities = label_propagation(store, max_iter);
 
@@ -772,6 +772,8 @@ impl_algorithm! {
         ]);
 
         for (node, community_id) in result.communities {
+            // reason: Node/community IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Int64(community_id as i64),
@@ -817,8 +819,8 @@ impl_algorithm! {
     description: "Stochastic Block Model community detection (MDL minimization)",
     params: sbp_params,
     execute(store, params) {
-        let num_blocks = params.get_int("num_blocks").map(|v| v as usize);
-        let max_iter = params.get_int("max_iterations").unwrap_or(100) as usize;
+        let num_blocks = params.get_int("num_blocks").map(|v| usize::try_from(v).unwrap_or(0));
+        let max_iter = usize::try_from(params.get_int("max_iterations").unwrap_or(100)).unwrap_or(0);
 
         let result = stochastic_block_partition(store, num_blocks, max_iter);
 
@@ -829,6 +831,8 @@ impl_algorithm! {
         ]);
 
         for (node, block_id) in &result.partition {
+            // reason: Node/block IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Int64(*block_id as i64),

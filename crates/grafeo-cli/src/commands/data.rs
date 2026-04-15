@@ -220,6 +220,8 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
         .iter()
         .map(|node| {
             let mut row = Vec::with_capacity(node_columns.len());
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             row.push(Value::Int64(node.id.0 as i64));
             let labels_str: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             row.push(Value::String(labels_str.join(",").into()));
@@ -259,9 +261,13 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
         .iter()
         .map(|edge| {
             let mut row = Vec::with_capacity(edge_columns.len());
-            row.push(Value::Int64(edge.id.0 as i64));
-            row.push(Value::Int64(edge.src.0 as i64));
-            row.push(Value::Int64(edge.dst.0 as i64));
+            // reason: Node/edge IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                row.push(Value::Int64(edge.id.0 as i64));
+                row.push(Value::Int64(edge.src.0 as i64));
+                row.push(Value::Int64(edge.dst.0 as i64));
+            }
             row.push(Value::String(edge.edge_type.clone()));
             for key in &edge_prop_keys {
                 row.push(edge.properties.get(key).cloned().unwrap_or(Value::Null));
@@ -296,9 +302,13 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
         .map_err(|e| anyhow::anyhow!("Arrow IPC serialization failed: {e}"))?;
 
     // Write a simple container: 4-byte length prefix for each stream
-    file_writer.write_all(&(node_ipc.len() as u32).to_le_bytes())?;
+    let node_len = u32::try_from(node_ipc.len())
+        .map_err(|_| anyhow::anyhow!("Node IPC stream exceeds 4 GiB limit"))?;
+    let edge_len = u32::try_from(edge_ipc.len())
+        .map_err(|_| anyhow::anyhow!("Edge IPC stream exceeds 4 GiB limit"))?;
+    file_writer.write_all(&node_len.to_le_bytes())?;
     file_writer.write_all(&node_ipc)?;
-    file_writer.write_all(&(edge_ipc.len() as u32).to_le_bytes())?;
+    file_writer.write_all(&edge_len.to_le_bytes())?;
     file_writer.write_all(&edge_ipc)?;
     file_writer.flush()?;
 

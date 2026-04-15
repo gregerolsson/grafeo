@@ -15,7 +15,7 @@ use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::components::UnionFind;
-use super::traits::{MinScored, impl_algorithm};
+use super::traits::{MinScored, impl_algorithm, node_id_from_param};
 
 // ============================================================================
 // Edge Weight Extraction
@@ -313,6 +313,8 @@ impl_algorithm! {
         ]);
 
         for (src, dst, _edge_id, weight) in result.edges {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(src.0 as i64),
                 Value::Int64(dst.0 as i64),
@@ -359,7 +361,7 @@ impl_algorithm! {
     params: prim_params,
     execute(store, params) {
         let weight_prop = params.get_string("weight");
-        let start = params.get_int("start").map(|id| NodeId::new(id as u64));
+        let start = params.get_int("start").map(|id| node_id_from_param(id, "start")).transpose()?;
 
         let result = prim(store, weight_prop, start);
 
@@ -371,6 +373,8 @@ impl_algorithm! {
         ]);
 
         for (src, dst, _edge_id, weight) in result.edges {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(src.0 as i64),
                 Value::Int64(dst.0 as i64),

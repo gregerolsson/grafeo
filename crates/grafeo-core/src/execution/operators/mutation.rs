@@ -1686,6 +1686,8 @@ mod tests {
         }
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn node_id_chunk(ids: &[NodeId]) -> DataChunk {
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         for id in ids {
@@ -1695,6 +1697,8 @@ mod tests {
         builder.finish()
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn edge_id_chunk(ids: &[EdgeId]) -> DataChunk {
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         for id in ids {
@@ -1732,6 +1736,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_create_edge() {
         let store = create_test_store();
 
@@ -2007,6 +2013,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_set_node_property_from_column() {
         let store = create_test_store();
 
@@ -2190,6 +2198,8 @@ mod tests {
     // ── CreateEdgeOperator with properties and output column ────
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     fn test_create_edge_with_properties_and_output_column() {
         let store = create_test_store();
 
@@ -2321,6 +2331,8 @@ mod tests {
     // ── PropertySource::PropertyAccess ──────────────────────────
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_property_source_property_access() {
         let store = create_test_store();
 

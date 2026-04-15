@@ -1427,6 +1427,8 @@ impl<'a> Parser<'a> {
             "VARCHAR" => {
                 let length = if self.current.kind == TokenKind::LParen {
                     self.advance();
+                    // reason: VARCHAR length is a small literal, fits in usize on all targets
+                    #[allow(clippy::cast_possible_truncation)]
                     let len = self.parse_integer_literal()? as usize;
                     self.expect(TokenKind::RParen)?;
                     Some(len)

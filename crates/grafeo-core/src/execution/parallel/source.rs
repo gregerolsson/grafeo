@@ -371,6 +371,7 @@ impl Source for RangeSource {
         let values: Vec<Value> = (self.position..end)
             // reason: range index fits i64 for practical sizes
             .map(|i| {
+                // reason: range index fits i64 for practical sizes
                 #[allow(clippy::cast_possible_wrap)]
                 let val = Value::Int64(i as i64);
                 val
@@ -432,7 +433,9 @@ impl Source for RangePartition {
         let end = (self.position + chunk_size).min(self.end);
         let values: Vec<Value> = (self.position..end)
             // reason: range index fits i64 for practical sizes
+            // reason: range index fits i64 for practical sizes
             .map(|i| {
+                // reason: range index fits i64 for practical sizes
                 #[allow(clippy::cast_possible_wrap)]
                 let val = Value::Int64(i as i64);
                 val

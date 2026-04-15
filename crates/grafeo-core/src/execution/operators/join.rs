@@ -100,6 +100,7 @@ impl HashKey {
             // reason: date days and time nanos fit i64
             #[allow(clippy::cast_possible_wrap)]
             Value::Date(d) => HashKey::Int64(d.as_days() as i64),
+            // reason: date days and time nanos are small, fit i64
             #[allow(clippy::cast_possible_wrap)]
             Value::Time(t) => HashKey::Int64(t.as_nanos() as i64),
             Value::Duration(d) => HashKey::Composite(vec![
@@ -146,7 +147,9 @@ impl HashKey {
             Value::OnCounter { pos, neg } => {
                 // reason: CRDT counter values are practically small, wrap is acceptable for hashing
                 #[allow(clippy::cast_possible_wrap)]
+                // reason: GCounter values are small, sum fits i64
                 let p: i64 = pos.values().copied().map(|v| v as i64).sum();
+                // reason: GCounter values are small, sum fits i64
                 #[allow(clippy::cast_possible_wrap)]
                 let n: i64 = neg.values().copied().map(|v| v as i64).sum();
                 HashKey::Int64(p - n)

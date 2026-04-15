@@ -85,7 +85,11 @@ pub fn value_to_js(value: &Value) -> JsValue {
             wrapper.into()
         }
         Value::OnCounter { pos, neg } => {
+            // reason: individual CRDT counter values are small, sum fits i64
+            #[allow(clippy::cast_possible_wrap)]
             let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
+            // reason: value is a small counter, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
             let wrapper = Object::new();
             let _ = Reflect::set(

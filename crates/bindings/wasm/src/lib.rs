@@ -13,6 +13,9 @@
 //! ```
 
 #![forbid(unsafe_code)]
+// WASM target uses 32-bit usize, so usize-to-u32 casts are lossless.
+// On 64-bit (clippy host), these are flagged but the code only runs on WASM.
+#![allow(clippy::cast_possible_truncation)]
 
 mod types;
 mod utils;
@@ -1272,7 +1275,17 @@ fn json_to_node_id(
 ) -> Result<grafeo_common::types::NodeId, JsError> {
     let n = val
         .as_u64()
-        .or_else(|| val.as_f64().map(|f| f as u64))
+        .or_else(|| {
+            val.as_f64().and_then(|f| {
+                // reason: Reject negative, NaN, Infinity, fractional, and out-of-range values
+                if (0.0..=9_007_199_254_740_991.0).contains(&f) && f.fract() == 0.0 {
+                    #[allow(clippy::cast_sign_loss)]
+                    Some(f as u64)
+                } else {
+                    None
+                }
+            })
+        })
         .ok_or_else(|| {
             JsError::new(&format!(
                 "rows[{row_idx}].{col_name}: expected a non-negative integer, got {val}"

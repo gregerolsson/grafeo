@@ -143,6 +143,7 @@ impl LeapfrogJoinOperator {
                 LogicalType::Edge => col.get_edge_id(row).map(|e| NodeId::new(e.as_u64())),
                 // reason: ID encoding: i64 <-> u64 round-trip
                 LogicalType::Int64 => col.get_int64(row).map(|i| {
+                    // reason: ID encoding: i64 to u64 round-trip, negative IDs do not occur
                     #[allow(clippy::cast_sign_loss)]
                     NodeId::new(i as u64)
                 }),

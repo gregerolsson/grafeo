@@ -20,6 +20,8 @@ mod filter;
 mod limit;
 mod project;
 mod sort;
+#[cfg(feature = "spill")]
+pub(crate) mod spill_state;
 
 pub use aggregate::AggregatePushOperator;
 #[cfg(feature = "spill")]

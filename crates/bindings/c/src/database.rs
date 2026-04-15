@@ -1314,6 +1314,8 @@ pub extern "C" fn grafeo_create_vector_index(
         Ok(s) => s,
         Err(e) => return e,
     };
+    // reason: C FFI parameters are i32; the > 0 checks guarantee non-negative before widening to usize
+    #[allow(clippy::cast_sign_loss)]
     let dims = if dimensions > 0 {
         Some(dimensions as usize)
     } else {
@@ -1324,7 +1326,11 @@ pub extern "C" fn grafeo_create_vector_index(
     } else {
         str_from_ptr(metric).ok()
     };
+    // reason: value is non-negative by preceding guard check
+    #[allow(clippy::cast_sign_loss)]
     let m_val = if m > 0 { Some(m as usize) } else { None };
+    // reason: value is non-negative by preceding validation
+    #[allow(clippy::cast_sign_loss)]
     let ef_val = if ef_construction > 0 {
         Some(ef_construction as usize)
     } else {
@@ -1428,6 +1434,8 @@ pub extern "C" fn grafeo_vector_search(
     };
     // SAFETY: Caller guarantees query points to query_len f32s.
     let query_slice = unsafe { std::slice::from_raw_parts(query, query_len) };
+    // reason: C FFI: > 0 check guarantees non-negative before widening
+    #[allow(clippy::cast_sign_loss)]
     let ef_val = if ef > 0 { Some(ef as usize) } else { None };
 
     match db
@@ -1499,12 +1507,16 @@ pub extern "C" fn grafeo_mmr_search(
     };
     // SAFETY: Caller guarantees query points to query_len f32s.
     let query_slice = unsafe { std::slice::from_raw_parts(query, query_len) };
+    // reason: C FFI: > 0 check guarantees non-negative before widening
+    #[allow(clippy::cast_sign_loss)]
     let fetch_k_val = if fetch_k > 0 {
         Some(fetch_k as usize)
     } else {
         None
     };
     let lambda_val = if lambda >= 0.0 { Some(lambda) } else { None };
+    // reason: value is non-negative by preceding guard check
+    #[allow(clippy::cast_sign_loss)]
     let ef_val = if ef > 0 { Some(ef as usize) } else { None };
 
     match db.inner.read().mmr_search(

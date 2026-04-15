@@ -15,7 +15,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, MinScored, impl_algorithm};
+use super::traits::{GraphAlgorithm, MinScored, impl_algorithm, node_id_from_param};
 
 // ============================================================================
 // Edge Weight Extraction
@@ -617,17 +617,19 @@ impl GraphAlgorithm for DijkstraAlgorithm {
         dijkstra_params()
     }
 
+    // reason: node IDs are sequential counters, well within i64::MAX
+    #[allow(clippy::cast_possible_wrap)]
     fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
         let source_id = params
             .get_int("source")
             .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
 
-        let source = NodeId::new(source_id as u64);
+        let source = node_id_from_param(source_id, "source")?;
         let weight_prop = params.get_string("weight");
 
         if let Some(target_id) = params.get_int("target") {
             // Single-pair shortest path
-            let target = NodeId::new(target_id as u64);
+            let target = node_id_from_param(target_id, "target")?;
             match dijkstra_path(store, source, target, weight_prop) {
                 Some((distance, path)) => {
                     let mut result = AlgorithmResult::new(vec![
@@ -759,6 +761,8 @@ impl GraphAlgorithm for SsspAlgorithm {
         let mut result = AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
 
         for (node, distance) in dijkstra_result.distances {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![Value::Int64(node.0 as i64), Value::Float64(distance)]);
         }
 
@@ -803,7 +807,7 @@ impl_algorithm! {
             .get_int("source")
             .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
 
-        let source = NodeId::new(source_id as u64);
+        let source = node_id_from_param(source_id, "source")?;
         let weight_prop = params.get_string("weight");
 
         let bf_result = bellman_ford(store, source, weight_prop);
@@ -815,6 +819,8 @@ impl_algorithm! {
         ]);
 
         for (node, distance) in bf_result.distances {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Float64(distance),
@@ -865,6 +871,8 @@ impl_algorithm! {
             for (j, &to_node) in fw_result.index_to_node.iter().enumerate() {
                 let dist = fw_result.distances[i][j];
                 if dist < f64::INFINITY {
+                    // reason: Node IDs are sequential counters, well within i64::MAX
+                    #[allow(clippy::cast_possible_wrap)]
                     result.add_row(vec![
                         Value::Int64(from_node.0 as i64),
                         Value::Int64(to_node.0 as i64),

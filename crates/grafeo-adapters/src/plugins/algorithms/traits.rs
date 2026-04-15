@@ -4,12 +4,21 @@
 //! high-performance graph algorithms, inspired by rustworkx patterns.
 
 use grafeo_common::types::{EdgeId, NodeId, Value};
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::GraphStore;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
+
+/// Safely converts a user-supplied `i64` parameter into a [`NodeId`].
+///
+/// Returns an error if the value is negative, since node IDs are unsigned.
+pub fn node_id_from_param(value: i64, param_name: &str) -> Result<NodeId> {
+    u64::try_from(value)
+        .map(NodeId::new)
+        .map_err(|_| Error::InvalidValue(format!("{param_name} must be non-negative, got {value}")))
+}
 
 // ============================================================================
 // Control Flow
@@ -393,6 +402,8 @@ impl NodeValueResultBuilder {
     pub fn build(self) -> AlgorithmResult {
         let mut result = AlgorithmResult::new(vec!["node_id".to_string(), self.value_column_name]);
         for (node_id, value) in self.node_ids.into_iter().zip(self.values) {
+            // reason: node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![Value::Int64(node_id as i64), value]);
         }
         result
@@ -433,6 +444,8 @@ impl ComponentResultBuilder {
         let mut result =
             AlgorithmResult::new(vec!["node_id".to_string(), "component_id".to_string()]);
         for (node_id, component_id) in self.node_ids.into_iter().zip(self.component_ids) {
+            // reason: node/component IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![
                 Value::Int64(node_id as i64),
                 Value::Int64(component_id as i64),

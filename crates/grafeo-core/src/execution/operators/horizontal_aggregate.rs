@@ -204,6 +204,8 @@ mod tests {
         }
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn setup_store_with_edges() -> (Arc<dyn GraphStore>, Vec<Value>) {
         let store = LpgStore::new().unwrap();
         let n1 = store.create_node(&[]);
@@ -225,6 +227,8 @@ mod tests {
         (Arc::new(store), edge_ids)
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn setup_store_with_nodes() -> (Arc<dyn GraphStore>, Vec<Value>) {
         let store = LpgStore::new().unwrap();
         // Use Float64 properties since the result column is Float64-typed

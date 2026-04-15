@@ -329,6 +329,13 @@ impl PushOperator for AggregatePushOperator {
 #[cfg(feature = "spill")]
 pub const DEFAULT_AGGREGATE_SPILL_THRESHOLD: usize = 50_000;
 
+/// Minimum number of groups before memory-pressure spilling can trigger.
+///
+/// Prevents "noisy neighbor" scenarios where a tiny aggregate buffer gets
+/// spilled because unrelated subsystems consumed memory.
+#[cfg(feature = "spill")]
+const AGGREGATE_MIN_BUFFER_GROUPS: usize = 500;
+
 /// Tag bytes for aggregate state variants used during spill serialization.
 ///
 /// Each tag identifies both the aggregate function AND how to reconstruct
@@ -563,13 +570,22 @@ fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
 ///
 /// Uses partitioned hash table that can spill cold partitions to disk
 /// when memory pressure is high.
+///
+/// Two spill modes are supported:
+///
+/// 1. **Memory-aware** (when constructed with `with_memory_context`): registers
+///    as a `MemoryConsumer` with the `BufferManager` and spills when system
+///    pressure is High/Critical or when eviction is explicitly requested.
+///
+/// 2. **Row-count fallback** (when constructed with `new` or `with_spilling`):
+///    spills when `groups.len() >= spill_threshold` (default 50K groups).
 #[cfg(feature = "spill")]
 pub struct SpillableAggregatePushOperator {
     /// Columns to group by.
     group_by: Vec<usize>,
     /// Aggregate expressions.
     aggregates: Vec<AggregateExpr>,
-    /// Spill manager (None = no spilling).
+    /// Spill manager (None = no spilling, used by row-count fallback mode).
     spill_manager: Option<Arc<SpillManager>>,
     /// Partitioned groups (used when spilling is enabled).
     partitioned_groups: Option<PartitionedState<GroupState>>,
@@ -577,15 +593,21 @@ pub struct SpillableAggregatePushOperator {
     groups: HashMap<GroupKey, GroupState>,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
-    /// Spill threshold (number of groups).
+    /// Spill threshold (number of groups, used by fallback mode).
     spill_threshold: usize,
     /// Whether we've switched to partitioned mode.
     using_partitioned: bool,
+    /// Memory context for pressure-aware spilling.
+    memory_ctx: Option<crate::execution::memory::OperatorMemoryContext>,
+    /// Shared state with the registered MemoryConsumer adapter.
+    spill_state: Option<std::sync::Arc<super::spill_state::OperatorSpillState>>,
+    /// Running total of estimated group memory in bytes (incremental tracking).
+    estimated_bytes: usize,
 }
 
 #[cfg(feature = "spill")]
 impl SpillableAggregatePushOperator {
-    /// Create a new spillable aggregate operator.
+    /// Create a new spillable aggregate operator (row-count fallback mode).
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
         let global_state = if group_by.is_empty() {
             Some(aggregates.iter().map(state_for_expr).collect())
@@ -602,10 +624,13 @@ impl SpillableAggregatePushOperator {
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
+            memory_ctx: None,
+            spill_state: None,
+            estimated_bytes: 0,
         }
     }
 
-    /// Create a spillable aggregate operator with spilling enabled.
+    /// Create a spillable aggregate operator with spilling enabled (row-count mode).
     pub fn with_spilling(
         group_by: Vec<usize>,
         aggregates: Vec<AggregateExpr>,
@@ -634,6 +659,56 @@ impl SpillableAggregatePushOperator {
             global_state,
             spill_threshold: threshold,
             using_partitioned: true,
+            memory_ctx: None,
+            spill_state: None,
+            estimated_bytes: 0,
+        }
+    }
+
+    /// Create a spillable aggregate operator with memory-aware spilling.
+    ///
+    /// Registers as a `MemoryConsumer` with the `BufferManager` and spills
+    /// based on system memory pressure rather than group count thresholds.
+    pub fn with_memory_context(
+        group_by: Vec<usize>,
+        aggregates: Vec<AggregateExpr>,
+        ctx: crate::execution::memory::OperatorMemoryContext,
+    ) -> Self {
+        use super::spill_state::{OperatorConsumerAdapter, OperatorSpillState};
+
+        let global_state = if group_by.is_empty() {
+            Some(aggregates.iter().map(state_for_expr).collect())
+        } else {
+            None
+        };
+
+        let state = std::sync::Arc::new(OperatorSpillState::new(
+            "SpillableAggregatePush".to_string(),
+        ));
+        let adapter =
+            std::sync::Arc::new(OperatorConsumerAdapter::new(std::sync::Arc::clone(&state)));
+        ctx.register_consumer(adapter);
+
+        // Pre-create partitioned state using the spill manager from memory context
+        let partitioned = PartitionedState::new(
+            std::sync::Arc::clone(ctx.spill_manager()),
+            256,
+            serialize_group_state,
+            deserialize_group_state,
+        );
+
+        Self {
+            group_by,
+            aggregates,
+            spill_manager: None,
+            partitioned_groups: Some(partitioned),
+            groups: HashMap::new(),
+            global_state,
+            spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
+            using_partitioned: true,
+            memory_ctx: Some(ctx),
+            spill_state: Some(state),
+            estimated_bytes: 0,
         }
     }
 
@@ -642,19 +717,58 @@ impl SpillableAggregatePushOperator {
         Self::new(Vec::new(), aggregates)
     }
 
-    /// Sets the spill threshold.
+    /// Sets the spill threshold (row-count fallback mode).
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.spill_threshold = threshold;
         self
     }
 
-    /// Switches to partitioned mode if needed.
+    /// Checks whether spilling should occur and performs it if needed.
     fn maybe_spill(&mut self) -> Result<(), OperatorError> {
         if self.global_state.is_some() {
             // Global aggregation doesn't need spilling
             return Ok(());
         }
 
+        if self.spill_state.is_some() {
+            // Memory-aware mode
+            self.maybe_spill_memory_aware()
+        } else {
+            // Row-count fallback mode
+            self.maybe_spill_row_count()
+        }
+    }
+
+    /// Memory-aware spill decision: check eviction flag and system pressure.
+    fn maybe_spill_memory_aware(&mut self) -> Result<(), OperatorError> {
+        let should_spill = if let Some(ref state) = self.spill_state {
+            let eviction = state.take_eviction_request().is_some();
+            let pressure = self.memory_ctx.as_ref().map_or(false, |c| c.should_spill());
+
+            // Determine current group count for minimum buffer guard
+            let group_count = if let Some(ref partitioned) = self.partitioned_groups {
+                partitioned.total_size()
+            } else {
+                self.groups.len()
+            };
+            let above_minimum = group_count >= AGGREGATE_MIN_BUFFER_GROUPS;
+
+            (eviction || pressure) && above_minimum
+        } else {
+            false
+        };
+
+        if should_spill && let Some(ref mut partitioned) = self.partitioned_groups {
+            partitioned
+                .spill_largest()
+                .map_err(|e| OperatorError::Execution(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Row-count fallback spill decision.
+    fn maybe_spill_row_count(&mut self) -> Result<(), OperatorError> {
         // If using partitioned state, check if we need to spill
         if let Some(ref mut partitioned) = self.partitioned_groups {
             if partitioned.total_size() >= self.spill_threshold {
@@ -686,6 +800,13 @@ impl SpillableAggregatePushOperator {
         }
 
         Ok(())
+    }
+
+    /// Unregisters this operator's consumer from the BufferManager.
+    fn unregister_consumer(&self) {
+        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
+            ctx.unregister_consumer(state.name());
+        }
     }
 }
 
@@ -758,6 +879,23 @@ impl PushOperator for SpillableAggregatePushOperator {
             }
         }
 
+        // Update memory consumer usage estimate
+        if let Some(ref spill_state) = self.spill_state {
+            // Estimate: each group has key_values + accumulators
+            // Rough sizing: key columns * Value size + num_aggregates * 64 bytes per accumulator
+            let group_count = if self.using_partitioned {
+                self.partitioned_groups
+                    .as_ref()
+                    .map_or(0, |p| p.total_size())
+            } else {
+                self.groups.len()
+            };
+            let key_size = self.group_by.len() * std::mem::size_of::<Value>();
+            let acc_size = self.aggregates.len() * 64; // rough accumulator size
+            self.estimated_bytes = group_count * (key_size + acc_size + 48);
+            spill_state.set_usage(self.estimated_bytes);
+        }
+
         // Check if we need to spill
         self.maybe_spill()?;
 
@@ -809,6 +947,9 @@ impl PushOperator for SpillableAggregatePushOperator {
                 }
             }
         }
+
+        // Unregister consumer before emitting results
+        self.unregister_consumer();
 
         if !columns.is_empty() && !columns[0].is_empty() {
             let chunk = DataChunk::new(columns);

@@ -599,13 +599,16 @@ impl Operator for VariableLengthExpandOperator {
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        // reason: entity IDs stored as i64, standard encoding
                         .map(|id| {
-                            #[allow(clippy::cast_possible_wrap)]
-                            let val = grafeo_common::types::Value::Int64(id.0 as i64);
-                            val
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "NodeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     col.push_value(grafeo_common::types::Value::List(nodes_list.into()));
                 }
 
@@ -616,13 +619,16 @@ impl Operator for VariableLengthExpandOperator {
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        // reason: entity IDs stored as i64, standard encoding
                         .map(|id| {
-                            #[allow(clippy::cast_possible_wrap)]
-                            let val = grafeo_common::types::Value::Int64(id.0 as i64);
-                            val
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "EdgeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     col.push_value(grafeo_common::types::Value::List(edges_list.into()));
                 }
 
@@ -633,25 +639,31 @@ impl Operator for VariableLengthExpandOperator {
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        // reason: entity IDs stored as i64, standard encoding
                         .map(|id| {
-                            #[allow(clippy::cast_possible_wrap)]
-                            let val = grafeo_common::types::Value::Int64(id.0 as i64);
-                            val
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "NodeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     let edges: Vec<grafeo_common::types::Value> = out_row
                         .path_edges
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        // reason: entity IDs stored as i64, standard encoding
                         .map(|id| {
-                            #[allow(clippy::cast_possible_wrap)]
-                            let val = grafeo_common::types::Value::Int64(id.0 as i64);
-                            val
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "EdgeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     col.push_value(grafeo_common::types::Value::Path {
                         nodes: nodes.into(),
                         edges: edges.into(),

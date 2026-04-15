@@ -16,20 +16,60 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Extracts a required integer field from a temporal constructor map.
+///
+/// Returns `Some(value)` when the key is present and holds a valid integer
+/// (or a finite float that can be truncated to i64). Returns `None` when
+/// the key is absent. Rejects non-finite floats (NaN, Infinity) by
+/// returning `Some(None)` through `map_int_checked`, which lets callers
+/// distinguish "missing" from "invalid".
 fn map_int(m: &BTreeMap<PropertyKey, Value>, key: &str) -> Option<i64> {
-    match m.get(&PropertyKey::from(key))? {
-        Value::Int64(v) => Some(*v),
-        // reason: intentional truncation of float to integer for temporal field extraction
-        #[allow(clippy::cast_possible_truncation)]
-        Value::Float64(f) => Some(*f as i64),
-        _ => None,
+    match map_int_checked(m, key) {
+        MapIntResult::Absent => None,
+        MapIntResult::Valid(v) => Some(v),
+        // Invalid floats (NaN, Infinity): treat as missing so callers
+        // that use map_int for required fields will fail with None.
+        MapIntResult::Invalid => None,
+    }
+}
+
+/// Result of extracting an integer field, distinguishing absent from invalid.
+enum MapIntResult {
+    /// Key was not present in the map.
+    Absent,
+    /// Key was present with a valid integer value.
+    Valid(i64),
+    /// Key was present but the value is not convertible (NaN, Infinity, wrong type).
+    Invalid,
+}
+
+/// Extracts an integer field with three-way result: absent, valid, or invalid.
+fn map_int_checked(m: &BTreeMap<PropertyKey, Value>, key: &str) -> MapIntResult {
+    match m.get(&PropertyKey::from(key)) {
+        None => MapIntResult::Absent,
+        Some(Value::Int64(v)) => MapIntResult::Valid(*v),
+        Some(Value::Float64(f)) => {
+            let f = *f;
+            if f.is_nan() || f.is_infinite() || f > i64::MAX as f64 || f < i64::MIN as f64 {
+                MapIntResult::Invalid
+            } else {
+                // reason: intentional truncation of finite float to integer for temporal field extraction
+                #[allow(clippy::cast_possible_truncation)]
+                MapIntResult::Valid(f as i64)
+            }
+        }
+        Some(_) => MapIntResult::Invalid,
     }
 }
 
 /// Extracts an optional integer field from a temporal constructor map,
-/// returning a default value when the key is absent.
-fn map_int_or(m: &BTreeMap<PropertyKey, Value>, key: &str, default: i64) -> i64 {
-    map_int(m, key).unwrap_or(default)
+/// returning a default value when the key is absent. Returns `None` when
+/// the key is present but holds an invalid value (NaN, Infinity).
+fn map_int_or(m: &BTreeMap<PropertyKey, Value>, key: &str, default: i64) -> Option<i64> {
+    match map_int_checked(m, key) {
+        MapIntResult::Absent => Some(default),
+        MapIntResult::Valid(v) => Some(v),
+        MapIntResult::Invalid => None,
+    }
 }
 
 /// A predicate for filtering rows.
@@ -801,6 +841,7 @@ impl ExpressionPredicate {
                     col.get_edge_id(row)
                         // reason: entity IDs stored as i64 values, standard encoding
                         .map(|edge_id| {
+                            // reason: entity IDs are sequential counters, well within i64::MAX
                             #[allow(clippy::cast_possible_wrap)]
                             let val = Value::Int64(edge_id.0 as i64);
                             val
@@ -2018,8 +2059,10 @@ impl ExpressionPredicate {
                     // reason: collection lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::List(items) => Some(Value::Int64(items.len() as i64)),
+                    // reason: string lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::String(s) => Some(Value::Int64(s.len() as i64)),
+                    // reason: path lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::Path { edges, .. } => Some(Value::Int64(edges.len() as i64)),
                     _ => None,
@@ -2914,13 +2957,9 @@ impl ExpressionPredicate {
                     Value::Timestamp(ts) => Some(Value::Date(ts.to_date())),
                     Value::Date(_) => Some(val),
                     Value::Map(m) => {
-                        // reason: temporal field values from user queries are in valid ranges
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let year = map_int(&m, "year")? as i32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let month = map_int_or(&m, "month", 1) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let day = map_int_or(&m, "day", 1) as u32;
+                        let year = i32::try_from(map_int(&m, "year")?).ok()?;
+                        let month = u32::try_from(map_int_or(&m, "month", 1)?).ok()?;
+                        let day = u32::try_from(map_int_or(&m, "day", 1)?).ok()?;
                         grafeo_common::types::Date::from_ymd(year, month, day).map(Value::Date)
                     }
                     _ => None,
@@ -2936,15 +2975,10 @@ impl ExpressionPredicate {
                     Value::Timestamp(ts) => Some(Value::Time(ts.to_time())),
                     Value::Time(_) => Some(val),
                     Value::Map(m) => {
-                        // reason: temporal field values from user queries are in valid ranges
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let hour = map_int_or(&m, "hour", 0) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let minute = map_int_or(&m, "minute", 0) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let second = map_int_or(&m, "second", 0) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let nanosecond = map_int_or(&m, "nanosecond", 0) as u32;
+                        let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
+                        let minute = u32::try_from(map_int_or(&m, "minute", 0)?).ok()?;
+                        let second = u32::try_from(map_int_or(&m, "second", 0)?).ok()?;
+                        let nanosecond = u32::try_from(map_int_or(&m, "nanosecond", 0)?).ok()?;
                         grafeo_common::types::Time::from_hms_nano(hour, minute, second, nanosecond)
                             .map(Value::Time)
                     }
@@ -2979,21 +3013,13 @@ impl ExpressionPredicate {
                     }
                     Value::Timestamp(_) => Some(val),
                     Value::Map(m) => {
-                        // reason: temporal field values from user queries are in valid ranges
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let year = map_int(&m, "year")? as i32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let month = map_int_or(&m, "month", 1) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let day = map_int_or(&m, "day", 1) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let hour = map_int_or(&m, "hour", 0) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let minute = map_int_or(&m, "minute", 0) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let second = map_int_or(&m, "second", 0) as u32;
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let nanosecond = map_int_or(&m, "nanosecond", 0) as u32;
+                        let year = i32::try_from(map_int(&m, "year")?).ok()?;
+                        let month = u32::try_from(map_int_or(&m, "month", 1)?).ok()?;
+                        let day = u32::try_from(map_int_or(&m, "day", 1)?).ok()?;
+                        let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
+                        let minute = u32::try_from(map_int_or(&m, "minute", 0)?).ok()?;
+                        let second = u32::try_from(map_int_or(&m, "second", 0)?).ok()?;
+                        let nanosecond = u32::try_from(map_int_or(&m, "nanosecond", 0)?).ok()?;
                         let date = grafeo_common::types::Date::from_ymd(year, month, day)?;
                         let time = grafeo_common::types::Time::from_hms_nano(
                             hour, minute, second, nanosecond,
@@ -3016,14 +3042,14 @@ impl ExpressionPredicate {
                     }
                     Value::Duration(_) => Some(val),
                     Value::Map(m) => {
-                        let years = map_int_or(&m, "years", 0);
-                        let months = map_int_or(&m, "months", 0);
-                        let weeks = map_int_or(&m, "weeks", 0);
-                        let days = map_int_or(&m, "days", 0);
-                        let hours = map_int_or(&m, "hours", 0);
-                        let minutes = map_int_or(&m, "minutes", 0);
-                        let seconds = map_int_or(&m, "seconds", 0);
-                        let nanoseconds = map_int_or(&m, "nanoseconds", 0);
+                        let years = map_int_or(&m, "years", 0)?;
+                        let months = map_int_or(&m, "months", 0)?;
+                        let weeks = map_int_or(&m, "weeks", 0)?;
+                        let days = map_int_or(&m, "days", 0)?;
+                        let hours = map_int_or(&m, "hours", 0)?;
+                        let minutes = map_int_or(&m, "minutes", 0)?;
+                        let seconds = map_int_or(&m, "seconds", 0)?;
+                        let nanoseconds = map_int_or(&m, "nanoseconds", 0)?;
                         let total_months = years * 12 + months;
                         let total_days = weeks * 7 + days;
                         let total_nanos = hours * 3_600_000_000_000

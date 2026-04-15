@@ -15,7 +15,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::impl_algorithm;
+use super::traits::{impl_algorithm, node_id_from_param};
 
 // ============================================================================
 // Property Extraction
@@ -446,8 +446,8 @@ impl_algorithm! {
             .get_int("sink")
             .ok_or_else(|| Error::InvalidValue("sink parameter required".to_string()))?;
 
-        let source = NodeId::new(source_id as u64);
-        let sink = NodeId::new(sink_id as u64);
+        let source = node_id_from_param(source_id, "source")?;
+        let sink = node_id_from_param(sink_id, "sink")?;
         let capacity_prop = params.get_string("capacity");
 
         let result = max_flow(store, source, sink, capacity_prop)
@@ -461,6 +461,8 @@ impl_algorithm! {
         ]);
 
         for (src, dst, flow) in result.flow_edges {
+            // reason: node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(src.0 as i64),
                 Value::Int64(dst.0 as i64),
@@ -537,8 +539,8 @@ impl_algorithm! {
             .get_int("sink")
             .ok_or_else(|| Error::InvalidValue("sink parameter required".to_string()))?;
 
-        let source = NodeId::new(source_id as u64);
-        let sink = NodeId::new(sink_id as u64);
+        let source = node_id_from_param(source_id, "source")?;
+        let sink = node_id_from_param(sink_id, "sink")?;
         let capacity_prop = params.get_string("capacity");
         let cost_prop = params.get_string("cost");
 
@@ -555,6 +557,8 @@ impl_algorithm! {
         ]);
 
         for (src, dst, flow, cost) in result.flow_edges {
+            // reason: node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(src.0 as i64),
                 Value::Int64(dst.0 as i64),

@@ -14,7 +14,9 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{Control, NodeValueResultBuilder, TraversalEvent, impl_algorithm};
+use super::traits::{
+    Control, NodeValueResultBuilder, TraversalEvent, impl_algorithm, node_id_from_param,
+};
 
 // ============================================================================
 // BFS Implementation
@@ -391,13 +393,15 @@ impl_algorithm! {
             grafeo_common::utils::error::Error::InvalidValue("start parameter required".to_string())
         })?;
 
-        let start = NodeId::new(start_id as u64);
+        let start = node_id_from_param(start_id, "start")?;
         let layers = bfs_layers(store, start);
 
         let mut result = AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
 
         for (distance, layer) in layers.iter().enumerate() {
             for &node in layer {
+                // reason: Node IDs and BFS distances are small, well within i64::MAX
+                #[allow(clippy::cast_possible_wrap)]
                 result.add_row(vec![
                     Value::Int64(node.0 as i64),
                     Value::Int64(distance as i64),
@@ -437,11 +441,13 @@ impl_algorithm! {
             grafeo_common::utils::error::Error::InvalidValue("start parameter required".to_string())
         })?;
 
-        let start = NodeId::new(start_id as u64);
+        let start = node_id_from_param(start_id, "start")?;
         let finished = dfs(store, start);
 
         let mut builder = NodeValueResultBuilder::with_capacity("finish_order", finished.len());
         for (order, node) in finished.iter().enumerate() {
+            // reason: DFS finish order is bounded by node count, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             builder.push(*node, Value::Int64(order as i64));
         }
 

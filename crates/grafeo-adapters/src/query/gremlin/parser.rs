@@ -572,7 +572,8 @@ impl<'a> Parser<'a> {
                 "{context}() requires a non-negative integer, got {n}"
             )));
         }
-        #[allow(clippy::cast_sign_loss)]
+        // reason: negative values rejected above, and i64 fits in usize on 64-bit targets
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         Ok(n as usize)
     }
 

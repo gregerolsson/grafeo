@@ -47,9 +47,16 @@ impl PyQueryResult {
     /// Get a row by index.
     fn __getitem__(&self, idx: isize, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let idx = if idx < 0 {
-            (self.rows.len() as isize + idx) as usize
+            // reason: Python negative indexing: len + negative_idx yields valid positive index,
+            // reason: out-of-range values are caught by the bounds check below
+            #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+            let resolved = (self.rows.len() as isize + idx) as usize;
+            resolved
         } else {
-            idx as usize
+            // reason: non-negative isize fits usize
+            #[allow(clippy::cast_sign_loss)]
+            let resolved = idx as usize;
+            resolved
         };
 
         if idx >= self.rows.len() {

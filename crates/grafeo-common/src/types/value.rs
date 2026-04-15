@@ -457,12 +457,13 @@ impl fmt::Debug for Value {
                 write!(f, "GCounter(total={total}, replicas={})", counts.len())
             }
             Value::OnCounter { pos, neg } => {
-                // reason: individual CRDT counter values are small, sum fits i64
-                #[allow(clippy::cast_possible_wrap)]
-                let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-                #[allow(clippy::cast_possible_wrap)]
-                let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
-                write!(f, "OnCounter(net={})", pos_sum - neg_sum)
+                let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+                let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+                if pos_sum >= neg_sum {
+                    write!(f, "OnCounter(net={})", pos_sum - neg_sum)
+                } else {
+                    write!(f, "OnCounter(net=-{})", neg_sum - pos_sum)
+                }
             }
         }
     }
@@ -534,12 +535,13 @@ impl fmt::Display for Value {
                 write!(f, "GCounter({total})")
             }
             Value::OnCounter { pos, neg } => {
-                // reason: individual CRDT counter values are small, sum fits i64
-                #[allow(clippy::cast_possible_wrap)]
-                let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-                #[allow(clippy::cast_possible_wrap)]
-                let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
-                write!(f, "OnCounter({})", pos_sum - neg_sum)
+                let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+                let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+                if pos_sum >= neg_sum {
+                    write!(f, "OnCounter({})", pos_sum - neg_sum)
+                } else {
+                    write!(f, "OnCounter(-{})", neg_sum - pos_sum)
+                }
             }
         }
     }
@@ -1843,7 +1845,7 @@ mod tests {
         assert_eq!(Value::Null.estimated_size_bytes(), 0);
         assert_eq!(Value::Bool(true).estimated_size_bytes(), 0);
         assert_eq!(Value::Int64(42).estimated_size_bytes(), 0);
-        assert_eq!(Value::Float64(3.14).estimated_size_bytes(), 0);
+        assert_eq!(Value::Float64(3.125).estimated_size_bytes(), 0);
     }
 
     #[test]

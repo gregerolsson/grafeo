@@ -430,6 +430,8 @@ impl GraphAlgorithm for TopologicalSortAlgorithm {
                 let mut result =
                     AlgorithmResult::new(vec!["node_id".to_string(), "order".to_string()]);
                 for (idx, node) in order.iter().enumerate() {
+                    // reason: Node IDs and order indices are bounded by graph size, well within i64::MAX
+                    #[allow(clippy::cast_possible_wrap)]
                     result.add_row(vec![Value::Int64(node.0 as i64), Value::Int64(idx as i64)]);
                 }
                 Ok(result)

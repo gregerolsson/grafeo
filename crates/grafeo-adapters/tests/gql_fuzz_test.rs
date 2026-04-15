@@ -2,6 +2,12 @@
 //!
 //! Generates random GQL-like queries and asserts the parser never panics.
 //! Works with `cargo test` (no nightly, no libfuzzer needed).
+// Fuzz RNG values are intentionally truncated/wrapped for variety
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 //!
 //! ```bash
 //! cargo test -p grafeo-adapters --test gql_fuzz_test -- --nocapture

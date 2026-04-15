@@ -255,6 +255,7 @@ impl TryFrom<SystemTime> for Timestamp {
             // reason: SystemTime micros since epoch fit i64 for ~292,000 years
             #[allow(clippy::cast_possible_truncation)]
             Ok(duration) => Ok(Self::from_micros(duration.as_micros() as i64)),
+            // reason: pre-epoch SystemTime durations are bounded, fit i64 for ~292,000 years
             #[allow(clippy::cast_possible_truncation)]
             Err(e) => Ok(Self::from_micros(-(e.duration().as_micros() as i64))),
         }

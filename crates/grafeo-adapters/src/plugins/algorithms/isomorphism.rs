@@ -416,7 +416,7 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
 
     fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
         let edges_str = params.get_string("pattern_edges").unwrap_or("");
-        let node_count = params.get_int("pattern_nodes").unwrap_or(0) as usize;
+        let node_count = usize::try_from(params.get_int("pattern_nodes").unwrap_or(0)).unwrap_or(0);
 
         let edges: Vec<(usize, usize)> = edges_str
             .split(',')
@@ -434,6 +434,8 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
         let count = subgraph_isomorphism_count_from_edges(store, &edges, node_count);
 
         let mut output = AlgorithmResult::new(vec!["count".to_string()]);
+        // reason: Isomorphism count is bounded by graph size, well within i64::MAX
+        #[allow(clippy::cast_possible_wrap)]
         output.add_row(vec![Value::Int64(count as i64)]);
         Ok(output)
     }

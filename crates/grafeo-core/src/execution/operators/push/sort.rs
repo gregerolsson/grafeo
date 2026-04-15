@@ -204,11 +204,27 @@ impl PushOperator for SortPushOperator {
 #[cfg(feature = "spill")]
 pub const DEFAULT_SPILL_THRESHOLD: usize = 100_000;
 
+/// Minimum buffer size (rows) before memory-pressure spilling can trigger.
+///
+/// Prevents "noisy neighbor" scenarios where a tiny sort buffer gets spilled
+/// because unrelated subsystems consumed memory.
+#[cfg(feature = "spill")]
+const SORT_MIN_BUFFER_ROWS: usize = 1000;
+
 /// Push-based sort operator with spilling support.
 ///
 /// This is a pipeline breaker that buffers input and spills to disk
 /// when memory pressure is high. It uses external merge sort for
 /// out-of-core sorting.
+///
+/// Two spill modes are supported:
+///
+/// 1. **Memory-aware** (when constructed with `with_memory_context`): registers
+///    as a `MemoryConsumer` with the `BufferManager` and spills when system
+///    pressure is High/Critical or when eviction is explicitly requested.
+///
+/// 2. **Row-count fallback** (when constructed with `new` or `with_spilling`):
+///    spills when `buffer.len() >= spill_threshold` (default 100K rows).
 #[cfg(feature = "spill")]
 pub struct SpillableSortPushOperator {
     /// Sort keys.
@@ -217,17 +233,25 @@ pub struct SpillableSortPushOperator {
     buffer: Vec<Vec<Value>>,
     /// Number of columns per row.
     num_columns: Option<usize>,
-    /// Spill manager for file creation.
+    /// Spill manager for file creation (used by row-count fallback mode).
     spill_manager: Option<Arc<SpillManager>>,
     /// External sort state (created when first spill occurs).
     external_sort: Option<ExternalSort>,
-    /// Threshold to trigger spill (row count).
+    /// Threshold to trigger spill (row count, used by fallback mode).
     spill_threshold: usize,
+    /// Memory context for pressure-aware spilling.
+    memory_ctx: Option<crate::execution::memory::OperatorMemoryContext>,
+    /// Shared state with the registered MemoryConsumer adapter.
+    spill_state: Option<std::sync::Arc<super::spill_state::OperatorSpillState>>,
+    /// Running total of estimated buffer memory in bytes (incremental tracking).
+    estimated_bytes: usize,
 }
 
 #[cfg(feature = "spill")]
 impl SpillableSortPushOperator {
     /// Create a new spillable sort operator with the given sort keys.
+    ///
+    /// Uses row-count fallback mode with default threshold (100K rows).
     pub fn new(keys: Vec<SortKey>) -> Self {
         Self {
             keys,
@@ -236,10 +260,13 @@ impl SpillableSortPushOperator {
             spill_manager: None,
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
+            memory_ctx: None,
+            spill_state: None,
+            estimated_bytes: 0,
         }
     }
 
-    /// Create a new spillable sort operator with spilling enabled.
+    /// Create a new spillable sort operator with spilling enabled (row-count mode).
     pub fn with_spilling(keys: Vec<SortKey>, manager: Arc<SpillManager>, threshold: usize) -> Self {
         Self {
             keys,
@@ -248,6 +275,37 @@ impl SpillableSortPushOperator {
             spill_manager: Some(manager),
             external_sort: None,
             spill_threshold: threshold,
+            memory_ctx: None,
+            spill_state: None,
+            estimated_bytes: 0,
+        }
+    }
+
+    /// Create a spillable sort operator with memory-aware spilling.
+    ///
+    /// Registers as a `MemoryConsumer` with the `BufferManager` and spills
+    /// based on system memory pressure rather than row count thresholds.
+    pub fn with_memory_context(
+        keys: Vec<SortKey>,
+        ctx: crate::execution::memory::OperatorMemoryContext,
+    ) -> Self {
+        use super::spill_state::{OperatorConsumerAdapter, OperatorSpillState};
+
+        let state = std::sync::Arc::new(OperatorSpillState::new("SpillableSortPush".to_string()));
+        let adapter =
+            std::sync::Arc::new(OperatorConsumerAdapter::new(std::sync::Arc::clone(&state)));
+        ctx.register_consumer(adapter);
+
+        Self {
+            keys,
+            buffer: Vec::new(),
+            num_columns: None,
+            spill_manager: None,
+            external_sort: None,
+            spill_threshold: DEFAULT_SPILL_THRESHOLD,
+            memory_ctx: Some(ctx),
+            spill_state: Some(state),
+            estimated_bytes: 0,
         }
     }
 
@@ -269,19 +327,38 @@ impl SpillableSortPushOperator {
         Self::with_spilling(vec![SortKey::descending(column)], manager, threshold)
     }
 
-    /// Sets the spill threshold.
+    /// Sets the spill threshold (row-count fallback mode).
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.spill_threshold = threshold;
         self
     }
 
-    /// Spills the current buffer as a sorted run.
+    /// Checks whether spilling should occur and performs it if needed.
     fn maybe_spill(&mut self) -> Result<(), OperatorError> {
-        if self.buffer.len() < self.spill_threshold {
+        let should_spill = if let Some(ref state) = self.spill_state {
+            // Memory-aware: eviction requested OR system pressure is High/Critical
+            let eviction = state.take_eviction_request().is_some();
+            let pressure = self.memory_ctx.as_ref().map_or(false, |c| c.should_spill());
+            // Minimum buffer guard: don't spill tiny buffers from noisy neighbors
+            let above_minimum = self.buffer.len() >= SORT_MIN_BUFFER_ROWS;
+            (eviction || pressure) && above_minimum
+        } else {
+            // Row-count fallback (no memory context)
+            self.buffer.len() >= self.spill_threshold
+        };
+
+        if !should_spill {
             return Ok(());
         }
 
-        let Some(manager) = &self.spill_manager else {
+        // Get SpillManager: prefer memory_ctx, fall back to self.spill_manager
+        let manager = self
+            .memory_ctx
+            .as_ref()
+            .map(|c| std::sync::Arc::clone(c.spill_manager()))
+            .or_else(|| self.spill_manager.clone());
+
+        let Some(manager) = manager else {
             return Ok(()); // No spilling configured
         };
 
@@ -312,7 +389,7 @@ impl SpillableSortPushOperator {
                 })
                 .collect();
 
-            self.external_sort = Some(ExternalSort::new(Arc::clone(manager), num_cols, spill_keys));
+            self.external_sort = Some(ExternalSort::new(manager, num_cols, spill_keys));
         }
 
         // Spill as sorted run
@@ -322,7 +399,20 @@ impl SpillableSortPushOperator {
                 .map_err(|e| OperatorError::Execution(e.to_string()))?;
         }
 
+        // Reset memory tracking after spill
+        self.estimated_bytes = 0;
+        if let Some(ref state) = self.spill_state {
+            state.set_usage(0);
+        }
+
         Ok(())
+    }
+
+    /// Unregisters this operator's consumer from the BufferManager.
+    fn unregister_consumer(&self) {
+        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
+            ctx.unregister_consumer(state.name());
+        }
     }
 }
 
@@ -340,7 +430,7 @@ impl PushOperator for SpillableSortPushOperator {
 
         let num_cols = chunk.column_count();
 
-        // Buffer all rows
+        // Buffer all rows with incremental memory tracking
         for i in chunk.selected_indices() {
             let mut row = Vec::with_capacity(num_cols);
             for col_idx in 0..num_cols {
@@ -348,9 +438,17 @@ impl PushOperator for SpillableSortPushOperator {
                     .column(col_idx)
                     .and_then(|c| c.get_value(i))
                     .unwrap_or(Value::Null);
+                self.estimated_bytes += val.estimated_size_bytes();
                 row.push(val);
             }
+            // Account for Vec<Value> overhead per row
+            self.estimated_bytes += num_cols * std::mem::size_of::<Value>();
             self.buffer.push(row);
+        }
+
+        // Update memory consumer usage
+        if let Some(ref state) = self.spill_state {
+            state.set_usage(self.estimated_bytes);
         }
 
         // Check if we should spill
@@ -362,21 +460,25 @@ impl PushOperator for SpillableSortPushOperator {
     fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
         let num_cols = self.num_columns.unwrap_or(0);
         if num_cols == 0 && self.buffer.is_empty() {
+            self.unregister_consumer();
             return Ok(());
         }
 
-        // Get sorted rows - either from external merge or in-memory sort
+        // Get sorted rows: either from external merge or in-memory sort
         let sorted_rows = if let Some(ref mut ext) = self.external_sort {
             // Merge all runs with remaining buffer
             let buffer = std::mem::take(&mut self.buffer);
             ext.merge_all(buffer)
                 .map_err(|e| OperatorError::Execution(e.to_string()))?
         } else {
-            // No spilling occurred - just sort in memory
+            // No spilling occurred: just sort in memory
             let keys = &self.keys;
             self.buffer.sort_by(|a, b| compare_rows(a, b, keys));
             std::mem::take(&mut self.buffer)
         };
+
+        // Unregister consumer before emitting results (we no longer hold buffer memory)
+        self.unregister_consumer();
 
         if sorted_rows.is_empty() {
             return Ok(());
@@ -495,6 +597,8 @@ mod tests {
 
     #[test]
     #[cfg(feature = "spill")]
+    // reason: test values 1..=10 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_spillable_sort_with_spilling() {
         use tempfile::TempDir;
 
@@ -525,6 +629,8 @@ mod tests {
 
     #[test]
     #[cfg(feature = "spill")]
+    // reason: test values 1..=15 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_spillable_sort_many_runs() {
         use tempfile::TempDir;
 
@@ -558,6 +664,8 @@ mod tests {
 
     #[test]
     #[cfg(feature = "spill")]
+    // reason: test values 1..=6 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_spillable_sort_descending_with_spilling() {
         use tempfile::TempDir;
 

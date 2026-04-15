@@ -194,7 +194,8 @@ impl PyValue {
                 .map_err(|e| {
                     PyGrafeoError::Type(format!("Failed to get datetime timestamp: {}", e))
                 })?;
-            // Convert to microseconds
+            // reason: Convert to microseconds; Python timestamps are within i64 range
+            #[allow(clippy::cast_possible_truncation)]
             let micros = (timestamp * 1_000_000.0) as i64;
             return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
         }
@@ -382,7 +383,11 @@ impl PyValue {
             }
             Value::OnCounter { pos, neg } => {
                 use pyo3::conversion::IntoPyObjectExt;
+                // reason: individual CRDT counter values are small, sum fits i64
+                #[allow(clippy::cast_possible_wrap)]
                 let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
+                // reason: individual CRDT counter values are small, sum fits i64
+                #[allow(clippy::cast_possible_wrap)]
                 let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
                 let dict = PyDict::new(py);
                 dict.set_item("$pncounter", true)

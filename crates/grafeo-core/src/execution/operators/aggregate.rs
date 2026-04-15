@@ -513,6 +513,7 @@ impl AggregateState {
                     // reason: rank is bounded by sorted.len() - 1, fits usize
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let lower_idx = rank.floor() as usize;
+                    // reason: rank is a non-negative f64 from percentile calculation, fits usize
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let upper_idx = rank.ceil() as usize;
                     if lower_idx == upper_idx {
