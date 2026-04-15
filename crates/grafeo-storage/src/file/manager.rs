@@ -459,30 +459,31 @@ impl GrafeoFileManager {
             // but packing into disjoint bit lanes is injective for type < 256.
             // Nonce low word: page-aligned write offset (unique within a checkpoint).
             // AAD binds the ciphertext to the section type, preventing relocation.
+            // Encrypt section data if an encryptor is configured, otherwise
+            // write the plaintext bytes directly (no allocation).
             #[cfg(feature = "encryption")]
-            let (write_data, checksum, length) = if let Some(ref enc) = self.section_encryptor {
+            let encrypted_buf: Option<Vec<u8>> = if let Some(ref enc) = self.section_encryptor {
                 let nonce_high = (nonce_iteration << 8) | (*section_type as u32 & 0xFF);
                 let nonce = grafeo_common::encryption::build_nonce(nonce_high, current_offset);
                 let aad = format!("grafeo-section:{}", *section_type as u32);
-                let encrypted = enc
-                    .encrypt(data, &nonce, aad.as_bytes())
-                    .map_err(|e| Error::Internal(format!("section encryption failed: {e}")))?;
-                let crc = crc32fast::hash(&encrypted);
-                let len = encrypted.len() as u64;
-                (encrypted, crc, len)
+                Some(
+                    enc.encrypt(data, &nonce, aad.as_bytes())
+                        .map_err(|e| Error::Internal(format!("section encryption failed: {e}")))?,
+                )
             } else {
-                let crc = crc32fast::hash(data);
-                (data.to_vec(), crc, data.len() as u64)
+                None
             };
 
+            #[cfg(feature = "encryption")]
+            let write_data: &[u8] = encrypted_buf.as_deref().unwrap_or(data);
             #[cfg(not(feature = "encryption"))]
-            let (write_data, checksum, length) = {
-                let crc = crc32fast::hash(data);
-                (data.to_vec(), crc, data.len() as u64)
-            };
+            let write_data: &[u8] = data;
+
+            let checksum = crc32fast::hash(write_data);
+            let length = write_data.len() as u64;
 
             file.seek(SeekFrom::Start(current_offset))?;
-            file.write_all(&write_data)?;
+            file.write_all(write_data)?;
 
             dir.upsert(SectionDirectoryEntry {
                 section_type: *section_type,

@@ -364,8 +364,11 @@ impl<'a> Lexer<'a> {
         }
 
         if is_float {
-            match value.parse() {
-                Ok(f) => TokenKind::Float(f),
+            match value.parse::<f64>() {
+                Ok(f) if f.is_finite() => TokenKind::Float(f),
+                Ok(_) => {
+                    TokenKind::Error(format!("Float literal '{value}' overflows the valid range"))
+                }
                 Err(_) => TokenKind::Error(format!("Invalid float literal: '{value}'")),
             }
         } else {
