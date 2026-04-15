@@ -25,6 +25,25 @@ use std::collections::BTreeMap;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
 
+/// Converts a usize to u32 for block format serialization.
+///
+/// # Panics
+///
+/// Panics if the value exceeds `u32::MAX`, which indicates a block
+/// section too large for the format.
+fn len_u32(n: usize) -> u32 {
+    u32::try_from(n).expect("block section size exceeds u32::MAX")
+}
+
+/// Converts a usize to u16 for block format serialization.
+///
+/// # Panics
+///
+/// Panics if the value exceeds `u16::MAX`.
+fn len_u16(n: usize) -> u16 {
+    u16::try_from(n).expect("block field count exceeds u16::MAX")
+}
+
 // ── Magic and version ──────────────────────────────────────────────
 
 /// Magic bytes identifying block-based LPG section format.
@@ -209,7 +228,7 @@ impl StringTableBuilder {
         if let Some(&idx) = self.index.get(s) {
             return idx;
         }
-        let idx = self.strings.len() as u32;
+        let idx = len_u32(self.strings.len());
         self.strings.push(s.to_owned());
         self.index.insert(s.to_owned(), idx);
         idx
@@ -217,14 +236,14 @@ impl StringTableBuilder {
 
     /// Serializes the string table: [count:u32] [offsets:u32*count] [packed strings]
     fn serialize(&self) -> Vec<u8> {
-        let count = self.strings.len() as u32;
+        let count = len_u32(self.strings.len());
         // Pre-calculate total size
         let mut packed = Vec::new();
         let mut offsets = Vec::with_capacity(self.strings.len());
         for s in &self.strings {
-            offsets.push(packed.len() as u32);
+            offsets.push(len_u32(packed.len()));
             let bytes = s.as_bytes();
-            packed.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            packed.extend_from_slice(&len_u32(bytes.len()).to_le_bytes());
             packed.extend_from_slice(bytes);
         }
 
@@ -313,7 +332,7 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Bytes(b) => {
             buf.push(ValueTag::Bytes as u8);
-            buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len_u32(b.len()).to_le_bytes());
             buf.extend_from_slice(b);
         }
         Value::Date(d) => {
@@ -343,14 +362,14 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::List(items) => {
             buf.push(ValueTag::List as u8);
-            buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len_u32(items.len()).to_le_bytes());
             for item in items.iter() {
                 encode_value(item, strings, buf);
             }
         }
         Value::Map(map) => {
             buf.push(ValueTag::Map as u8);
-            buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len_u32(map.len()).to_le_bytes());
             for (key, val) in map.iter() {
                 let key_idx = strings.intern(key.as_ref());
                 buf.extend_from_slice(&key_idx.to_le_bytes());
@@ -359,18 +378,18 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Vector(v) => {
             buf.push(ValueTag::Vector as u8);
-            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len_u32(v.len()).to_le_bytes());
             for f in v.iter() {
                 buf.extend_from_slice(&f.to_le_bytes());
             }
         }
         Value::Path { nodes, edges } => {
             buf.push(ValueTag::Path as u8);
-            buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len_u32(nodes.len()).to_le_bytes());
             for n in nodes.iter() {
                 encode_value(n, strings, buf);
             }
-            buf.extend_from_slice(&(edges.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&len_u32(edges.len()).to_le_bytes());
             for e in edges.iter() {
                 encode_value(e, strings, buf);
             }
@@ -404,21 +423,33 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         2 => {
             // Int64
             ensure_remaining(data, *pos, 8)?;
-            let v = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let v = i64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
             Ok(Value::Int64(v))
         }
         3 => {
             // Float64
             ensure_remaining(data, *pos, 8)?;
-            let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let v = f64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
             Ok(Value::Float64(v))
         }
         4 => {
             // String (index into string table)
             ensure_remaining(data, *pos, 4)?;
-            let idx = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            let idx = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 4;
             let s = strings
                 .get(idx)
@@ -428,7 +459,11 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         5 => {
             // Bytes
             ensure_remaining(data, *pos, 4)?;
-            let len = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             *pos += 4;
             ensure_remaining(data, *pos, len)?;
             let bytes: Arc<[u8]> = data[*pos..*pos + len].into();
@@ -438,16 +473,28 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         6 => {
             // Date (i32 days since epoch)
             ensure_remaining(data, *pos, 4)?;
-            let days = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            let days = i32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 4;
             Ok(Value::Date(grafeo_common::types::Date::from_days(days)))
         }
         7 => {
             // Time (u64 nanos + i32 offset)
             ensure_remaining(data, *pos, 12)?;
-            let nanos = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let nanos = u64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
-            let offset = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            let offset = i32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 4;
             let mut time = grafeo_common::types::Time::from_nanos(nanos)
                 .unwrap_or_else(|| grafeo_common::types::Time::from_nanos(0).unwrap());
@@ -459,7 +506,11 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         8 => {
             // Timestamp (i64 millis)
             ensure_remaining(data, *pos, 8)?;
-            let millis = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let millis = i64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
             Ok(Value::Timestamp(
                 grafeo_common::types::Timestamp::from_millis(millis),
@@ -468,9 +519,17 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         9 => {
             // ZonedDatetime (i64 millis + i32 offset)
             ensure_remaining(data, *pos, 12)?;
-            let millis = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let millis = i64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
-            let offset = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+            let offset = i32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 4;
             Ok(Value::ZonedDatetime(
                 grafeo_common::types::ZonedDatetime::from_timestamp_offset(
@@ -482,11 +541,23 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         10 => {
             // Duration (i64 months + i64 days + i64 nanos = 24 bytes)
             ensure_remaining(data, *pos, 24)?;
-            let months = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let months = i64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
-            let days = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let days = i64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
-            let nanos = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+            let nanos = i64::from_le_bytes(
+                data[*pos..*pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             *pos += 8;
             Ok(Value::Duration(grafeo_common::types::Duration::new(
                 months, days, nanos,
@@ -495,7 +566,11 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         11 => {
             // List
             ensure_remaining(data, *pos, 4)?;
-            let count = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let count = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             *pos += 4;
             let mut items = Vec::with_capacity(count.min(data.len()));
             for _ in 0..count {
@@ -506,12 +581,20 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         12 => {
             // Map
             ensure_remaining(data, *pos, 4)?;
-            let count = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let count = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             *pos += 4;
             let mut map = BTreeMap::new();
             for _ in 0..count {
                 ensure_remaining(data, *pos, 4)?;
-                let key_idx = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+                let key_idx = u32::from_le_bytes(
+                    data[*pos..*pos + 4]
+                        .try_into()
+                        .expect("slice length matches"),
+                );
                 *pos += 4;
                 let key_str = strings.get(key_idx).ok_or_else(|| {
                     Error::Serialization(format!("invalid map key string index {key_idx}"))
@@ -524,7 +607,11 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         13 => {
             // Vector
             ensure_remaining(data, *pos, 4)?;
-            let count = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let count = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             *pos += 4;
             let byte_len = count
                 .checked_mul(4)
@@ -532,7 +619,11 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
             ensure_remaining(data, *pos, byte_len)?;
             let mut floats = Vec::with_capacity(count.min(data.len() / 4));
             for _ in 0..count {
-                let f = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+                let f = f32::from_le_bytes(
+                    data[*pos..*pos + 4]
+                        .try_into()
+                        .expect("slice length matches"),
+                );
                 *pos += 4;
                 floats.push(f);
             }
@@ -541,14 +632,22 @@ fn decode_value(data: &[u8], pos: &mut usize, strings: &StringTableReader<'_>) -
         14 => {
             // Path
             ensure_remaining(data, *pos, 4)?;
-            let node_count = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let node_count = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             *pos += 4;
             let mut nodes = Vec::with_capacity(node_count.min(data.len()));
             for _ in 0..node_count {
                 nodes.push(decode_value(data, pos, strings)?);
             }
             ensure_remaining(data, *pos, 4)?;
-            let edge_count = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as usize;
+            let edge_count = u32::from_le_bytes(
+                data[*pos..*pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             *pos += 4;
             let mut edges = Vec::with_capacity(edge_count.min(data.len()));
             for _ in 0..edge_count {
@@ -682,9 +781,9 @@ pub(crate) fn write_blocks(
     // Block 3: Label assignments
     // Format: [node_count:u32] for each node [label_count:u16][label_idx:u32*count]
     let mut label_buf = Vec::new();
-    label_buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
+    label_buf.extend_from_slice(&len_u32(nodes.len()).to_le_bytes());
     for node in nodes {
-        label_buf.extend_from_slice(&(node.labels.len() as u16).to_le_bytes());
+        label_buf.extend_from_slice(&len_u16(node.labels.len()).to_le_bytes());
         for label in &node.labels {
             let idx = strings.intern(label);
             label_buf.extend_from_slice(&idx.to_le_bytes());
@@ -734,8 +833,8 @@ pub(crate) fn write_blocks(
         dir_entries.push(BlockDirEntry {
             block_type: *block_type as u8,
             _reserved: [0; 3],
-            offset: data_offset as u32,
-            length: block_data.len() as u32,
+            offset: u32::try_from(data_offset).expect("block data offset exceeds u32::MAX"),
+            length: len_u32(block_data.len()),
             checksum,
             key_string_index: *key_idx,
             sub_type: *sub_type,
@@ -752,11 +851,11 @@ pub(crate) fn write_blocks(
         magic: LPG_BLOCK_MAGIC,
         version: LPG_BLOCK_VERSION,
         flags: 0,
-        block_count: block_count as u16,
+        block_count: len_u16(block_count),
         node_count: nodes.len() as u64,
         edge_count: edges.len() as u64,
         epoch,
-        named_graph_count: named_graphs.len() as u32,
+        named_graph_count: len_u32(named_graphs.len()),
         _reserved: [0; 28],
     };
     header.write_to(&mut output);
@@ -839,10 +938,10 @@ fn write_property_column<'a>(
         }
     }
 
-    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&len_u32(entries.len()).to_le_bytes());
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
-        buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&len_u16(versions.len()).to_le_bytes());
         for (epoch, value) in *versions {
             buf.extend_from_slice(&epoch.as_u64().to_le_bytes());
             encode_value(value, strings, &mut buf);
@@ -869,10 +968,10 @@ fn write_property_column_edges<'a>(
         }
     }
 
-    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&len_u32(entries.len()).to_le_bytes());
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
-        buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&len_u16(versions.len()).to_le_bytes());
         for (epoch, value) in *versions {
             buf.extend_from_slice(&epoch.as_u64().to_le_bytes());
             encode_value(value, strings, &mut buf);
@@ -959,7 +1058,11 @@ pub(crate) fn read_blocks(
         let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
         let mut pos = 0;
         while pos + 8 <= block.len() {
-            let id = NodeId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
+            let id = NodeId::new(u64::from_le_bytes(
+                block[pos..pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            ));
             pos += 8;
             nodes.push(BlockNode {
                 id,
@@ -978,13 +1081,29 @@ pub(crate) fn read_blocks(
         let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
         let mut pos = 0;
         while pos + 28 <= block.len() {
-            let id = EdgeId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
+            let id = EdgeId::new(u64::from_le_bytes(
+                block[pos..pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            ));
             pos += 8;
-            let src = NodeId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
+            let src = NodeId::new(u64::from_le_bytes(
+                block[pos..pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            ));
             pos += 8;
-            let dst = NodeId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
+            let dst = NodeId::new(u64::from_le_bytes(
+                block[pos..pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            ));
             pos += 8;
-            let type_idx = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap());
+            let type_idx = u32::from_le_bytes(
+                block[pos..pos + 4]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             pos += 4;
             let edge_type = strings
                 .get(type_idx)
@@ -1010,17 +1129,29 @@ pub(crate) fn read_blocks(
         let block = &data[entry.offset as usize..(entry.offset + entry.length) as usize];
         let mut pos = 0;
         ensure_remaining(block, pos, 4)?;
-        let node_count = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap()) as usize;
+        let node_count = u32::from_le_bytes(
+            block[pos..pos + 4]
+                .try_into()
+                .expect("slice length matches"),
+        ) as usize;
         pos += 4;
 
         for i in 0..node_count.min(nodes.len()) {
             ensure_remaining(block, pos, 2)?;
-            let label_count = u16::from_le_bytes(block[pos..pos + 2].try_into().unwrap()) as usize;
+            let label_count = u16::from_le_bytes(
+                block[pos..pos + 2]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             pos += 2;
             let mut labels = Vec::with_capacity(label_count);
             for _ in 0..label_count {
                 ensure_remaining(block, pos, 4)?;
-                let idx = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap());
+                let idx = u32::from_le_bytes(
+                    block[pos..pos + 4]
+                        .try_into()
+                        .expect("slice length matches"),
+                );
                 pos += 4;
                 let label = strings.get(idx).ok_or_else(|| {
                     Error::Serialization(format!("invalid label string index {idx}"))
@@ -1059,22 +1190,36 @@ pub(crate) fn read_blocks(
 
         let mut pos = 0;
         ensure_remaining(block, pos, 4)?;
-        let entry_count = u32::from_le_bytes(block[pos..pos + 4].try_into().unwrap()) as usize;
+        let entry_count = u32::from_le_bytes(
+            block[pos..pos + 4]
+                .try_into()
+                .expect("slice length matches"),
+        ) as usize;
         pos += 4;
 
         for _ in 0..entry_count {
             ensure_remaining(block, pos, 10)?; // entity_id(8) + version_count(2)
-            let entity_id = u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap());
+            let entity_id = u64::from_le_bytes(
+                block[pos..pos + 8]
+                    .try_into()
+                    .expect("slice length matches"),
+            );
             pos += 8;
-            let version_count =
-                u16::from_le_bytes(block[pos..pos + 2].try_into().unwrap()) as usize;
+            let version_count = u16::from_le_bytes(
+                block[pos..pos + 2]
+                    .try_into()
+                    .expect("slice length matches"),
+            ) as usize;
             pos += 2;
 
             let mut versions = Vec::with_capacity(version_count);
             for _ in 0..version_count {
                 ensure_remaining(block, pos, 8)?;
-                let epoch =
-                    EpochId::new(u64::from_le_bytes(block[pos..pos + 8].try_into().unwrap()));
+                let epoch = EpochId::new(u64::from_le_bytes(
+                    block[pos..pos + 8]
+                        .try_into()
+                        .expect("slice length matches"),
+                ));
                 pos += 8;
                 let value = decode_value(block, &mut pos, &strings)?;
                 versions.push((epoch, value));

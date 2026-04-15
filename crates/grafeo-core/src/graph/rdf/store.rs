@@ -650,9 +650,9 @@ impl RdfStore {
         let mut dict =
             super::dictionary::TermDictionary::with_capacity(triples.len().saturating_mul(3));
         for triple in triples.iter() {
-            dict.get_or_insert(triple.subject());
-            dict.get_or_insert(triple.predicate());
-            dict.get_or_insert(triple.object());
+            let _ = dict.get_or_insert(triple.subject());
+            let _ = dict.get_or_insert(triple.predicate());
+            let _ = dict.get_or_insert(triple.object());
         }
 
         let dict = Arc::new(dict);

@@ -179,32 +179,59 @@ impl BufferManager {
         size: usize,
         region: MemoryRegion,
     ) -> Option<MemoryGrant> {
-        // Check if we can allocate
-        let current = self.allocated.load(Ordering::Relaxed);
+        // Use a CAS loop to atomically check-and-reserve
+        loop {
+            let current = self.allocated.load(Ordering::Acquire);
 
-        if current + size > self.hard_limit {
-            // Try eviction first
-            self.run_eviction_cycle(true);
+            // Overflow-safe addition
+            let new_total = current.checked_add(size)?;
 
-            // Check again
-            let current = self.allocated.load(Ordering::Relaxed);
-            if current + size > self.hard_limit {
-                return None;
+            if new_total > self.hard_limit {
+                // Try eviction first
+                self.run_eviction_cycle(true);
+
+                // Retry with fresh value
+                let current = self.allocated.load(Ordering::Acquire);
+                let new_total = current.checked_add(size)?;
+                if new_total > self.hard_limit {
+                    return None;
+                }
+
+                // Try to reserve atomically after eviction
+                match self.allocated.compare_exchange_weak(
+                    current,
+                    new_total,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {}
+                    Err(_) => continue, // Retry the whole loop
+                }
+            } else {
+                // Try to reserve atomically
+                match self.allocated.compare_exchange_weak(
+                    current,
+                    new_total,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {}
+                    Err(_) => continue, // Retry
+                }
             }
+
+            // Successfully reserved, update region counter
+            self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
+
+            // Check pressure and potentially trigger background eviction
+            self.check_pressure();
+
+            return Some(MemoryGrant::new(
+                Arc::clone(self) as Arc<dyn GrantReleaser>,
+                size,
+                region,
+            ));
         }
-
-        // Perform allocation
-        self.allocated.fetch_add(size, Ordering::Relaxed);
-        self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
-
-        // Check pressure and potentially trigger background eviction
-        self.check_pressure();
-
-        Some(MemoryGrant::new(
-            Arc::clone(self) as Arc<dyn GrantReleaser>,
-            size,
-            region,
-        ))
     }
 
     /// Returns the current pressure level.
@@ -395,21 +422,52 @@ impl GrantReleaser for BufferManager {
     }
 
     fn try_allocate_raw(&self, size: usize, region: MemoryRegion) -> bool {
-        let current = self.allocated.load(Ordering::Relaxed);
+        loop {
+            let current = self.allocated.load(Ordering::Acquire);
 
-        if current + size > self.hard_limit {
-            // Try eviction
-            self.run_eviction_cycle(true);
-
-            let current = self.allocated.load(Ordering::Relaxed);
-            if current + size > self.hard_limit {
+            // Overflow-safe addition
+            let Some(new_total) = current.checked_add(size) else {
                 return false;
-            }
-        }
+            };
 
-        self.allocated.fetch_add(size, Ordering::Relaxed);
-        self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
-        true
+            if new_total > self.hard_limit {
+                // Try eviction
+                self.run_eviction_cycle(true);
+
+                let current = self.allocated.load(Ordering::Acquire);
+                let Some(new_total) = current.checked_add(size) else {
+                    return false;
+                };
+                if new_total > self.hard_limit {
+                    return false;
+                }
+
+                // Try to reserve atomically after eviction
+                match self.allocated.compare_exchange_weak(
+                    current,
+                    new_total,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {}
+                    Err(_) => continue,
+                }
+            } else {
+                // Try to reserve atomically
+                match self.allocated.compare_exchange_weak(
+                    current,
+                    new_total,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {}
+                    Err(_) => continue,
+                }
+            }
+
+            self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
+            return true;
+        }
     }
 }
 
@@ -1071,5 +1129,64 @@ mod tests {
         );
         let manager = BufferManager::new(config);
         assert!(manager.config().spill_path.is_some());
+    }
+
+    #[test]
+    fn test_try_allocate_concurrent_hard_limit() {
+        // H2: Multiple threads allocating concurrently must not exceed hard limit.
+        // With budget=1000 and hard_limit_fraction=0.95, hard limit is 950 bytes.
+        // If 10 threads each try to allocate 100 bytes simultaneously,
+        // at most 9 should succeed (9 * 100 = 900 < 950).
+        use std::sync::Barrier;
+
+        let config = BufferManagerConfig {
+            budget: 1000,
+            soft_limit_fraction: 0.70,
+            evict_limit_fraction: 0.85,
+            hard_limit_fraction: 0.95,
+            background_eviction: false,
+            spill_path: None,
+        };
+        let manager = BufferManager::new(config);
+        let barrier = Arc::new(Barrier::new(10));
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let mgr = Arc::clone(&manager);
+                let bar = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    bar.wait();
+                    mgr.try_allocate(100, MemoryRegion::ExecutionBuffers)
+                })
+            })
+            .collect();
+
+        let grants: Vec<_> = handles
+            .into_iter()
+            .filter_map(|h| h.join().unwrap())
+            .collect();
+
+        // Total allocated must never exceed hard limit (950)
+        let total = manager.allocated.load(Ordering::SeqCst);
+        assert!(total <= 950, "allocated {total} exceeds hard limit 950");
+        // At most 9 grants should succeed (9 * 100 = 900 <= 950)
+        assert!(
+            grants.len() <= 9,
+            "got {} grants, expected at most 9",
+            grants.len()
+        );
+    }
+
+    #[test]
+    fn test_try_allocate_overflow_protection() {
+        // H2 overflow: size = usize::MAX should not wrap current + size
+        let manager = BufferManager::with_budget(1_000_000);
+        let result = manager.try_allocate(usize::MAX, MemoryRegion::ExecutionBuffers);
+        assert!(result.is_none(), "usize::MAX allocation should fail");
+        assert_eq!(
+            manager.stats().total_allocated,
+            0,
+            "failed allocation must not change allocated count"
+        );
     }
 }

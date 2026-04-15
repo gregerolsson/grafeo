@@ -204,7 +204,13 @@ impl BitSet {
 
     /// Creates a full bitset with elements 0..n.
     pub fn full(n: usize) -> Self {
-        Self((1 << n) - 1)
+        if n == 0 {
+            Self::empty()
+        } else if n >= 64 {
+            Self(u64::MAX)
+        } else {
+            Self((1_u64 << n) - 1)
+        }
     }
 
     /// Checks if the set is empty.
@@ -363,6 +369,12 @@ impl<'a> DPccp<'a> {
                     cardinality,
                 },
             );
+        }
+
+        // BitSet uses u64, so we can only handle up to 64 relations.
+        // For larger queries, return None to fall back to heuristic ordering.
+        if n > 64 {
+            return None;
         }
 
         // Enumerate connected subgraph pairs (ccp)
@@ -1328,5 +1340,26 @@ mod tests {
 
         let graph = builder.build();
         assert_eq!(graph.edges().len(), 1);
+    }
+
+    #[test]
+    fn test_bitset_full_boundary_values() {
+        // H4: BitSet::full must handle edge cases without overflow
+        assert_eq!(BitSet::full(0), BitSet::empty());
+        assert_eq!(BitSet::full(1).0, 1); // 0b1
+        assert_eq!(BitSet::full(2).0, 3); // 0b11
+        assert_eq!(BitSet::full(63).0, u64::MAX >> 1); // 2^63 - 1
+        assert_eq!(BitSet::full(64).0, u64::MAX); // All bits set
+    }
+
+    #[test]
+    fn test_bitset_full_overflow_protection() {
+        // H4: n > 64 must saturate to all-bits-set, not panic or wrap
+        let big = BitSet::full(65);
+        assert_eq!(big.0, u64::MAX);
+        let huge = BitSet::full(100);
+        assert_eq!(huge.0, u64::MAX);
+        let max = BitSet::full(usize::MAX);
+        assert_eq!(max.0, u64::MAX);
     }
 }

@@ -19,7 +19,7 @@ use std::sync::Arc;
 fn map_int(m: &BTreeMap<PropertyKey, Value>, key: &str) -> Option<i64> {
     match m.get(&PropertyKey::from(key))? {
         Value::Int64(v) => Some(*v),
-        Value::Float64(f) => Some(*f as i64),
+        Value::Float64(f) => safe_f64_to_i64(*f),
         _ => None,
     }
 }
@@ -28,6 +28,27 @@ fn map_int(m: &BTreeMap<PropertyKey, Value>, key: &str) -> Option<i64> {
 /// returning a default value when the key is absent.
 fn map_int_or(m: &BTreeMap<PropertyKey, Value>, key: &str, default: i64) -> i64 {
     map_int(m, key).unwrap_or(default)
+}
+
+/// Safely converts an i64 temporal field to u32.
+/// Returns `None` for negative values or values exceeding `u32::MAX`.
+fn temporal_u32(value: i64) -> Option<u32> {
+    u32::try_from(value).ok()
+}
+
+/// Safely converts an i64 temporal field to i32 (for year).
+/// Returns `None` for values outside i32 range.
+fn temporal_i32(value: i64) -> Option<i32> {
+    i32::try_from(value).ok()
+}
+
+/// Safely converts an f64 to i64 for integer coercion.
+/// Returns `None` for NaN, infinity, or values outside i64 range.
+fn safe_f64_to_i64(f: f64) -> Option<i64> {
+    if f.is_nan() || f.is_infinite() || f > i64::MAX as f64 || f < i64::MIN as f64 {
+        return None;
+    }
+    Some(f as i64)
 }
 
 /// A predicate for filtering rows.
@@ -1831,7 +1852,7 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
-                    Value::Float64(f) => Some(Value::Int64(f as i64)),
+                    Value::Float64(f) => safe_f64_to_i64(f).map(Value::Int64),
                     Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                     Value::String(s) => s.parse::<i64>().ok().map(Value::Int64),
                     _ => None,
@@ -2835,9 +2856,9 @@ impl ExpressionPredicate {
                     Value::Timestamp(ts) => Some(Value::Date(ts.to_date())),
                     Value::Date(_) => Some(val),
                     Value::Map(m) => {
-                        let year = map_int(&m, "year")? as i32;
-                        let month = map_int_or(&m, "month", 1) as u32;
-                        let day = map_int_or(&m, "day", 1) as u32;
+                        let year = temporal_i32(map_int(&m, "year")?)?;
+                        let month = temporal_u32(map_int_or(&m, "month", 1))?;
+                        let day = temporal_u32(map_int_or(&m, "day", 1))?;
                         grafeo_common::types::Date::from_ymd(year, month, day).map(Value::Date)
                     }
                     _ => None,
@@ -2853,10 +2874,10 @@ impl ExpressionPredicate {
                     Value::Timestamp(ts) => Some(Value::Time(ts.to_time())),
                     Value::Time(_) => Some(val),
                     Value::Map(m) => {
-                        let hour = map_int_or(&m, "hour", 0) as u32;
-                        let minute = map_int_or(&m, "minute", 0) as u32;
-                        let second = map_int_or(&m, "second", 0) as u32;
-                        let nanosecond = map_int_or(&m, "nanosecond", 0) as u32;
+                        let hour = temporal_u32(map_int_or(&m, "hour", 0))?;
+                        let minute = temporal_u32(map_int_or(&m, "minute", 0))?;
+                        let second = temporal_u32(map_int_or(&m, "second", 0))?;
+                        let nanosecond = temporal_u32(map_int_or(&m, "nanosecond", 0))?;
                         grafeo_common::types::Time::from_hms_nano(hour, minute, second, nanosecond)
                             .map(Value::Time)
                     }
@@ -2891,13 +2912,13 @@ impl ExpressionPredicate {
                     }
                     Value::Timestamp(_) => Some(val),
                     Value::Map(m) => {
-                        let year = map_int(&m, "year")? as i32;
-                        let month = map_int_or(&m, "month", 1) as u32;
-                        let day = map_int_or(&m, "day", 1) as u32;
-                        let hour = map_int_or(&m, "hour", 0) as u32;
-                        let minute = map_int_or(&m, "minute", 0) as u32;
-                        let second = map_int_or(&m, "second", 0) as u32;
-                        let nanosecond = map_int_or(&m, "nanosecond", 0) as u32;
+                        let year = temporal_i32(map_int(&m, "year")?)?;
+                        let month = temporal_u32(map_int_or(&m, "month", 1))?;
+                        let day = temporal_u32(map_int_or(&m, "day", 1))?;
+                        let hour = temporal_u32(map_int_or(&m, "hour", 0))?;
+                        let minute = temporal_u32(map_int_or(&m, "minute", 0))?;
+                        let second = temporal_u32(map_int_or(&m, "second", 0))?;
+                        let nanosecond = temporal_u32(map_int_or(&m, "nanosecond", 0))?;
                         let date = grafeo_common::types::Date::from_ymd(year, month, day)?;
                         let time = grafeo_common::types::Time::from_hms_nano(
                             hour, minute, second, nanosecond,
@@ -3527,7 +3548,7 @@ impl ExpressionPredicate {
         match type_name.to_uppercase().as_str() {
             "INTEGER" | "INT" | "INT64" => match val {
                 Value::Int64(_) => Some(val),
-                Value::Float64(f) => Some(Value::Int64(f as i64)),
+                Value::Float64(f) => safe_f64_to_i64(f).map(Value::Int64),
                 Value::String(ref s) => s.parse::<i64>().ok().map(Value::Int64),
                 Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                 _ => None,
@@ -6332,5 +6353,185 @@ mod tests {
         let op = FilterOperator::new(Box::new(mock), Box::new(predicate));
         let (mut child, _predicate) = op.into_parts();
         assert!(child.next().unwrap().is_none());
+    }
+
+    // === H5: temporal_u32 / temporal_i32 safe cast tests ===
+
+    #[test]
+    fn test_temporal_u32_rejects_negative() {
+        assert_eq!(temporal_u32(-1), None);
+        assert_eq!(temporal_u32(i64::MIN), None);
+    }
+
+    #[test]
+    fn test_temporal_u32_accepts_valid() {
+        assert_eq!(temporal_u32(0), Some(0));
+        assert_eq!(temporal_u32(1), Some(1));
+        assert_eq!(temporal_u32(12), Some(12));
+        assert_eq!(temporal_u32(u32::MAX as i64), Some(u32::MAX));
+    }
+
+    #[test]
+    fn test_temporal_u32_rejects_overflow() {
+        assert_eq!(temporal_u32(u32::MAX as i64 + 1), None);
+        assert_eq!(temporal_u32(i64::MAX), None);
+    }
+
+    #[test]
+    fn test_temporal_i32_accepts_valid() {
+        assert_eq!(temporal_i32(0), Some(0));
+        assert_eq!(temporal_i32(2025), Some(2025));
+        assert_eq!(temporal_i32(-500), Some(-500));
+        assert_eq!(temporal_i32(i32::MAX as i64), Some(i32::MAX));
+        assert_eq!(temporal_i32(i32::MIN as i64), Some(i32::MIN));
+    }
+
+    #[test]
+    fn test_temporal_i32_rejects_overflow() {
+        assert_eq!(temporal_i32(i32::MAX as i64 + 1), None);
+        assert_eq!(temporal_i32(i32::MIN as i64 - 1), None);
+        assert_eq!(temporal_i32(i64::MAX), None);
+        assert_eq!(temporal_i32(i64::MIN), None);
+    }
+
+    // === H6: safe_f64_to_i64 tests ===
+
+    #[test]
+    fn test_safe_f64_to_i64_rejects_nan() {
+        assert_eq!(safe_f64_to_i64(f64::NAN), None);
+    }
+
+    #[test]
+    fn test_safe_f64_to_i64_rejects_infinity() {
+        assert_eq!(safe_f64_to_i64(f64::INFINITY), None);
+        assert_eq!(safe_f64_to_i64(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn test_safe_f64_to_i64_rejects_large() {
+        assert_eq!(safe_f64_to_i64(1e20), None);
+        assert_eq!(safe_f64_to_i64(-1e20), None);
+    }
+
+    #[test]
+    fn test_safe_f64_to_i64_accepts_valid() {
+        assert_eq!(safe_f64_to_i64(0.0), Some(0));
+        assert_eq!(safe_f64_to_i64(42.7), Some(42));
+        assert_eq!(safe_f64_to_i64(-3.9), Some(-3));
+    }
+
+    // === H5: temporal constructors reject negative fields ===
+
+    #[test]
+    fn test_date_constructor_rejects_negative_month() {
+        let mut m = BTreeMap::new();
+        m.insert(PropertyKey::from("year"), Value::Int64(2025));
+        m.insert(PropertyKey::from("month"), Value::Int64(-1));
+        let expr = FilterExpression::FunctionCall {
+            name: "date".to_string(),
+            args: vec![FilterExpression::Literal(Value::Map(m.into()))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    #[test]
+    fn test_date_constructor_rejects_negative_day() {
+        let mut m = BTreeMap::new();
+        m.insert(PropertyKey::from("year"), Value::Int64(2025));
+        m.insert(PropertyKey::from("day"), Value::Int64(-5));
+        let expr = FilterExpression::FunctionCall {
+            name: "date".to_string(),
+            args: vec![FilterExpression::Literal(Value::Map(m.into()))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    #[test]
+    fn test_time_constructor_rejects_negative_hour() {
+        let mut m = BTreeMap::new();
+        m.insert(PropertyKey::from("hour"), Value::Int64(-1));
+        let expr = FilterExpression::FunctionCall {
+            name: "time".to_string(),
+            args: vec![FilterExpression::Literal(Value::Map(m.into()))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    #[test]
+    fn test_datetime_constructor_rejects_negative_month() {
+        let mut m = BTreeMap::new();
+        m.insert(PropertyKey::from("year"), Value::Int64(2025));
+        m.insert(PropertyKey::from("month"), Value::Int64(-1));
+        let expr = FilterExpression::FunctionCall {
+            name: "datetime".to_string(),
+            args: vec![FilterExpression::Literal(Value::Map(m.into()))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    #[test]
+    fn test_datetime_constructor_rejects_huge_year() {
+        let mut m = BTreeMap::new();
+        m.insert(PropertyKey::from("year"), Value::Int64(i64::MAX));
+        let expr = FilterExpression::FunctionCall {
+            name: "datetime".to_string(),
+            args: vec![FilterExpression::Literal(Value::Map(m.into()))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    // === H6: toInteger rejects NaN/Infinity ===
+
+    #[test]
+    fn test_tointeger_rejects_nan() {
+        let expr = FilterExpression::FunctionCall {
+            name: "toInteger".to_string(),
+            args: vec![FilterExpression::Literal(Value::Float64(f64::NAN))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    #[test]
+    fn test_tointeger_rejects_infinity() {
+        let expr = FilterExpression::FunctionCall {
+            name: "toInteger".to_string(),
+            args: vec![FilterExpression::Literal(Value::Float64(f64::INFINITY))],
+        };
+        assert_eq!(eval_literal_expr(expr), None);
+    }
+
+    #[test]
+    fn test_tointeger_accepts_normal_float() {
+        let expr = FilterExpression::FunctionCall {
+            name: "toInteger".to_string(),
+            args: vec![FilterExpression::Literal(Value::Float64(42.9))],
+        };
+        assert_eq!(eval_literal_expr(expr), Some(Value::Int64(42)));
+    }
+
+    // === H6: coerce_to_type INTEGER rejects NaN/Infinity ===
+
+    #[test]
+    fn test_coerce_float_nan_to_integer_returns_none() {
+        let result = ExpressionPredicate::coerce_to_type(Value::Float64(f64::NAN), "INTEGER");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_float_infinity_to_integer_returns_none() {
+        let result = ExpressionPredicate::coerce_to_type(Value::Float64(f64::INFINITY), "INTEGER");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_large_float_to_integer_returns_none() {
+        let result = ExpressionPredicate::coerce_to_type(Value::Float64(1e20), "INTEGER");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_normal_float_to_integer_succeeds() {
+        let result = ExpressionPredicate::coerce_to_type(Value::Float64(99.5), "INTEGER");
+        assert_eq!(result, Some(Value::Int64(99)));
     }
 }

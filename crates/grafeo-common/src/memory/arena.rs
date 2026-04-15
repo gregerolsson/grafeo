@@ -103,9 +103,9 @@ impl Chunk {
         loop {
             let current = self.offset.load(Ordering::Relaxed);
 
-            // Calculate aligned offset
-            let aligned = (current + align - 1) & !(align - 1);
-            let new_offset = aligned + size;
+            // Calculate aligned offset (checked to prevent overflow)
+            let aligned = current.checked_add(align - 1).map(|v| v & !(align - 1))?;
+            let new_offset = aligned.checked_add(size)?;
 
             if new_offset > self.capacity {
                 return None;
@@ -241,7 +241,9 @@ impl Arena {
             return Ok(&mut []);
         }
 
-        let size = std::mem::size_of::<T>() * values.len();
+        let size = std::mem::size_of::<T>()
+            .checked_mul(values.len())
+            .ok_or(AllocError::OutOfMemory)?;
         let align = std::mem::align_of::<T>();
         let ptr = self.alloc(size, align)?;
 
@@ -374,7 +376,9 @@ impl Arena {
 
     /// Allocates a new chunk and performs the allocation.
     fn alloc_new_chunk(&self, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> {
-        let chunk_size = self.chunk_size.max(size + align);
+        let chunk_size = self
+            .chunk_size
+            .max(size.checked_add(align).ok_or(AllocError::OutOfMemory)?);
         let chunk = Chunk::new(chunk_size)?;
 
         self.total_allocated
@@ -716,6 +720,48 @@ mod tests {
         arena.alloc(100, 8).unwrap();
         let stats = arena.stats();
         assert!(stats.total_used >= 100);
+    }
+
+    #[test]
+    fn test_arena_alloc_alignment_overflow() {
+        // C1: When current offset is near usize::MAX, alignment calculation
+        // must not wrap around and produce a small aligned value
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 1024).unwrap();
+        // Requesting with size near usize::MAX should return error, not UB
+        let result = arena.alloc(usize::MAX - 8, 16);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_arena_alloc_size_overflow() {
+        // C2: aligned + size must not wrap around
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 1024).unwrap();
+        let result = arena.alloc(usize::MAX / 2, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_arena_alloc_slice_count_overflow() {
+        // C3: size_of::<T>() * len must not overflow
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 1024).unwrap();
+        // For u64 (8 bytes), len = usize::MAX / 4 would overflow 8 * (usize::MAX/4)
+        let huge_slice_len = usize::MAX / 4;
+        // We can't create an actual slice this big, but we can test the size calculation
+        // by using a small type with a huge count via alloc() directly
+        let size_result = std::mem::size_of::<u64>().checked_mul(huge_slice_len);
+        assert!(size_result.is_none(), "should overflow");
+        // The alloc itself with the overflowed size should fail gracefully
+        let result = arena.alloc(usize::MAX - 16, 8);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_arena_alloc_new_chunk_size_overflow() {
+        // H1: size + align must not overflow in alloc_new_chunk
+        let arena = Arena::with_chunk_size(EpochId::INITIAL, 64).unwrap();
+        // Request something where size + align overflows
+        let result = arena.alloc(usize::MAX - 4, 16);
+        assert!(result.is_err());
     }
 }
 
