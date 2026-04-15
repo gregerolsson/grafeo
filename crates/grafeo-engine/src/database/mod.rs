@@ -177,6 +177,9 @@ pub struct GrafeoDB {
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
         Arc<RwLock<std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>>>,
+    /// Layered store (compact base + mutable overlay), set after `compact()`.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    layered_store: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
 }
 
 impl GrafeoDB {
@@ -576,6 +579,8 @@ impl GrafeoDB {
             current_schema: RwLock::new(None),
             read_only: is_read_only,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(all(feature = "compact-store", feature = "lpg"))]
+            layered_store: None,
         };
 
         // Register storage sections as memory consumers for pressure tracking
@@ -710,6 +715,8 @@ impl GrafeoDB {
             current_schema: RwLock::new(None),
             read_only: false,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(all(feature = "compact-store", feature = "lpg"))]
+            layered_store: None,
         })
     }
 
@@ -794,19 +801,21 @@ impl GrafeoDB {
             current_schema: RwLock::new(None),
             read_only: true,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            #[cfg(all(feature = "compact-store", feature = "lpg"))]
+            layered_store: None,
         })
     }
 
-    /// Converts the database to a read-only [`CompactStore`] for faster queries.
+    /// Compacts the database into a two-layer store: columnar base + mutable overlay.
     ///
     /// Takes a snapshot of all nodes and edges from the current store, builds
-    /// a columnar `CompactStore` with CSR adjacency, and switches the database
-    /// to read-only mode. The original store is dropped to free memory.
+    /// a columnar `CompactStore` with CSR adjacency as the read-only base,
+    /// and creates a fresh `LpgStore` overlay for future mutations. The
+    /// original store is dropped to free memory.
     ///
-    /// After calling this, all write queries will fail with
-    /// `TransactionError::ReadOnly`. Read queries (across all supported
-    /// languages) continue to work and benefit from ~60x memory reduction
-    /// and 100x+ traversal speedup.
+    /// Unlike the pre-0.5.39 behavior, the database remains writable after
+    /// compaction: new writes go to the overlay. Call [`recompact()`](Self::recompact)
+    /// to merge the overlay back into the columnar base periodically.
     ///
     /// # Errors
     ///
@@ -814,25 +823,101 @@ impl GrafeoDB {
     /// distinct labels or edge types).
     ///
     /// [`CompactStore`]: grafeo_core::graph::compact::CompactStore
-    #[cfg(feature = "compact-store")]
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub fn compact(&mut self) -> Result<()> {
-        use grafeo_core::graph::compact::from_graph_store;
+        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
+        use grafeo_core::graph::compact::layered::LayeredStore;
 
         let current_store = self.graph_store();
-        let compact = from_graph_store(current_store.as_ref())
-            .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))?;
 
-        self.external_read_store = Some(Arc::new(compact) as Arc<dyn GraphStore>);
-        self.external_write_store = None;
-        #[cfg(feature = "lpg")]
-        {
-            self.store = None;
-        }
-        self.read_only = true;
+        // Determine max node/edge IDs for overlay seeding.
+        let max_node_id = if let Some(ref store) = self.store {
+            store.next_node_id().saturating_sub(1)
+        } else {
+            current_store.node_ids().last().map_or(0, |id| id.as_u64())
+        };
+        let max_edge_id = if let Some(ref store) = self.store {
+            store.next_edge_id().saturating_sub(1)
+        } else {
+            // Scan edges to find max ID.
+            let mut max_eid = 0u64;
+            for nid in current_store.node_ids() {
+                for (_, eid) in
+                    current_store.edges_from(nid, grafeo_core::graph::Direction::Outgoing)
+                {
+                    max_eid = max_eid.max(eid.as_u64());
+                }
+            }
+            max_eid
+        };
+
+        let compact = from_graph_store_preserving_ids(current_store.as_ref())
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        let layered = Arc::new(
+            LayeredStore::new(compact, max_node_id, max_edge_id)
+                .map_err(|e| Error::Internal(e.to_string()))?,
+        );
+
+        // Sync the overlay's epoch with the TransactionManager so MVCC
+        // visibility works correctly for nodes created after compact().
+        let current_epoch = self.transaction_manager.current_epoch();
+        layered.overlay_store().sync_epoch(current_epoch);
+
+        self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStore>);
+        self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
+        self.layered_store = Some(layered);
+        self.store = None;
+        self.read_only = false;
         self.query_cache = Arc::new(QueryCache::default());
-        // Projections hold Arc refs to the old store: clear them so they don't
-        // serve stale data or prevent the old store's memory from being freed.
         self.projections.write().clear();
+
+        Ok(())
+    }
+
+    /// Merges the overlay back into the columnar base.
+    ///
+    /// Reads the combined view (base + overlay), builds a fresh `CompactStore`,
+    /// and replaces the `LayeredStore` with one backed by the merged base and
+    /// an empty overlay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database was not previously compacted, or if
+    /// the merge fails.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    pub fn recompact(&mut self) -> Result<()> {
+        use grafeo_core::graph::compact::from_graph_store_preserving_ids;
+        use grafeo_core::graph::compact::layered::LayeredStore;
+
+        let layered = self
+            .layered_store
+            .as_ref()
+            .ok_or_else(|| Error::Internal("recompact() requires a prior compact()".into()))?;
+
+        // Read the combined view.
+        let combined: Arc<dyn GraphStore> = Arc::clone(layered) as Arc<dyn GraphStore>;
+
+        // Max IDs from the overlay's allocators.
+        let max_node_id = layered.overlay_store().next_node_id().saturating_sub(1);
+        let max_edge_id = layered.overlay_store().next_edge_id().saturating_sub(1);
+
+        let fresh_compact = from_graph_store_preserving_ids(combined.as_ref())
+            .map_err(|e| Error::Internal(e.to_string()))?;
+
+        let new_layered = Arc::new(
+            LayeredStore::new(fresh_compact, max_node_id, max_edge_id)
+                .map_err(|e| Error::Internal(e.to_string()))?,
+        );
+
+        // Sync overlay epoch.
+        let current_epoch = self.transaction_manager.current_epoch();
+        new_layered.overlay_store().sync_epoch(current_epoch);
+
+        self.external_read_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStore>);
+        self.external_write_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStoreMut>);
+        self.layered_store = Some(new_layered);
+        self.query_cache = Arc::new(QueryCache::default());
 
         Ok(())
     }
@@ -1422,6 +1507,22 @@ impl GrafeoDB {
             #[cfg(feature = "lpg")]
             projections: Arc::clone(&self.projections),
         };
+
+        // Layered store: use the overlay LpgStore as the session's internal store
+        // so MVCC operations (begin_tx, commit, visibility) work correctly.
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if let Some(ref layered) = self.layered_store {
+            let overlay = Arc::clone(layered.overlay_store());
+            let layered_arc = Arc::clone(layered);
+            let mut session = Session::with_adaptive(overlay, session_cfg());
+            // Override graph_store/graph_store_mut to use the LayeredStore
+            // (which merges base + overlay), not just the overlay alone.
+            session.override_stores(
+                Arc::clone(&layered_arc) as Arc<dyn GraphStore>,
+                Some(layered_arc as Arc<dyn GraphStoreMut>),
+            );
+            return session;
+        }
 
         if let Some(ref ext_read) = self.external_read_store {
             return Session::with_external_store(
@@ -2133,6 +2234,24 @@ impl GrafeoDB {
     #[cfg(feature = "grafeo-file")]
     fn build_sections(&self) -> Vec<Box<dyn grafeo_common::storage::Section>> {
         let mut sections: Vec<Box<dyn grafeo_common::storage::Section>> = Vec::new();
+
+        // Layered store: serialize both the compact base and the overlay.
+        #[cfg(all(feature = "compact-store", feature = "lpg"))]
+        if let Some(ref layered) = self.layered_store {
+            // Compact base section.
+            let compact_section = grafeo_core::graph::compact::section::CompactStoreSection::new(
+                layered.base_store_arc(),
+            );
+            sections.push(Box::new(compact_section));
+
+            // Overlay LPG section.
+            let overlay = layered.overlay_store();
+            let overlay_section =
+                grafeo_core::graph::lpg::LpgStoreSection::new(Arc::clone(overlay));
+            sections.push(Box::new(overlay_section));
+
+            return sections;
+        }
 
         // LPG sections: store, catalog, vector indexes, text indexes
         #[cfg(feature = "lpg")]

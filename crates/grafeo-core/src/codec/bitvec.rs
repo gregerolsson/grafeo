@@ -119,6 +119,14 @@ fn validate_bitvec(len: usize, data: &[u64]) -> Result<BitVector, String> {
 }
 
 impl BitVector {
+    /// Reconstructs from pre-packed raw parts.
+    ///
+    /// Used by section deserialization. The caller ensures data consistency.
+    #[must_use]
+    pub fn from_raw_parts(data: Vec<u64>, len: usize) -> Self {
+        Self { data, len }
+    }
+
     /// Creates an empty bit vector.
     #[must_use]
     pub fn new() -> Self {

@@ -554,6 +554,37 @@ impl LpgStore {
             .fetch_max(epoch.as_u64(), Ordering::AcqRel);
     }
 
+    /// Returns the current next node ID counter value.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn next_node_id(&self) -> u64 {
+        self.next_node_id.load(Ordering::Acquire)
+    }
+
+    /// Returns the current next edge ID counter value.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn next_edge_id(&self) -> u64 {
+        self.next_edge_id.load(Ordering::Acquire)
+    }
+
+    /// Sets the next node ID counter.
+    ///
+    /// Used by [`LayeredStore`](crate::graph::compact::layered::LayeredStore)
+    /// to seed the overlay's ID allocator above the compact base's maximum ID.
+    #[doc(hidden)]
+    pub fn set_next_node_id(&self, id: u64) {
+        self.next_node_id.store(id, Ordering::Release);
+    }
+
+    /// Sets the next edge ID counter.
+    ///
+    /// See [`set_next_node_id`](Self::set_next_node_id).
+    #[doc(hidden)]
+    pub fn set_next_edge_id(&self, id: u64) {
+        self.next_edge_id.store(id, Ordering::Release);
+    }
+
     /// Removes all data from the store, resetting it to an empty state.
     ///
     /// Acquires locks in the documented ordering to prevent deadlocks.

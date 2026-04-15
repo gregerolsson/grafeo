@@ -1454,3 +1454,248 @@ fn test_statistics_aggregate_multi_table_edge_type() {
     assert_eq!(link_stats.edge_count, 5);
     assert_eq!(stats.total_edges, 5);
 }
+
+// ── ID-preserving CompactStore tests ───────────────────────────────
+
+#[test]
+fn test_preserving_ids_get_node() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let alix = store.create_node(&["Person"]);
+    store.set_node_property(alix, "name", Value::from("Alix"));
+    store.set_node_property(alix, "age", Value::Int64(30));
+
+    let gus = store.create_node(&["Person"]);
+    store.set_node_property(gus, "name", Value::from("Gus"));
+    store.set_node_property(gus, "age", Value::Int64(25));
+
+    let amsterdam = store.create_node(&["City"]);
+    store.set_node_property(amsterdam, "name", Value::from("Amsterdam"));
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+    assert!(compact.preserves_ids());
+
+    // Original NodeIds must work for lookup.
+    let alix_node = compact
+        .get_node(alix)
+        .expect("Alix should be found by original ID");
+    assert_eq!(
+        alix_node.properties.get(&PropertyKey::new("name")),
+        Some(&Value::String(ArcStr::from("Alix")))
+    );
+
+    let gus_node = compact
+        .get_node(gus)
+        .expect("Gus should be found by original ID");
+    assert_eq!(
+        gus_node.properties.get(&PropertyKey::new("name")),
+        Some(&Value::String(ArcStr::from("Gus")))
+    );
+
+    let amsterdam_node = compact
+        .get_node(amsterdam)
+        .expect("Amsterdam should be found by original ID");
+    assert_eq!(
+        amsterdam_node.properties.get(&PropertyKey::new("name")),
+        Some(&Value::String(ArcStr::from("Amsterdam")))
+    );
+}
+
+#[test]
+fn test_preserving_ids_node_ids_returns_originals() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let a = store.create_node(&["Item"]);
+    let b = store.create_node(&["Item"]);
+    let c = store.create_node(&["Item"]);
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    let mut ids = compact.node_ids();
+    ids.sort_unstable();
+    let mut expected = vec![a, b, c];
+    expected.sort_unstable();
+    assert_eq!(ids, expected, "node_ids() should return original IDs");
+}
+
+#[test]
+fn test_preserving_ids_nodes_by_label() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let p1 = store.create_node(&["Person"]);
+    let p2 = store.create_node(&["Person"]);
+    let c1 = store.create_node(&["City"]);
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    let mut person_ids = compact.nodes_by_label("Person");
+    person_ids.sort_unstable();
+    let mut expected = vec![p1, p2];
+    expected.sort_unstable();
+    assert_eq!(person_ids, expected);
+
+    let city_ids = compact.nodes_by_label("City");
+    assert_eq!(city_ids, vec![c1]);
+}
+
+#[test]
+fn test_preserving_ids_property_access() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let a = store.create_node(&["Item"]);
+    store.set_node_property(a, "score", Value::Int64(42));
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    assert_eq!(
+        compact.get_node_property(a, &PropertyKey::new("score")),
+        Some(Value::Int64(42)),
+        "property lookup by original ID should work"
+    );
+}
+
+#[test]
+fn test_preserving_ids_traversal() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let alix = store.create_node(&["Person"]);
+    store.set_node_property(alix, "name", Value::from("Alix"));
+    let gus = store.create_node(&["Person"]);
+    store.set_node_property(gus, "name", Value::from("Gus"));
+    let amsterdam = store.create_node(&["City"]);
+    store.set_node_property(amsterdam, "name", Value::from("Amsterdam"));
+
+    let _e1 = store.create_edge(alix, amsterdam, "LIVES_IN");
+    let _e2 = store.create_edge(gus, amsterdam, "LIVES_IN");
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    // Outgoing neighbors should use original IDs.
+    let alix_neighbors = compact.neighbors(alix, crate::graph::Direction::Outgoing);
+    assert_eq!(alix_neighbors.len(), 1);
+    assert_eq!(
+        alix_neighbors[0], amsterdam,
+        "neighbor should be the original Amsterdam ID"
+    );
+
+    // Incoming edges on Amsterdam should reference original Person IDs.
+    let incoming = compact.edges_from(amsterdam, crate::graph::Direction::Incoming);
+    assert_eq!(incoming.len(), 2);
+    let mut sources: Vec<NodeId> = incoming.iter().map(|(target, _)| *target).collect();
+    sources.sort_unstable();
+    let mut expected = vec![alix, gus];
+    expected.sort_unstable();
+    assert_eq!(sources, expected);
+}
+
+#[test]
+fn test_preserving_ids_edge_lookup() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let a = store.create_node(&["Node"]);
+    let b = store.create_node(&["Node"]);
+    let e = store.create_edge(a, b, "LINK");
+    store.set_edge_property(e, "weight", Value::Int64(5));
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    // Get the edge via traversal.
+    let edges = compact.edges_from(a, crate::graph::Direction::Outgoing);
+    assert_eq!(edges.len(), 1);
+    let (target, eid) = edges[0];
+    assert_eq!(target, b, "target should be original ID");
+
+    // Look up the edge by its compact ID (returned from edges_from).
+    let edge = compact.get_edge(eid).expect("edge should exist");
+    assert_eq!(edge.src, a, "edge.src should be original ID");
+    assert_eq!(edge.dst, b, "edge.dst should be original ID");
+    assert_eq!(
+        edge.properties.get(&PropertyKey::new("weight")),
+        Some(&Value::Int64(5))
+    );
+}
+
+#[test]
+fn test_preserving_ids_find_nodes_by_property() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let a = store.create_node(&["Item"]);
+    store.set_node_property(a, "score", Value::Int64(10));
+    let b = store.create_node(&["Item"]);
+    store.set_node_property(b, "score", Value::Int64(20));
+    let c = store.create_node(&["Item"]);
+    store.set_node_property(c, "score", Value::Int64(10));
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    let matches = compact.find_nodes_by_property("score", &Value::Int64(10));
+    assert_eq!(matches.len(), 2);
+    let mut match_set: Vec<NodeId> = matches;
+    match_set.sort_unstable();
+    let mut expected = vec![a, c];
+    expected.sort_unstable();
+    assert_eq!(match_set, expected, "find results should use original IDs");
+}
+
+#[test]
+fn test_preserving_ids_degree() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let a = store.create_node(&["Node"]);
+    let b = store.create_node(&["Node"]);
+    let c = store.create_node(&["Node"]);
+    store.create_edge(a, b, "LINK");
+    store.create_edge(a, c, "LINK");
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    assert_eq!(compact.out_degree(a), 2);
+    assert_eq!(compact.in_degree(b), 1);
+    assert_eq!(compact.in_degree(c), 1);
+}
+
+#[test]
+fn test_preserving_ids_edge_type() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let a = store.create_node(&["Node"]);
+    let b = store.create_node(&["Node"]);
+    store.create_edge(a, b, "KNOWS");
+
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+
+    let edges = compact.edges_from(a, crate::graph::Direction::Outgoing);
+    assert_eq!(edges.len(), 1);
+    let eid = edges[0].1;
+    assert_eq!(compact.edge_type(eid), Some(ArcStr::from("KNOWS")));
+}
+
+#[test]
+fn test_preserving_ids_empty_store() {
+    use crate::graph::compact::from_graph_store_preserving_ids;
+    use crate::graph::lpg::LpgStore;
+
+    let store = LpgStore::new().unwrap();
+    let compact = from_graph_store_preserving_ids(&store).unwrap();
+    assert!(compact.preserves_ids());
+    assert_eq!(compact.node_count(), 0);
+    assert_eq!(compact.edge_count(), 0);
+}

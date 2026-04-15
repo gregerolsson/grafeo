@@ -277,6 +277,20 @@ impl Session {
         }
     }
 
+    /// Overrides the graph store and write store used by the query engine.
+    ///
+    /// Used by the layered store integration: the session's `store` field is
+    /// the overlay `LpgStore` (for MVCC), but reads and writes should route
+    /// through the `LayeredStore` (which merges base + overlay).
+    pub(crate) fn override_stores(
+        &mut self,
+        read_store: Arc<dyn GraphStore>,
+        write_store: Option<Arc<dyn GraphStoreMut>>,
+    ) {
+        self.graph_store = read_store;
+        self.graph_store_mut = write_store;
+    }
+
     /// Sets the WAL for this session (shared with the database).
     ///
     /// This also wraps `graph_store` in a [`WalGraphStore`] so that mutation

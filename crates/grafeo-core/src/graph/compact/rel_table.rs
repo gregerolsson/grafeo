@@ -206,6 +206,24 @@ impl RelTable {
         self.bwd.as_ref().map(|b| b.degree(dst_offset))
     }
 
+    /// Returns the forward CSR (for serialization).
+    #[must_use]
+    pub fn fwd(&self) -> &CsrAdjacency {
+        &self.fwd
+    }
+
+    /// Returns the backward CSR, if present (for serialization).
+    #[must_use]
+    pub fn bwd(&self) -> Option<&CsrAdjacency> {
+        self.bwd.as_ref()
+    }
+
+    /// Returns edge property columns (for serialization).
+    #[must_use]
+    pub fn properties(&self) -> &FxHashMap<PropertyKey, ColumnCodec> {
+        &self.properties
+    }
+
     /// Returns an estimate of heap memory used by the CSR structures and
     /// edge property columns in bytes.
     #[must_use]

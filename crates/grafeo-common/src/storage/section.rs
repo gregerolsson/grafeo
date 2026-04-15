@@ -29,6 +29,8 @@ pub enum SectionType {
     LpgStore = 2,
     /// RDF triples and named graphs.
     RdfStore = 3,
+    /// Columnar CompactStore: read-only base for layered storage.
+    CompactStore = 4,
 
     /// Vector embeddings, HNSW topology, quantization data.
     VectorStore = 10,
@@ -106,6 +108,10 @@ impl SectionType {
             Self::RdfStore => SectionFlags {
                 required: false,
                 mmap_able: false,
+            },
+            Self::CompactStore => SectionFlags {
+                required: true,
+                mmap_able: true,
             },
             Self::VectorStore | Self::TextIndex | Self::RdfRing | Self::PropertyIndex => {
                 SectionFlags {

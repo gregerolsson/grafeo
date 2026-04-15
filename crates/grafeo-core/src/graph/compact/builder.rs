@@ -889,6 +889,151 @@ pub fn from_graph_store(
     builder.build()
 }
 
+/// Builds a [`CompactStore`] from any [`GraphStore`] with original ID preservation.
+///
+/// Same columnar conversion as [`from_graph_store`], but the resulting store
+/// keeps a bidirectional mapping between the original `NodeId`/`EdgeId` values
+/// and the internal compact positions. This enables layered storage where an
+/// overlay store shares the same ID namespace.
+///
+/// # Errors
+///
+/// Same as [`from_graph_store`].
+pub fn from_graph_store_preserving_ids(
+    store: &dyn crate::graph::traits::GraphStore,
+) -> Result<CompactStore, CompactStoreError> {
+    let mut compact = from_graph_store(store)?;
+
+    // ── Build node ID maps (replicate the label grouping logic) ────
+
+    let labels = store.all_labels();
+    if labels.is_empty() {
+        compact.set_id_maps(
+            FxHashMap::default(),
+            FxHashMap::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        return Ok(compact);
+    }
+
+    let mut node_id_map: FxHashMap<grafeo_common::types::NodeId, (u16, u64)> = FxHashMap::default();
+    let num_tables = compact.node_tables_by_id.len();
+    let mut node_offset_to_id: Vec<Vec<grafeo_common::types::NodeId>> =
+        vec![Vec::new(); num_tables];
+
+    // Track per-label-key offset counters (same order as from_graph_store step 1).
+    let mut seen: FxHashSet<grafeo_common::types::NodeId> = FxHashSet::default();
+    let mut label_key_offsets: FxHashMap<ArcStr, u32> = FxHashMap::default();
+
+    for label in &labels {
+        let node_ids = store.nodes_by_label(label);
+        for &nid in &node_ids {
+            if !seen.insert(nid) {
+                continue;
+            }
+            let Some(node) = store.get_node(nid) else {
+                continue;
+            };
+
+            let label_key: ArcStr = if node.labels.len() <= 1 {
+                ArcStr::from(label.as_str())
+            } else {
+                let mut sorted: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+                sorted.sort_unstable();
+                ArcStr::from(sorted.join("|"))
+            };
+
+            let offset = label_key_offsets.entry(label_key.clone()).or_insert(0);
+            let current_offset = *offset;
+            *offset += 1;
+
+            if let Some(&table_id) = compact.label_to_table_id.get(&label_key) {
+                node_id_map.insert(nid, (table_id, u64::from(current_offset)));
+                if let Some(rev) = node_offset_to_id.get_mut(table_id as usize) {
+                    // Extend if needed (offsets should be sequential).
+                    while rev.len() <= current_offset as usize {
+                        rev.push(grafeo_common::types::NodeId::INVALID);
+                    }
+                    rev[current_offset as usize] = nid;
+                }
+            }
+        }
+    }
+
+    // ── Build edge ID maps ─────────────────────────────────────────
+
+    // Build (edge_type, src_table_id, dst_table_id) -> rel_table_id lookup.
+    type RelKey = (ArcStr, u16, u16);
+    let mut rel_key_to_id: FxHashMap<RelKey, u16> = FxHashMap::default();
+    for (idx, rt) in compact.rel_tables_by_id.iter().enumerate() {
+        let key = (rt.edge_type().clone(), rt.src_table_id(), rt.dst_table_id());
+        rel_key_to_id.insert(key, idx as u16);
+    }
+
+    // Collect all edges grouped by (edge_type, src_table, dst_table), tracking
+    // original EdgeId and (src_offset, dst_offset) for each.
+    type EdgeGroupEntry = (grafeo_common::types::EdgeId, u32, u32); // (original_eid, src_off, dst_off)
+    let mut edge_groups: FxHashMap<RelKey, Vec<EdgeGroupEntry>> = FxHashMap::default();
+
+    let mut seen_edges: FxHashSet<grafeo_common::types::EdgeId> = FxHashSet::default();
+    for &nid in node_id_map.keys() {
+        let outgoing = store.edges_from(nid, crate::graph::Direction::Outgoing);
+        for (_target_nid, edge_id) in outgoing {
+            if !seen_edges.insert(edge_id) {
+                continue;
+            }
+            let Some(edge) = store.get_edge(edge_id) else {
+                continue;
+            };
+            let Some(&(src_tid, src_off)) = node_id_map.get(&edge.src) else {
+                continue;
+            };
+            let Some(&(dst_tid, dst_off)) = node_id_map.get(&edge.dst) else {
+                continue;
+            };
+
+            let key: RelKey = (edge.edge_type.clone(), src_tid, dst_tid);
+            edge_groups
+                .entry(key)
+                .or_default()
+                .push((edge_id, src_off as u32, dst_off as u32));
+        }
+    }
+
+    // Sort each group by (src_offset, dst_offset) to match CSR construction order,
+    // then build the edge_id_map from the resulting positions.
+    let num_rel_tables = compact.rel_tables_by_id.len();
+    let mut edge_id_map: FxHashMap<grafeo_common::types::EdgeId, (u16, u64)> = FxHashMap::default();
+    let mut edge_offset_to_id: Vec<Vec<grafeo_common::types::EdgeId>> =
+        vec![Vec::new(); num_rel_tables];
+
+    for (key, mut entries) in edge_groups {
+        let Some(&rel_table_id) = rel_key_to_id.get(&key) else {
+            continue;
+        };
+        // Sort by (src_offset, dst_offset) to match CSR order.
+        entries.sort_by_key(|&(_, src, dst)| (src, dst));
+
+        let rev = &mut edge_offset_to_id[rel_table_id as usize];
+        for (csr_pos, (original_eid, _src, _dst)) in entries.iter().enumerate() {
+            edge_id_map.insert(*original_eid, (rel_table_id, csr_pos as u64));
+            while rev.len() <= csr_pos {
+                rev.push(grafeo_common::types::EdgeId::INVALID);
+            }
+            rev[csr_pos] = *original_eid;
+        }
+    }
+
+    compact.set_id_maps(
+        node_id_map,
+        edge_id_map,
+        node_offset_to_id,
+        edge_offset_to_id,
+    );
+    Ok(compact)
+}
+
 /// Infers the columnar encoding type from a slice of [`Value`]s.
 ///
 /// Rules:

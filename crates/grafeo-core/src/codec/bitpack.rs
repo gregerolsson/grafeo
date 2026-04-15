@@ -37,6 +37,19 @@ pub struct BitPackedInts {
 }
 
 impl BitPackedInts {
+    /// Reconstructs from pre-packed raw parts.
+    ///
+    /// Used by section deserialization. The caller is responsible for ensuring
+    /// the data is consistent (correct word count for the given bits and count).
+    #[must_use]
+    pub fn from_raw_parts(data: Vec<u64>, bits_per_value: u8, count: usize) -> Self {
+        Self {
+            data,
+            bits_per_value,
+            count,
+        }
+    }
+
     /// Packs a slice of u64 values using the minimum bits needed.
     #[must_use]
     pub fn pack(values: &[u64]) -> Self {

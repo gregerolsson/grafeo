@@ -248,6 +248,146 @@ impl ColumnCodec {
             .collect()
     }
 
+    // ── Serialization (for CompactStoreSection) ───────────────────
+
+    /// Serializes this codec to a byte buffer.
+    ///
+    /// Format: `[discriminant: u8][codec-specific data]`
+    pub fn write_to(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::BitPacked(bp) => {
+                buf.push(0); // discriminant
+                buf.push(bp.bits_per_value());
+                let count = bp.len() as u32;
+                buf.extend_from_slice(&count.to_le_bytes());
+                let data = bp.data();
+                let data_len = data.len() as u32;
+                buf.extend_from_slice(&data_len.to_le_bytes());
+                for &word in data {
+                    buf.extend_from_slice(&word.to_le_bytes());
+                }
+            }
+            Self::Dict(dict) => {
+                buf.push(1); // discriminant
+                let dict_entries = dict.dictionary();
+                let dict_len = dict_entries.len() as u32;
+                buf.extend_from_slice(&dict_len.to_le_bytes());
+                for entry in dict_entries.iter() {
+                    let s = entry.as_ref().as_bytes();
+                    let slen = s.len() as u32;
+                    buf.extend_from_slice(&slen.to_le_bytes());
+                    buf.extend_from_slice(s);
+                }
+                let codes = dict.codes();
+                let codes_len = codes.len() as u32;
+                buf.extend_from_slice(&codes_len.to_le_bytes());
+                for &code in codes {
+                    buf.extend_from_slice(&code.to_le_bytes());
+                }
+            }
+            Self::Bitmap(bv) => {
+                buf.push(2); // discriminant
+                let bit_len = bv.len() as u32;
+                buf.extend_from_slice(&bit_len.to_le_bytes());
+                let data = bv.data();
+                let data_len = data.len() as u32;
+                buf.extend_from_slice(&data_len.to_le_bytes());
+                for &word in data {
+                    buf.extend_from_slice(&word.to_le_bytes());
+                }
+            }
+            Self::Int8Vector { data, dimensions } => {
+                buf.push(3); // discriminant
+                buf.extend_from_slice(&dimensions.to_le_bytes());
+                let data_len = data.len() as u32;
+                buf.extend_from_slice(&data_len.to_le_bytes());
+                for &v in data {
+                    buf.push(v as u8);
+                }
+            }
+        }
+    }
+
+    /// Deserializes a codec from a byte buffer at the given offset.
+    ///
+    /// Returns the decoded codec and advances `pos` past the consumed bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data is truncated or the discriminant is unknown.
+    pub fn read_from(data: &[u8], pos: &mut usize) -> Result<Self, &'static str> {
+        let discriminant = *data.get(*pos).ok_or("truncated codec discriminant")?;
+        *pos += 1;
+
+        match discriminant {
+            0 => {
+                // BitPacked
+                let bits = *data.get(*pos).ok_or("truncated bits_per_value")?;
+                *pos += 1;
+                let count = read_u32_le(data, pos)? as usize;
+                let data_len = read_u32_le(data, pos)? as usize;
+                let mut words = Vec::with_capacity(data_len);
+                for _ in 0..data_len {
+                    words.push(read_u64_le(data, pos)?);
+                }
+                Ok(Self::BitPacked(BitPackedInts::from_raw_parts(
+                    words, bits, count,
+                )))
+            }
+            1 => {
+                // Dict
+                let dict_len = read_u32_le(data, pos)? as usize;
+                let mut entries: Vec<Arc<str>> = Vec::with_capacity(dict_len);
+                for _ in 0..dict_len {
+                    let slen = read_u32_le(data, pos)? as usize;
+                    if *pos + slen > data.len() {
+                        return Err("truncated dict string");
+                    }
+                    let s = std::str::from_utf8(&data[*pos..*pos + slen])
+                        .map_err(|_| "invalid UTF-8 in dict")?;
+                    entries.push(Arc::from(s));
+                    *pos += slen;
+                }
+                let codes_len = read_u32_le(data, pos)? as usize;
+                let mut codes = Vec::with_capacity(codes_len);
+                for _ in 0..codes_len {
+                    codes.push(read_u32_le(data, pos)?);
+                }
+                Ok(Self::Dict(DictionaryEncoding::new(
+                    Arc::from(entries.into_boxed_slice()),
+                    codes,
+                )))
+            }
+            2 => {
+                // Bitmap
+                let bit_len = read_u32_le(data, pos)? as usize;
+                let data_len = read_u32_le(data, pos)? as usize;
+                let mut words = Vec::with_capacity(data_len);
+                for _ in 0..data_len {
+                    words.push(read_u64_le(data, pos)?);
+                }
+                Ok(Self::Bitmap(BitVector::from_raw_parts(words, bit_len)))
+            }
+            3 => {
+                // Int8Vector
+                let dimensions = read_u16_le(data, pos)?;
+                let data_len = read_u32_le(data, pos)? as usize;
+                if *pos + data_len > data.len() {
+                    return Err("truncated Int8Vector data");
+                }
+                let bytes = &data[*pos..*pos + data_len];
+                // Safe: u8 and i8 have the same layout.
+                let i8_data: Vec<i8> = bytes.iter().map(|&b| b as i8).collect();
+                *pos += data_len;
+                Ok(Self::Int8Vector {
+                    data: i8_data,
+                    dimensions,
+                })
+            }
+            _ => Err("unknown codec discriminant"),
+        }
+    }
+
     /// Returns an estimate of heap memory used by this column in bytes.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
@@ -262,6 +402,35 @@ impl ColumnCodec {
             Self::Int8Vector { data, .. } => data.len(),
         }
     }
+}
+
+// ── Binary read helpers ─────────────────────────────────────────
+
+fn read_u16_le(data: &[u8], pos: &mut usize) -> Result<u16, &'static str> {
+    if *pos + 2 > data.len() {
+        return Err("truncated u16");
+    }
+    let v = u16::from_le_bytes([data[*pos], data[*pos + 1]]);
+    *pos += 2;
+    Ok(v)
+}
+
+fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, &'static str> {
+    if *pos + 4 > data.len() {
+        return Err("truncated u32");
+    }
+    let v = u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+    *pos += 4;
+    Ok(v)
+}
+
+fn read_u64_le(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
+    if *pos + 8 > data.len() {
+        return Err("truncated u64");
+    }
+    let v = u64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+    *pos += 8;
+    Ok(v)
 }
 
 #[cfg(test)]
