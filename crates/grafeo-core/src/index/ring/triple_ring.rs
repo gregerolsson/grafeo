@@ -251,8 +251,10 @@ impl TripleRing {
         // reason: dictionary IDs fit u32
         #[allow(clippy::cast_possible_truncation)]
         let s_id = self.subjects.access(index) as u32;
+        // reason: dictionary IDs fit u32
         #[allow(clippy::cast_possible_truncation)]
         let p_id = self.predicates.access(index) as u32;
+        // reason: dictionary IDs fit u32
         #[allow(clippy::cast_possible_truncation)]
         let o_id = self.objects.access(index) as u32;
 

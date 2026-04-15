@@ -226,9 +226,11 @@ impl StringTableBuilder {
         let mut packed = Vec::new();
         let mut offsets = Vec::with_capacity(self.strings.len());
         for s in &self.strings {
+            // reason: packed buffer and string lengths bounded by section size, fit u32
             #[allow(clippy::cast_possible_truncation)]
             offsets.push(packed.len() as u32);
             let bytes = s.as_bytes();
+            // reason: individual string lengths bounded by section size, fit u32
             #[allow(clippy::cast_possible_truncation)]
             packed.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             packed.extend_from_slice(bytes);
@@ -704,6 +706,7 @@ pub(crate) fn write_blocks(
     #[allow(clippy::cast_possible_truncation)]
     label_buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
     for node in nodes {
+        // reason: label count per node is bounded, fits u16
         #[allow(clippy::cast_possible_truncation)]
         label_buf.extend_from_slice(&(node.labels.len() as u16).to_le_bytes());
         for label in &node.labels {
@@ -758,6 +761,7 @@ pub(crate) fn write_blocks(
             // reason: section offsets and block sizes fit u32
             #[allow(clippy::cast_possible_truncation)]
             offset: data_offset as u32,
+            // reason: block data offset and length bounded by block capacity (64 KB)
             #[allow(clippy::cast_possible_truncation)]
             length: block_data.len() as u32,
             checksum,
@@ -870,6 +874,7 @@ fn write_property_column<'a>(
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
+        // reason: version count per entity is bounded, fits u16
         #[allow(clippy::cast_possible_truncation)]
         buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
         for (epoch, value) in *versions {
@@ -903,6 +908,7 @@ fn write_property_column_edges<'a>(
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
+        // reason: version count per entity is bounded, fits u16
         #[allow(clippy::cast_possible_truncation)]
         buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
         for (epoch, value) in *versions {
@@ -1523,6 +1529,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs 1..=1000 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_large_graph_round_trip() {
         // 1000 nodes, 2000 edges
         let nodes: Vec<BlockNode> = (1..=1000)

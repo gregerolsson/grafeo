@@ -81,6 +81,102 @@ pub fn convert_to_pipeline(
     (source, push_ops)
 }
 
+/// Converts a pull-based operator tree into a push pipeline with memory-aware spilling.
+///
+/// When `memory_ctx` is `Some`, Sort and Aggregate operators are created as their
+/// spillable variants that register with the `BufferManager` and spill based on
+/// system memory pressure. When `memory_ctx` is `None`, delegates to
+/// [`convert_to_pipeline`] (non-spillable operators).
+#[cfg(feature = "spill")]
+pub fn convert_to_pipeline_with_memory(
+    root: Box<dyn Operator>,
+    memory_ctx: Option<super::memory::OperatorMemoryContext>,
+) -> (Box<dyn Operator>, Vec<Box<dyn PushOperator>>) {
+    let Some(ctx) = memory_ctx else {
+        return convert_to_pipeline(root);
+    };
+    let mut push_ops: Vec<Box<dyn PushOperator>> = Vec::new();
+    let source = decompose_recursive_memory(root, &mut push_ops, &ctx);
+    push_ops.reverse();
+    (source, push_ops)
+}
+
+/// Recursively decomposes operators with memory-aware spillable variants.
+#[cfg(feature = "spill")]
+fn decompose_recursive_memory(
+    op: Box<dyn Operator>,
+    push_ops: &mut Vec<Box<dyn PushOperator>>,
+    ctx: &super::memory::OperatorMemoryContext,
+) -> Box<dyn Operator> {
+    use super::operators::{SpillableAggregatePushOperator, SpillableSortPushOperator};
+
+    match op.name() {
+        "Filter" => {
+            let any = op.into_any();
+            let filter = any
+                .downcast::<FilterOperator>()
+                .expect("name() returned 'Filter' but downcast failed");
+            let (child, predicate) = filter.into_parts();
+            push_ops.push(Box::new(FilterPushOperator::new(Box::new(
+                PredicateAdapter(predicate),
+            ))));
+            decompose_recursive_memory(child, push_ops, ctx)
+        }
+        "Sort" => {
+            let any = op.into_any();
+            let sort = any
+                .downcast::<SortOperator>()
+                .expect("name() returned 'Sort' but downcast failed");
+            let (child, sort_keys) = sort.into_parts();
+            let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
+            push_ops.push(Box::new(SpillableSortPushOperator::with_memory_context(
+                push_keys,
+                ctx.clone(),
+            )));
+            decompose_recursive_memory(child, push_ops, ctx)
+        }
+        "HashAggregate" => {
+            let any = op.into_any();
+            let agg = any
+                .downcast::<HashAggregateOperator>()
+                .expect("name() returned 'HashAggregate' but downcast failed");
+            let (child, group_columns, aggregates) = agg.into_parts();
+            push_ops.push(Box::new(
+                SpillableAggregatePushOperator::with_memory_context(
+                    group_columns,
+                    aggregates,
+                    ctx.clone(),
+                ),
+            ));
+            decompose_recursive_memory(child, push_ops, ctx)
+        }
+        "Limit" => {
+            let any = op.into_any();
+            let limit = any
+                .downcast::<LimitOperator>()
+                .expect("name() returned 'Limit' but downcast failed");
+            let (child, count) = limit.into_parts();
+            push_ops.push(Box::new(LimitPushOperator::new(count)));
+            decompose_recursive_memory(child, push_ops, ctx)
+        }
+        "Distinct" => {
+            let any = op.into_any();
+            let distinct = any
+                .downcast::<DistinctOperator>()
+                .expect("name() returned 'Distinct' but downcast failed");
+            let (child, columns) = distinct.into_parts();
+            let push_distinct = if let Some(cols) = columns {
+                DistinctPushOperator::on_columns(cols)
+            } else {
+                DistinctPushOperator::new()
+            };
+            push_ops.push(Box::new(push_distinct));
+            decompose_recursive_memory(child, push_ops, ctx)
+        }
+        _ => op,
+    }
+}
+
 /// Recursively decomposes operators, collecting push equivalents.
 ///
 /// Uses `name()` to identify the operator type, then `into_any()` + downcast

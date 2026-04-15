@@ -3,6 +3,8 @@
 //! Each benchmark creates a workload, measures creation time via Criterion,
 //! then records the absolute memory footprint to a JSON snapshot file at
 //! `target/criterion/memory_snapshot.json`. The CI comparison script reads
+// Bench indices are small known values
+#![allow(clippy::cast_possible_wrap)]
 //! that file and checks against absolute bounds in `bench-thresholds.toml`.
 //!
 //! Run with: cargo bench --all-features --bench memory_bench

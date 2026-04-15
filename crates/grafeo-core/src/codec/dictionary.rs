@@ -156,6 +156,7 @@ impl DictionaryEncoding {
             .position(|s| s.as_ref() == value)
             // reason: dictionary size is bounded by u32 (codes are u32)
             .map(|i| {
+                // reason: dictionary size bounded by u32 (codes are u32)
                 #[allow(clippy::cast_possible_truncation)]
                 let code = i as u32;
                 code

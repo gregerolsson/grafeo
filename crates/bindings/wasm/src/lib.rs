@@ -1279,6 +1279,7 @@ fn json_to_node_id(
             val.as_f64().and_then(|f| {
                 // reason: Reject negative, NaN, Infinity, fractional, and out-of-range values
                 if (0.0..=9_007_199_254_740_991.0).contains(&f) && f.fract() == 0.0 {
+                    // reason: range check above rejects negative values
                     #[allow(clippy::cast_sign_loss)]
                     Some(f as u64)
                 } else {

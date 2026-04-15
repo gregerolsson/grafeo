@@ -124,6 +124,8 @@ mod tests {
             }
             self.chunks_remaining -= 1;
             let mut col = ValueVector::with_capacity(LogicalType::Int64, self.rows_per_chunk);
+            // reason: test chunk rows are small, fit i64
+            #[allow(clippy::cast_possible_wrap)]
             for i in 0..self.rows_per_chunk {
                 col.push(grafeo_common::types::Value::Int64(i as i64));
             }

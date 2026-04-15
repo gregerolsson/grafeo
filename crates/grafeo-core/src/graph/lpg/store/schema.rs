@@ -74,7 +74,7 @@ impl LpgStore {
             && let Some(record) = chain.latest_mut()
         {
             let count = self.node_labels.read().get(&node_id).map_or(0, |s| s.len());
-            record.set_label_count(count as u16);
+            record.set_label_count(u16::try_from(count).unwrap_or(u16::MAX));
         }
 
         true
@@ -224,7 +224,7 @@ impl LpgStore {
             && let Some(record) = chain.latest_mut()
         {
             let count = self.node_labels.read().get(&node_id).map_or(0, |s| s.len());
-            record.set_label_count(count as u16);
+            record.set_label_count(u16::try_from(count).unwrap_or(u16::MAX));
         }
 
         true

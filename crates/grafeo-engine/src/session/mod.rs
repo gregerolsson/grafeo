@@ -85,6 +85,8 @@ pub(crate) struct SessionConfig {
     pub graph_model: GraphModel,
     pub query_timeout: Option<Duration>,
     pub max_property_size: Option<usize>,
+    /// Buffer manager for memory-aware query execution.
+    pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
     /// When true, the session permanently blocks all mutations.
@@ -146,6 +148,8 @@ pub struct Session {
     query_timeout: Option<Duration>,
     /// Maximum size in bytes for a single property value.
     max_property_size: Option<usize>,
+    /// Buffer manager for memory-aware execution (spill decisions).
+    buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
     /// GC every N commits (0 = disabled).
@@ -254,6 +258,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),
@@ -364,6 +369,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),
@@ -2665,10 +2671,22 @@ impl Session {
 
             // Execute the plan via push-based pipeline when possible
             let executor = self.make_executor(physical_plan.columns.clone());
-            let (mut source, push_ops) =
-                grafeo_core::execution::pipeline_convert::convert_to_pipeline(
-                    physical_plan.into_operator(),
-                );
+            let (mut source, push_ops) = {
+                #[cfg(feature = "spill")]
+                {
+                    let memory_ctx = self.make_operator_memory_context();
+                    grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
+                        physical_plan.into_operator(),
+                        memory_ctx,
+                    )
+                }
+                #[cfg(not(feature = "spill"))]
+                {
+                    grafeo_core::execution::pipeline_convert::convert_to_pipeline(
+                        physical_plan.into_operator(),
+                    )
+                }
+            };
             let mut result = if push_ops.is_empty() {
                 // Pure source query: use traditional pull-based execution
                 executor.execute(source.as_mut())?
@@ -4253,17 +4271,45 @@ impl Session {
             .with_timeout_duration(self.query_timeout)
     }
 
+    /// Creates a per-query `OperatorMemoryContext` for memory-aware spilling.
+    ///
+    /// Returns `None` if the buffer manager is not configured or has no spill path,
+    /// in which case operators will use row-count fallback thresholds.
+    #[cfg(feature = "spill")]
+    fn make_operator_memory_context(
+        &self,
+    ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
+        let bm = self.buffer_manager.as_ref()?;
+        let spill_path = bm.config().spill_path.as_ref()?;
+        // Per-query isolation: create a unique subdirectory
+        let query_id = self
+            .commit_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let query_dir = spill_path.join(format!("query_{query_id}"));
+        let sm = std::sync::Arc::new(grafeo_core::execution::SpillManager::new(&query_dir).ok()?);
+        Some(grafeo_core::execution::OperatorMemoryContext::new(
+            std::sync::Arc::clone(bm),
+            sm,
+        ))
+    }
+
     /// Checks that a property value does not exceed the configured size limit.
     fn check_property_size(&self, key: &str, value: &Value) -> Result<()> {
         if let Some(limit) = self.max_property_size {
             let size = value.estimated_size_bytes();
             if size > limit {
-                let limit_mb = limit / (1024 * 1024);
+                let limit_display = if limit >= 1024 * 1024 && limit % (1024 * 1024) == 0 {
+                    format!("{} MiB", limit / (1024 * 1024))
+                } else if limit >= 1024 && limit % 1024 == 0 {
+                    format!("{} KiB", limit / 1024)
+                } else {
+                    format!("{limit} bytes")
+                };
                 return Err(grafeo_common::utils::error::Error::Query(
                     grafeo_common::utils::error::QueryError::new(
                         grafeo_common::utils::error::QueryErrorKind::Execution,
                         format!(
-                            "Property '{key}' value exceeds maximum size of {limit_mb} MiB ({size} bytes)"
+                            "Property '{key}' value exceeds maximum size of {limit_display} ({size} bytes)"
                         ),
                     )
                     .with_hint(
@@ -4398,9 +4444,10 @@ impl Session {
         .with_session_context(session_context)
         .with_read_only(read_only);
 
-        // Attach the constraint validator for schema enforcement
-        let validator =
-            CatalogConstraintValidator::new(Arc::clone(&self.catalog)).with_store(store);
+        // Attach the constraint validator for schema enforcement and property size limits
+        let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
+            .with_store(store)
+            .with_max_property_size(self.max_property_size);
         planner = planner.with_validator(Arc::new(validator));
 
         planner
@@ -4416,6 +4463,7 @@ impl Session {
         // reason: node/edge counts will not exceed i64::MAX
         #[allow(clippy::cast_possible_wrap)]
         let node_count = store.node_count() as i64;
+        // reason: value is a small counter, well within i64::MAX
         #[allow(clippy::cast_possible_wrap)]
         let edge_count = store.edge_count() as i64;
         map.insert(PropertyKey::from("node_count"), Value::Int64(node_count));
@@ -4478,19 +4526,27 @@ impl Session {
     /// Creates a node with properties.
     ///
     /// If a transaction is active, the node will be versioned with the transaction ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any property value exceeds the configured `max_property_size`.
     #[cfg(feature = "lpg")]
     pub fn create_node_with_props<'a>(
         &self,
         labels: &[&str],
         properties: impl IntoIterator<Item = (&'a str, Value)>,
-    ) -> NodeId {
+    ) -> Result<NodeId> {
+        let props: Vec<(&str, Value)> = properties.into_iter().collect();
+        for (key, value) in &props {
+            self.check_property_size(key, value)?;
+        }
         let (epoch, transaction_id) = self.get_transaction_context();
-        self.active_lpg_store().create_node_with_props_versioned(
+        Ok(self.active_lpg_store().create_node_with_props_versioned(
             labels,
-            properties,
+            props,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
-        )
+        ))
     }
 
     /// Creates an edge between two nodes.
@@ -4515,6 +4571,10 @@ impl Session {
     }
 
     /// Creates an edge with properties within the active transaction context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any property value exceeds the configured `max_property_size`.
     #[cfg(feature = "lpg")]
     pub fn create_edge_with_props<'a>(
         &self,
@@ -4522,15 +4582,19 @@ impl Session {
         dst: NodeId,
         edge_type: &str,
         properties: impl IntoIterator<Item = (&'a str, Value)>,
-    ) -> grafeo_common::types::EdgeId {
+    ) -> Result<grafeo_common::types::EdgeId> {
+        let props: Vec<(&str, Value)> = properties.into_iter().collect();
+        for (key, value) in &props {
+            self.check_property_size(key, value)?;
+        }
         let (epoch, transaction_id) = self.get_transaction_context();
         let tid = transaction_id.unwrap_or(TransactionId::SYSTEM);
         let store = self.active_lpg_store();
         let eid = store.create_edge_versioned(src, dst, edge_type, epoch, tid);
-        for (key, value) in properties {
+        for (key, value) in props {
             store.set_edge_property_versioned(eid, key, value, tid);
         }
-        eid
+        Ok(eid)
     }
 
     /// Sets a node property within the active transaction context.
@@ -4653,7 +4717,7 @@ impl Session {
     /// # use grafeo_common::types::Value;
     /// # let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
-    /// let id = session.create_node_with_props(&["Person"], [("name", "Alix".into())]);
+    /// let id = session.create_node_with_props(&["Person"], [("name", "Alix".into())]).unwrap();
     ///
     /// // Direct property access - O(1)
     /// let name = session.get_node_property(id, "name");
@@ -5124,8 +5188,9 @@ mod tests {
         session.begin_transaction().unwrap();
         let transaction_id = session.current_transaction.lock().unwrap();
 
-        let node_in_tx =
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+        let node_in_tx = session
+            .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+            .unwrap();
         assert!(node_in_tx.is_valid());
 
         // Uncommitted nodes use EpochId::PENDING, so they are invisible to
@@ -5274,9 +5339,15 @@ mod tests {
             let session = db.session();
 
             // Create people with ages
-            session.create_node_with_props(&["Person"], [("age", Value::Int64(25))]);
-            session.create_node_with_props(&["Person"], [("age", Value::Int64(35))]);
-            session.create_node_with_props(&["Person"], [("age", Value::Int64(45))]);
+            session
+                .create_node_with_props(&["Person"], [("age", Value::Int64(25))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("age", Value::Int64(35))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("age", Value::Int64(45))])
+                .unwrap();
 
             // Query with WHERE clause: age > 30
             let result = session
@@ -5295,9 +5366,15 @@ mod tests {
             let session = db.session();
 
             // Create people with names
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-            session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
 
             // Query with WHERE clause: name = "Alix"
             let result = session
@@ -5316,20 +5393,24 @@ mod tests {
             let session = db.session();
 
             // Create people with names and ages
-            session.create_node_with_props(
-                &["Person"],
-                [
-                    ("name", Value::String("Alix".into())),
-                    ("age", Value::Int64(30)),
-                ],
-            );
-            session.create_node_with_props(
-                &["Person"],
-                [
-                    ("name", Value::String("Gus".into())),
-                    ("age", Value::Int64(25)),
-                ],
-            );
+            session
+                .create_node_with_props(
+                    &["Person"],
+                    [
+                        ("name", Value::String("Alix".into())),
+                        ("age", Value::Int64(30)),
+                    ],
+                )
+                .unwrap();
+            session
+                .create_node_with_props(
+                    &["Person"],
+                    [
+                        ("name", Value::String("Gus".into())),
+                        ("age", Value::Int64(25)),
+                    ],
+                )
+                .unwrap();
 
             // Query returning properties
             let result = session
@@ -5356,7 +5437,9 @@ mod tests {
             let session = db.session();
 
             // Create a person
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
 
             // Query returning both node and property
             let result = session
@@ -5456,7 +5539,8 @@ mod tests {
             let session = db.session();
 
             let id = session
-                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
 
             let name = session.get_node_property(id, "name");
             assert_eq!(name, Some(Value::String("Alix".into())));

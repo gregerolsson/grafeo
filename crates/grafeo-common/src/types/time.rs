@@ -219,6 +219,7 @@ impl Time {
                 // reason: nanos < NANOS_PER_DAY and constants are well within i64 range
                 #[allow(clippy::cast_possible_wrap)]
                 let adjusted = self.nanos as i64 - off as i64 * NANOS_PER_SECOND as i64;
+                // reason: rem_euclid result is non-negative and < NANOS_PER_DAY, fits u64
                 #[allow(clippy::cast_possible_wrap)]
                 let result = adjusted.rem_euclid(NANOS_PER_DAY as i64) as u64;
                 result

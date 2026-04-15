@@ -64,9 +64,11 @@ impl StringTableBuilder {
         let mut packed = Vec::new();
         let mut offsets = Vec::with_capacity(self.strings.len());
         for s in &self.strings {
+            // reason: packed buffer and string lengths bounded by section size, fit u32
             #[allow(clippy::cast_possible_truncation)]
             offsets.push(packed.len() as u32);
             let bytes = s.as_bytes();
+            // reason: individual string lengths bounded by section size, fit u32
             #[allow(clippy::cast_possible_truncation)]
             packed.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             packed.extend_from_slice(bytes);
@@ -193,6 +195,7 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
     // reason: section counts and block sizes fit u32
     #[allow(clippy::cast_possible_truncation)]
     buf.extend_from_slice(&(triples.len() as u32).to_le_bytes()); // triple_count
+    // reason: section triple/graph counts bounded by u32::MAX
     #[allow(clippy::cast_possible_truncation)]
     buf.extend_from_slice(&(named_graphs.len() as u32).to_le_bytes()); // graph_count
     // Pad to 32 bytes
@@ -200,12 +203,14 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
     debug_assert_eq!(buf.len(), HEADER_SIZE);
 
     // Write string table block: [length:u32][data][crc:u32]
+    // reason: section block sizes are bounded by section limits, fit u32
     #[allow(clippy::cast_possible_truncation)]
     buf.extend_from_slice(&(st_data.len() as u32).to_le_bytes());
     buf.extend_from_slice(&st_data);
     buf.extend_from_slice(&st_crc.to_le_bytes());
 
     // Write triple data block: [length:u32][data][crc:u32]
+    // reason: section block sizes are bounded by section limits, fit u32
     #[allow(clippy::cast_possible_truncation)]
     buf.extend_from_slice(&(triple_data.len() as u32).to_le_bytes());
     buf.extend_from_slice(&triple_data);

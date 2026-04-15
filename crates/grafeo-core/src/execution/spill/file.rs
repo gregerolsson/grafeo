@@ -225,9 +225,13 @@ impl SpillFileReader {
     ///
     /// Returns an error if the read fails.
     pub fn read_bytes(&mut self) -> std::io::Result<Vec<u8>> {
-        // reason: deserialized lengths are bounded by available data
-        #[allow(clippy::cast_possible_truncation)]
-        let len = self.read_u64_le()? as usize;
+        let raw_len = self.read_u64_le()?;
+        let len = usize::try_from(raw_len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("byte-prefix length {raw_len} exceeds addressable range"),
+            )
+        })?;
         let mut buf = vec![0u8; len];
         self.read_exact(&mut buf)?;
         Ok(buf)

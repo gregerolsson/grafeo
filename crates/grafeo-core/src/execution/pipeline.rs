@@ -444,6 +444,8 @@ mod tests {
             self.remaining -= 1;
 
             // Create a chunk with integer values
+            // reason: test chunk size is small, fits i64
+            #[allow(clippy::cast_possible_wrap)]
             let values: Vec<Value> = (0..self.values_per_chunk)
                 .map(|i| Value::Int64(i as i64))
                 .collect();

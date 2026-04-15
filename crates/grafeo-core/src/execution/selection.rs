@@ -56,6 +56,7 @@ impl SelectionVector {
             .filter(|&i| predicate(i))
             // reason: i < count which is bounded by MAX_CAPACITY (65535), fits u16
             .map(|i| {
+                // reason: i < count, bounded by MAX_CAPACITY (65535), fits u16
                 #[allow(clippy::cast_possible_truncation)]
                 let idx = i as u16;
                 idx

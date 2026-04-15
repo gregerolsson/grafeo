@@ -65,17 +65,21 @@ impl VectorSource {
     }
 
     /// Create from node IDs.
-    pub fn from_node_ids(ids: Vec<NodeId>) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any `NodeId` exceeds the `i64` range.
+    pub fn from_node_ids(ids: Vec<NodeId>) -> Result<Self, OperatorError> {
         let values: Vec<Value> = ids
             .into_iter()
-            // reason: NodeId stored as i64 value, standard ID encoding pattern
             .map(|id| {
-                #[allow(clippy::cast_possible_wrap)]
-                let val = Value::Int64(id.0 as i64);
-                val
+                let signed = i64::try_from(id.0).map_err(|_| {
+                    OperatorError::Execution(format!("NodeId {} exceeds i64 range", id.0))
+                })?;
+                Ok(Value::Int64(signed))
             })
-            .collect();
-        Self::single_column(values)
+            .collect::<Result<Vec<_>, OperatorError>>()?;
+        Ok(Self::single_column(values))
     }
 }
 
@@ -440,6 +444,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test values 0..5 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_generator_source() {
         let mut source = GeneratorSource::new(|i| {
             if i < 5 {

@@ -5355,6 +5355,7 @@ fn value_to_string(value: &Value) -> String {
             // reason: counter values are small increments, sum will not overflow i64
             #[allow(clippy::cast_possible_wrap)]
             let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
+            // reason: value is a small counter, well within i64::MAX
             #[allow(clippy::cast_possible_wrap)]
             let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
             format!("OnCounter({})", pos_sum - neg_sum)

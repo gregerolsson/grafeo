@@ -51,6 +51,7 @@ impl ColumnCodec {
             // The builder validates all values <= i64::MAX, so this cast is lossless.
             // reason: values validated <= i64::MAX during build
             Self::BitPacked(bp) => bp.get(index).map(|v| {
+                // reason: values validated <= i64::MAX during build
                 #[allow(clippy::cast_possible_wrap)]
                 let val = Value::Int64(v as i64);
                 val
@@ -276,6 +277,8 @@ impl ColumnCodec {
 }
 
 #[cfg(test)]
+// reason: test values are small known constants
+#[allow(clippy::cast_possible_wrap)]
 mod tests {
     use super::*;
     use crate::codec::{BitPackedInts, BitVector, DictionaryBuilder};

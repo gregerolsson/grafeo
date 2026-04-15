@@ -21,12 +21,12 @@
 //!
 //! // Compress sorted integers
 //! let values: Vec<u64> = (100..200).collect();
-//! let compressed = TypeSpecificCompressor::compress_integers(&values);
+//! let compressed = TypeSpecificCompressor::compress_integers(&values).unwrap();
 //! println!("Compression ratio: {:.1}x", compressed.compression_ratio());
 //!
 //! // Compress booleans
 //! let bools = vec![true, false, true, true, false];
-//! let compressed = TypeSpecificCompressor::compress_booleans(&bools);
+//! let compressed = TypeSpecificCompressor::compress_booleans(&bools).unwrap();
 //! ```
 
 pub mod bitpack;

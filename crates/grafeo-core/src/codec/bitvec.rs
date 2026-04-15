@@ -397,15 +397,26 @@ impl BitVector {
     }
 
     /// Serializes to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the bit-vector length exceeds `u32::MAX`.
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let len_u32 = u32::try_from(self.len).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "BitVector length {} exceeds u32::MAX, cannot serialize",
+                    self.len
+                ),
+            )
+        })?;
         let mut buf = Vec::with_capacity(4 + self.data.len() * 8);
-        // reason: bitvec length is bounded by practical data sizes, fits u32
-        #[allow(clippy::cast_possible_truncation)]
-        buf.extend_from_slice(&(self.len as u32).to_le_bytes());
+        buf.extend_from_slice(&len_u32.to_le_bytes());
         for &word in &self.data {
             buf.extend_from_slice(&word.to_le_bytes());
         }
-        buf
+        Ok(buf)
     }
 
     /// Deserializes from bytes.
@@ -598,7 +609,7 @@ mod tests {
     fn test_bitvec_serialization() {
         let bools = vec![true, false, true, true, false, false, true, false];
         let bitvec = BitVector::from_bools(&bools);
-        let bytes = bitvec.to_bytes();
+        let bytes = bitvec.to_bytes().unwrap();
         let restored = BitVector::from_bytes(&bytes).unwrap();
         assert_eq!(bitvec, restored);
     }

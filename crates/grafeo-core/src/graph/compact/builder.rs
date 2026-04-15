@@ -12,6 +12,7 @@ use thiserror::Error;
 use super::CompactStore;
 use super::column::ColumnCodec;
 use super::csr::CsrAdjacency;
+use super::id::MAX_TABLE_ID;
 use super::node_table::NodeTable;
 use super::rel_table::RelTable;
 use super::schema::{ColumnDef, ColumnType, EdgeSchema, TableSchema};
@@ -56,6 +57,16 @@ pub enum CompactStoreError {
         value: u64,
         /// Maximum allowed value.
         max: u64,
+    },
+    /// The number of tables exceeds the compact ID encoding limit (15-bit table ID).
+    #[error("table count {count} exceeds compact ID limit of {max} ({kind} tables)")]
+    TableCountOverflow {
+        /// Kind of table ("node" or "relationship").
+        kind: &'static str,
+        /// Actual table count.
+        count: usize,
+        /// Maximum allowed table count.
+        max: u16,
     },
 }
 
@@ -348,14 +359,35 @@ impl CompactStoreBuilder {
             }
         }
 
+        // Step 2c: Validate table counts fit within the 15-bit compact ID encoding.
+        let max_tables = usize::from(MAX_TABLE_ID) + 1; // 32768
+        if self.node_table_builders.len() > max_tables {
+            return Err(CompactStoreError::TableCountOverflow {
+                kind: "node",
+                count: self.node_table_builders.len(),
+                max: MAX_TABLE_ID,
+            });
+        }
+        if self.rel_table_builders.len() > max_tables {
+            return Err(CompactStoreError::TableCountOverflow {
+                kind: "relationship",
+                count: self.rel_table_builders.len(),
+                max: MAX_TABLE_ID,
+            });
+        }
+
         // Step 3: Assign sequential table IDs.
         let mut label_to_table_id: FxHashMap<ArcStr, u16> = FxHashMap::default();
         let mut table_id_to_label: Vec<ArcStr> = Vec::new();
 
         for (idx, ntb) in self.node_table_builders.iter().enumerate() {
-            // reason: table ID count bounded by compact store limits, fits u16
-            #[allow(clippy::cast_possible_truncation)]
-            let table_id = idx as u16;
+            // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
+            let table_id =
+                u16::try_from(idx).map_err(|_| CompactStoreError::TableCountOverflow {
+                    kind: "node",
+                    count: idx,
+                    max: MAX_TABLE_ID,
+                })?;
             label_to_table_id.insert(ntb.label.clone(), table_id);
             table_id_to_label.push(ntb.label.clone());
         }
@@ -365,9 +397,13 @@ impl CompactStoreBuilder {
             Vec::with_capacity(self.node_table_builders.len());
 
         for (idx, ntb) in self.node_table_builders.into_iter().enumerate() {
-            // reason: table ID count bounded by compact store limits, fits u16
-            #[allow(clippy::cast_possible_truncation)]
-            let table_id = idx as u16;
+            // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
+            let table_id =
+                u16::try_from(idx).map_err(|_| CompactStoreError::TableCountOverflow {
+                    kind: "node",
+                    count: idx,
+                    max: MAX_TABLE_ID,
+                })?;
             let row_count = ntb.len.unwrap_or(0);
 
             // Build column definitions for the schema.
@@ -396,9 +432,13 @@ impl CompactStoreBuilder {
         let mut rel_table_id_to_type: Vec<ArcStr> = Vec::new();
 
         for (idx, rtb) in self.rel_table_builders.into_iter().enumerate() {
-            // reason: rel table ID count bounded by compact store limits, fits u16
-            #[allow(clippy::cast_possible_truncation)]
-            let rel_table_id = idx as u16;
+            // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
+            let rel_table_id =
+                u16::try_from(idx).map_err(|_| CompactStoreError::TableCountOverflow {
+                    kind: "relationship",
+                    count: idx,
+                    max: MAX_TABLE_ID,
+                })?;
             rel_table_id_to_type.push(rtb.edge_type.clone());
 
             // Resolve labels to table IDs.

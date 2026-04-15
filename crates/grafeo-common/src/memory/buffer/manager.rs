@@ -142,8 +142,10 @@ impl BufferManager {
         // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let soft_limit = (config.budget as f64 * config.soft_limit_fraction) as usize;
+        // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let evict_limit = (config.budget as f64 * config.evict_limit_fraction) as usize;
+        // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let hard_limit = (config.budget as f64 * config.hard_limit_fraction) as usize;
 

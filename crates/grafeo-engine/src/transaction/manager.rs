@@ -866,9 +866,13 @@ mod tests {
         );
 
         // Final epoch should equal number of commits
+        // num_threads=10, commits_per_thread=100, product is 1000
+        // reason: value is non-negative by preceding validation
+        #[allow(clippy::cast_sign_loss)]
+        let expected_epoch = (num_threads * commits_per_thread) as u64;
         assert_eq!(
             mgr.current_epoch().as_u64(),
-            (num_threads * commits_per_thread) as u64,
+            expected_epoch,
             "Final epoch should equal total commits"
         );
     }

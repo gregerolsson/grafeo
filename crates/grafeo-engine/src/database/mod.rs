@@ -1425,6 +1425,7 @@ impl GrafeoDB {
             graph_model: self.config.graph_model,
             query_timeout: self.config.query_timeout,
             max_property_size: self.config.max_property_size,
+            buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval,
             read_only: self.read_only || force_read_only,

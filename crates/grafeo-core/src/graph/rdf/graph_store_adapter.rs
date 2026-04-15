@@ -205,6 +205,7 @@ impl RdfGraphStoreAdapter {
             // reason: node IDs are sequential indices into Vec, fit usize
             #[allow(clippy::cast_possible_truncation)]
             let src_idx = classified.src.as_u64() as usize;
+            // reason: node IDs are sequential indices into Vec, fit usize
             #[allow(clippy::cast_possible_truncation)]
             let dst_idx = classified.dst.as_u64() as usize;
             outgoing[src_idx].push((classified.dst, edge_id));
@@ -475,7 +476,9 @@ impl GraphStore for RdfGraphStoreAdapter {
     fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
         self.edge_data
             // reason: edge IDs are sequential indices into Vec, fit usize
+            // reason: edge IDs are sequential indices into Vec, fit usize
             .get({
+                // reason: edge IDs are sequential indices into Vec, fit usize
                 #[allow(clippy::cast_possible_truncation)]
                 let idx = id.as_u64() as usize;
                 idx

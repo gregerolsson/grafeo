@@ -154,6 +154,7 @@ impl ZoneMap {
             // reason: entity counts per epoch block are bounded well within u32
             #[allow(clippy::cast_possible_truncation)]
             node_count: nodes.len() as u32,
+            // reason: entity counts per epoch block are bounded well within u32
             #[allow(clippy::cast_possible_truncation)]
             edge_count: edges.len() as u32,
         }
@@ -301,12 +302,14 @@ impl CompressedEpochBlock {
         // reason: data sizes within a single epoch block fit u32
         #[allow(clippy::cast_possible_truncation)]
         let node_uncompressed_size = node_data.len() as u32;
+        // reason: data sizes within a single epoch block fit u32
         #[allow(clippy::cast_possible_truncation)]
         let edge_uncompressed_size = edge_data.len() as u32;
 
         // reason: data sizes within a single epoch block fit u32
         #[allow(clippy::cast_possible_truncation)]
         let node_data_size = node_data.len() as u32;
+        // reason: data sizes within a single epoch block fit u32
         #[allow(clippy::cast_possible_truncation)]
         let edge_data_size = edge_data.len() as u32;
 

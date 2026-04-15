@@ -97,10 +97,15 @@ impl CompactStore {
         let mut src_rel_table_ids = vec![Vec::new(); node_table_count];
         let mut dst_rel_table_ids = vec![Vec::new(); node_table_count];
 
+        debug_assert!(
+            rel_tables_by_id.len() <= usize::from(id::MAX_TABLE_ID) + 1,
+            "rel table count {} exceeds 15-bit limit; caller must validate",
+            rel_tables_by_id.len()
+        );
         for (rel_idx, rt) in rel_tables_by_id.iter().enumerate() {
-            // reason: rel table count bounded by compact store limits, fits u16
-            #[allow(clippy::cast_possible_truncation)]
-            let rel_id = rel_idx as u16;
+            // Caller (CompactStoreBuilder::build) validates table count fits u16.
+            let rel_id = u16::try_from(rel_idx).expect("caller validated table count");
+
             let src_tid = rt.src_table_id() as usize;
             let dst_tid = rt.dst_table_id() as usize;
             if src_tid < node_table_count {

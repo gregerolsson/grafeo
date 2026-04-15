@@ -428,6 +428,8 @@ impl std::io::Read for SpillFileReaderAdapter<'_> {
 }
 
 #[cfg(test)]
+// reason: test indices are small known values
+#[allow(clippy::cast_possible_wrap)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -487,6 +489,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test values 1..=6 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_external_sort_two_runs() {
         let (_temp_dir, manager) = create_manager();
         let mut sort = ExternalSort::new(manager, 1, vec![SortKey::ascending(0)]);
@@ -507,6 +511,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test values 1..=7 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_external_sort_runs_with_memory() {
         let (_temp_dir, manager) = create_manager();
         let mut sort = ExternalSort::new(manager, 1, vec![SortKey::ascending(0)]);
@@ -526,6 +532,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test values 1..=6 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_external_sort_descending() {
         let (_temp_dir, manager) = create_manager();
         let mut sort = ExternalSort::new(manager, 1, vec![SortKey::descending(0)]);
@@ -608,6 +616,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test values 0..100 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_external_sort_many_runs() {
         let (_temp_dir, manager) = create_manager();
         let mut sort = ExternalSort::new(manager, 1, vec![SortKey::ascending(0)]);

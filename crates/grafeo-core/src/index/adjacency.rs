@@ -147,7 +147,7 @@ impl CompressedAdjacencyChunk {
     fn memory_size(&self) -> usize {
         // DeltaBitPacked: 8 bytes base + packed deltas
         // BitPackedInts: packed data
-        let dest_size = 8 + self.destinations.to_bytes().len();
+        let dest_size = 8 + self.destinations.to_bytes().map_or(0, |b| b.len());
         let edge_size = self.edge_ids.data().len() * 8;
         dest_size + edge_size
     }

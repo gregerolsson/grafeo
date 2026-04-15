@@ -374,11 +374,15 @@ impl ValueVector {
             VectorData::String(vec) => vec.get(index).map(|v| Value::String(v.clone())),
             // reason: entity IDs stored as i64, standard encoding
             VectorData::NodeId(vec) => vec.get(index).map(|&v| {
+                // reason: entity IDs are sequential counters, well within i64::MAX
                 #[allow(clippy::cast_possible_wrap)]
                 let val = Value::Int64(v.as_u64() as i64);
                 val
             }),
+            // reason: entity IDs stored as i64, standard encoding
+            // reason: entity IDs are sequential counters, well within i64::MAX
             VectorData::EdgeId(vec) => vec.get(index).map(|&v| {
+                // reason: entity IDs are sequential counters, well within i64::MAX
                 #[allow(clippy::cast_possible_wrap)]
                 let val = Value::Int64(v.as_u64() as i64);
                 val

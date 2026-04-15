@@ -52,6 +52,7 @@ impl Session {
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
+            buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),

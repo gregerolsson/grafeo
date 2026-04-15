@@ -244,6 +244,9 @@ mod tests {
         for &(dst, src) in &bwd_edges {
             let fwd_start = fwd.offset_of(src);
             let local_idx = fwd.neighbors(src).iter().position(|&t| t == dst).unwrap();
+            // CSR uses u32 offsets, so position within a neighbor list fits u32
+            // reason: CSR uses u32 offsets, neighbor position fits u32
+            #[allow(clippy::cast_possible_truncation)]
             mapping.push(fwd_start + local_idx as u32);
         }
         bwd.set_edge_data(mapping);

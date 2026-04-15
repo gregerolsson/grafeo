@@ -267,7 +267,12 @@ pub struct TypeSpecificCompressor;
 
 impl TypeSpecificCompressor {
     /// Compresses u64 values using the optimal codec.
-    pub fn compress_integers(values: &[u64]) -> CompressedData {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if serialization of the compressed representation fails
+    /// (e.g., value count exceeds `u32::MAX`).
+    pub fn compress_integers(values: &[u64]) -> io::Result<CompressedData> {
         let codec = CodecSelector::select_for_integers(values);
 
         match codec {
@@ -276,55 +281,60 @@ impl TypeSpecificCompressor {
                 for &v in values {
                     data.extend_from_slice(&v.to_le_bytes());
                 }
-                CompressedData {
+                Ok(CompressedData {
                     codec,
                     uncompressed_size: values.len() * 8,
                     data,
                     metadata: CompressionMetadata::None,
-                }
+                })
             }
             CompressionCodec::DeltaBitPacked { bits } => {
                 let encoded = DeltaBitPacked::encode(values);
-                CompressedData {
+                Ok(CompressedData {
                     codec: CompressionCodec::DeltaBitPacked { bits },
                     uncompressed_size: values.len() * 8,
-                    data: encoded.to_bytes(),
+                    data: encoded.to_bytes()?,
                     metadata: CompressionMetadata::DeltaBitPacked {
                         // reason: base value stored as i64 metadata, wrap is acceptable
                         #[allow(clippy::cast_possible_wrap)]
                         base: encoded.base() as i64,
                         count: values.len(),
                     },
-                }
+                })
             }
             CompressionCodec::BitPacked { bits } => {
                 let packed = BitPackedInts::pack(values);
-                CompressedData {
+                Ok(CompressedData {
                     codec: CompressionCodec::BitPacked { bits },
                     uncompressed_size: values.len() * 8,
-                    data: packed.to_bytes(),
+                    data: packed.to_bytes()?,
                     metadata: CompressionMetadata::BitPacked {
                         count: values.len(),
                     },
-                }
+                })
             }
             CompressionCodec::RunLength => {
                 let encoded = RunLengthEncoding::encode(values);
-                CompressedData {
+                Ok(CompressedData {
                     codec: CompressionCodec::RunLength,
                     uncompressed_size: values.len() * 8,
                     data: encoded.to_bytes(),
                     metadata: CompressionMetadata::RunLength {
                         run_count: encoded.run_count(),
                     },
-                }
+                })
             }
             _ => unreachable!("Unexpected codec for integers"),
         }
     }
 
     /// Compresses i64 values using the optimal codec.
-    pub fn compress_signed_integers(values: &[i64]) -> CompressedData {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if serialization of the compressed representation fails
+    /// (e.g., value count exceeds `u32::MAX`).
+    pub fn compress_signed_integers(values: &[i64]) -> io::Result<CompressedData> {
         // Convert to u64 using zig-zag encoding
         let zigzag: Vec<u64> = values
             .iter()
@@ -334,16 +344,20 @@ impl TypeSpecificCompressor {
     }
 
     /// Compresses boolean values.
-    pub fn compress_booleans(values: &[bool]) -> CompressedData {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the bit-vector length exceeds `u32::MAX`.
+    pub fn compress_booleans(values: &[bool]) -> io::Result<CompressedData> {
         let bitvec = BitVector::from_bools(values);
-        CompressedData {
+        Ok(CompressedData {
             codec: CompressionCodec::BitVector,
             uncompressed_size: values.len(),
-            data: bitvec.to_bytes(),
+            data: bitvec.to_bytes()?,
             metadata: CompressionMetadata::BitPacked {
                 count: values.len(),
             },
-        }
+        })
     }
 
     /// Decompresses u64 values.
@@ -446,7 +460,7 @@ mod tests {
     #[test]
     fn test_compress_decompress_sorted_integers() {
         let values: Vec<u64> = (100..200).collect();
-        let compressed = TypeSpecificCompressor::compress_integers(&values);
+        let compressed = TypeSpecificCompressor::compress_integers(&values).unwrap();
 
         assert!(matches!(
             compressed.codec,
@@ -461,7 +475,7 @@ mod tests {
     #[test]
     fn test_compress_decompress_small_integers() {
         let values: Vec<u64> = vec![5, 2, 7, 1, 9, 3, 8, 4, 6, 0];
-        let compressed = TypeSpecificCompressor::compress_integers(&values);
+        let compressed = TypeSpecificCompressor::compress_integers(&values).unwrap();
 
         let decompressed = TypeSpecificCompressor::decompress_integers(&compressed).unwrap();
         assert_eq!(values, decompressed);
@@ -470,7 +484,7 @@ mod tests {
     #[test]
     fn test_compress_decompress_booleans() {
         let values = vec![true, false, true, true, false, false, true, false];
-        let compressed = TypeSpecificCompressor::compress_booleans(&values);
+        let compressed = TypeSpecificCompressor::compress_booleans(&values).unwrap();
 
         assert_eq!(compressed.codec, CompressionCodec::BitVector);
 
@@ -482,7 +496,7 @@ mod tests {
     fn test_compression_ratio() {
         // 100 sequential values should compress well
         let values: Vec<u64> = (1000..1100).collect();
-        let compressed = TypeSpecificCompressor::compress_integers(&values);
+        let compressed = TypeSpecificCompressor::compress_integers(&values).unwrap();
 
         let ratio = compressed.compression_ratio();
         assert!(ratio > 5.0, "Expected ratio > 5, got {}", ratio);
@@ -521,7 +535,7 @@ mod tests {
     fn test_compress_decompress_runlength() {
         // Highly repetitive data
         let values: Vec<u64> = vec![42; 1000];
-        let compressed = TypeSpecificCompressor::compress_integers(&values);
+        let compressed = TypeSpecificCompressor::compress_integers(&values).unwrap();
 
         assert_eq!(compressed.codec, CompressionCodec::RunLength);
         assert!(
@@ -541,7 +555,7 @@ mod tests {
         values.extend(vec![2u64; 100]);
         values.extend(vec![3u64; 100]);
 
-        let compressed = TypeSpecificCompressor::compress_integers(&values);
+        let compressed = TypeSpecificCompressor::compress_integers(&values).unwrap();
 
         assert_eq!(compressed.codec, CompressionCodec::RunLength);
         assert!(compressed.compression_ratio() > 10.0);

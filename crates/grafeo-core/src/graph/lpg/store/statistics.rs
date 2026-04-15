@@ -39,6 +39,7 @@ impl LpgStore {
         {
             stats.total_nodes = self.live_node_count.load(Ordering::Relaxed).max(0) as u64;
         }
+        // reason: clamped to >= 0 by max(0), safe to cast to u64
         #[allow(clippy::cast_sign_loss)]
         {
             stats.total_edges = self.live_edge_count.load(Ordering::Relaxed).max(0) as u64;
@@ -122,8 +123,10 @@ impl LpgStore {
         }
 
         // Resync the atomic counters
-        self.live_node_count
-            .store(total_nodes as i64, Ordering::Relaxed);
+        self.live_node_count.store(
+            i64::try_from(total_nodes).unwrap_or(i64::MAX),
+            Ordering::Relaxed,
+        );
         self.live_edge_count.store(total_edges, Ordering::Relaxed);
         *self.edge_type_live_counts.write() = type_counts;
 
@@ -173,10 +176,10 @@ impl LpgStore {
         }
 
         // Resync the atomic counters
-        // reason: node count fits i64 for practical graph sizes
-        #[allow(clippy::cast_possible_wrap)]
-        self.live_node_count
-            .store(total_nodes as i64, Ordering::Relaxed);
+        self.live_node_count.store(
+            i64::try_from(total_nodes).unwrap_or(i64::MAX),
+            Ordering::Relaxed,
+        );
         self.live_edge_count.store(total_edges, Ordering::Relaxed);
         *self.edge_type_live_counts.write() = type_counts;
 
