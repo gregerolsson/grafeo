@@ -4,12 +4,12 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.5.39] - 2026-04-15
 
-Push-based vectorized execution for filter, sort, aggregate, limit, and distinct queries. AES-256-GCM encryption at rest. Smarter Block-STM conflict partitioning. Runtime metrics with Prometheus export.
+Smarter Block-STM conflict partitioning. Runtime metrics with Prometheus export. Push-based vectorized execution for filter, sort, aggregate, limit, and distinct queries. AES-256-GCM encryption at rest.
 
 ### Added
 
-- **Encryption at rest** (`encryption` feature): AES-256-GCM for WAL records and `.grafeo` sections. Password-based (Argon2id) or raw-key setup. Counter-based nonces tied to file offsets for crash-safe uniqueness. Zero overhead when disabled.
 - **Block-STM conflict partitioning**: re-execution groups conflicting transactions into clusters via union-find, enabling parallel re-execution of disjoint conflict sets.
+- **Encryption at rest** (`encryption` feature): AES-256-GCM for WAL records and `.grafeo` sections. Password-based (Argon2id) or raw-key setup. Counter-based nonces tied to file offsets for crash-safe uniqueness. Zero overhead when disabled.
 - **Push-based pipeline execution**: queries with filter, sort, aggregate, limit, or distinct now execute through a push-based pipeline instead of the Volcano pull loop, reducing per-row overhead on analytical workloads.
 - **Runtime metrics**: query, transaction, session, cache, and GC counters with Prometheus text export. Python `db.metrics()` / `db.metrics_prometheus()` and Node.js equivalents (requires `metrics` feature).
 - **C# enterprise APIs**: `SetSchema` / `ResetSchema` / `CurrentSchema`, backup/restore, compact, projections, CDC toggle, `ClearPlanCache`. `IGrafeoDB` and `ITransaction` interfaces for dependency injection and mocking.
