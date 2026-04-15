@@ -210,6 +210,8 @@ fn read_entry(buf: &[u8]) -> Result<SectionDirectoryEntry> {
 }
 
 #[cfg(test)]
+// reason: test values are small known constants
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
 

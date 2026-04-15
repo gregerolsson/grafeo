@@ -28,22 +28,30 @@ fn create_star_graph(db: &GrafeoDB) {
 
     // Create source nodes
     for i in 0..3 {
-        session.create_node_with_props(&["Person"], [("id", Value::Int64(i))]);
+        session
+            .create_node_with_props(&["Person"], [("id", Value::Int64(i))])
+            .unwrap();
     }
 
     // Node 0's neighbors (4)
     for i in 10..14 {
-        session.create_node_with_props(&["Person"], [("id", Value::Int64(i))]);
+        session
+            .create_node_with_props(&["Person"], [("id", Value::Int64(i))])
+            .unwrap();
     }
 
     // Node 1's neighbors (2)
     for i in 20..22 {
-        session.create_node_with_props(&["Person"], [("id", Value::Int64(i))]);
+        session
+            .create_node_with_props(&["Person"], [("id", Value::Int64(i))])
+            .unwrap();
     }
 
     // Node 2's neighbors (3)
     for i in 30..33 {
-        session.create_node_with_props(&["Person"], [("id", Value::Int64(i))]);
+        session
+            .create_node_with_props(&["Person"], [("id", Value::Int64(i))])
+            .unwrap();
     }
 
     // Create KNOWS edges from sources to their neighbors
@@ -123,11 +131,21 @@ fn test_factorized_vs_flat_count_correctness() {
         let session = db.session();
 
         // Create a simple chain: A -> B1,B2 -> C1,C2
-        session.create_node_with_props(&["Node"], [("name", Value::String("A".into()))]);
-        session.create_node_with_props(&["Node"], [("name", Value::String("B1".into()))]);
-        session.create_node_with_props(&["Node"], [("name", Value::String("B2".into()))]);
-        session.create_node_with_props(&["Node"], [("name", Value::String("C1".into()))]);
-        session.create_node_with_props(&["Node"], [("name", Value::String("C2".into()))]);
+        session
+            .create_node_with_props(&["Node"], [("name", Value::String("A".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Node"], [("name", Value::String("B1".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Node"], [("name", Value::String("B2".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Node"], [("name", Value::String("C1".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Node"], [("name", Value::String("C2".into()))])
+            .unwrap();
 
         session
             .execute_cypher(
@@ -197,10 +215,18 @@ fn test_count_star_simple() {
     let session = db.session();
 
     // Create: Center -> A, B, C
-    session.create_node_with_props(&["Center"], [("name", Value::String("center".into()))]);
-    session.create_node_with_props(&["Target"], [("name", Value::String("A".into()))]);
-    session.create_node_with_props(&["Target"], [("name", Value::String("B".into()))]);
-    session.create_node_with_props(&["Target"], [("name", Value::String("C".into()))]);
+    session
+        .create_node_with_props(&["Center"], [("name", Value::String("center".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Target"], [("name", Value::String("A".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Target"], [("name", Value::String("B".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Target"], [("name", Value::String("C".into()))])
+        .unwrap();
 
     session
         .execute_cypher("MATCH (c:Center), (t:Target) CREATE (c)-[:POINTS_TO]->(t)")
@@ -208,8 +234,12 @@ fn test_count_star_simple() {
 
     // 2-hop: Center -> A,B,C (each has no outgoing) = 0 two-hop paths
     // But let's add edges from targets to make it interesting
-    session.create_node_with_props(&["Leaf"], [("name", Value::String("L1".into()))]);
-    session.create_node_with_props(&["Leaf"], [("name", Value::String("L2".into()))]);
+    session
+        .create_node_with_props(&["Leaf"], [("name", Value::String("L1".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Leaf"], [("name", Value::String("L2".into()))])
+        .unwrap();
 
     session
         .execute_cypher("MATCH (t:Target {name: 'A'}), (l:Leaf) CREATE (t)-[:POINTS_TO]->(l)")
@@ -243,14 +273,18 @@ fn test_factorized_aggregation_speedup_demonstration() {
 
         // Create 5 source nodes
         for i in 0..5 {
-            session.create_node_with_props(&["Source"], [("id", Value::Int64(i))]);
+            session
+                .create_node_with_props(&["Source"], [("id", Value::Int64(i))])
+                .unwrap();
         }
 
         // Each source connects to 10 first-hop targets
         for i in 0..5 {
             for j in 0..10 {
                 let target_id = 100 + i * 10 + j;
-                session.create_node_with_props(&["Hop1"], [("id", Value::Int64(target_id))]);
+                session
+                    .create_node_with_props(&["Hop1"], [("id", Value::Int64(target_id))])
+                    .unwrap();
             }
             session.execute_cypher(&format!(
                 "MATCH (s:Source {{id: {}}}), (t:Hop1) WHERE t.id >= {} AND t.id < {} CREATE (s)-[:LINK]->(t)",
@@ -263,7 +297,9 @@ fn test_factorized_aggregation_speedup_demonstration() {
             let hop1_id = 100 + i;
             for j in 0..5 {
                 let hop2_id = 1000 + i * 5 + j;
-                session.create_node_with_props(&["Hop2"], [("id", Value::Int64(hop2_id))]);
+                session
+                    .create_node_with_props(&["Hop2"], [("id", Value::Int64(hop2_id))])
+                    .unwrap();
             }
             session.execute_cypher(&format!(
                 "MATCH (h1:Hop1 {{id: {}}}), (h2:Hop2) WHERE h2.id >= {} AND h2.id < {} CREATE (h1)-[:LINK]->(h2)",
@@ -348,23 +384,45 @@ fn create_chain_graph(db: &GrafeoDB) {
     let session = db.session();
 
     // Layer 0: roots
-    let r0 = session.create_node_with_props(&["Root"], [("name", Value::String("R0".into()))]);
-    let r1 = session.create_node_with_props(&["Root"], [("name", Value::String("R1".into()))]);
+    let r0 = session
+        .create_node_with_props(&["Root"], [("name", Value::String("R0".into()))])
+        .unwrap();
+    let r1 = session
+        .create_node_with_props(&["Root"], [("name", Value::String("R1".into()))])
+        .unwrap();
 
     // Layer 1
-    let h1_0 = session.create_node_with_props(&["Hop1"], [("name", Value::String("H1_0".into()))]);
-    let h1_1 = session.create_node_with_props(&["Hop1"], [("name", Value::String("H1_1".into()))]);
-    let h1_2 = session.create_node_with_props(&["Hop1"], [("name", Value::String("H1_2".into()))]);
+    let h1_0 = session
+        .create_node_with_props(&["Hop1"], [("name", Value::String("H1_0".into()))])
+        .unwrap();
+    let h1_1 = session
+        .create_node_with_props(&["Hop1"], [("name", Value::String("H1_1".into()))])
+        .unwrap();
+    let h1_2 = session
+        .create_node_with_props(&["Hop1"], [("name", Value::String("H1_2".into()))])
+        .unwrap();
 
     // Layer 2
-    let h2_0 = session.create_node_with_props(&["Hop2"], [("name", Value::String("H2_0".into()))]);
-    let h2_1 = session.create_node_with_props(&["Hop2"], [("name", Value::String("H2_1".into()))]);
-    let h2_2 = session.create_node_with_props(&["Hop2"], [("name", Value::String("H2_2".into()))]);
-    let h2_3 = session.create_node_with_props(&["Hop2"], [("name", Value::String("H2_3".into()))]);
+    let h2_0 = session
+        .create_node_with_props(&["Hop2"], [("name", Value::String("H2_0".into()))])
+        .unwrap();
+    let h2_1 = session
+        .create_node_with_props(&["Hop2"], [("name", Value::String("H2_1".into()))])
+        .unwrap();
+    let h2_2 = session
+        .create_node_with_props(&["Hop2"], [("name", Value::String("H2_2".into()))])
+        .unwrap();
+    let h2_3 = session
+        .create_node_with_props(&["Hop2"], [("name", Value::String("H2_3".into()))])
+        .unwrap();
 
     // Layer 3
-    let h3_0 = session.create_node_with_props(&["Hop3"], [("name", Value::String("H3_0".into()))]);
-    let h3_1 = session.create_node_with_props(&["Hop3"], [("name", Value::String("H3_1".into()))]);
+    let h3_0 = session
+        .create_node_with_props(&["Hop3"], [("name", Value::String("H3_0".into()))])
+        .unwrap();
+    let h3_1 = session
+        .create_node_with_props(&["Hop3"], [("name", Value::String("H3_1".into()))])
+        .unwrap();
 
     // Layer 0 -> Layer 1 edges
     session.create_edge(r0, h1_0, "STEP");
@@ -480,17 +538,29 @@ fn test_asymmetric_fanout_two_hop() {
         let session = db.session();
 
         // Two root-level nodes: one hub, one isolated
-        let star =
-            session.create_node_with_props(&["Hub"], [("name", Value::String("Star".into()))]);
-        let _leaf =
-            session.create_node_with_props(&["Hub"], [("name", Value::String("Leaf".into()))]);
+        let star = session
+            .create_node_with_props(&["Hub"], [("name", Value::String("Star".into()))])
+            .unwrap();
+        let _leaf = session
+            .create_node_with_props(&["Hub"], [("name", Value::String("Leaf".into()))])
+            .unwrap();
 
         // First-hop satellites of Star
-        let s1 = session.create_node_with_props(&["Sat"], [("name", Value::String("S1".into()))]);
-        let s2 = session.create_node_with_props(&["Sat"], [("name", Value::String("S2".into()))]);
-        let s3 = session.create_node_with_props(&["Sat"], [("name", Value::String("S3".into()))]);
-        let s4 = session.create_node_with_props(&["Sat"], [("name", Value::String("S4".into()))]);
-        let s5 = session.create_node_with_props(&["Sat"], [("name", Value::String("S5".into()))]);
+        let s1 = session
+            .create_node_with_props(&["Sat"], [("name", Value::String("S1".into()))])
+            .unwrap();
+        let s2 = session
+            .create_node_with_props(&["Sat"], [("name", Value::String("S2".into()))])
+            .unwrap();
+        let s3 = session
+            .create_node_with_props(&["Sat"], [("name", Value::String("S3".into()))])
+            .unwrap();
+        let s4 = session
+            .create_node_with_props(&["Sat"], [("name", Value::String("S4".into()))])
+            .unwrap();
+        let s5 = session
+            .create_node_with_props(&["Sat"], [("name", Value::String("S5".into()))])
+            .unwrap();
 
         session.create_edge(star, s1, "ARM");
         session.create_edge(star, s2, "ARM");
@@ -499,13 +569,27 @@ fn test_asymmetric_fanout_two_hop() {
         session.create_edge(star, s5, "ARM");
 
         // Second-hop targets
-        let t1 = session.create_node_with_props(&["Tip"], [("name", Value::String("T1".into()))]);
-        let t2 = session.create_node_with_props(&["Tip"], [("name", Value::String("T2".into()))]);
-        let t3 = session.create_node_with_props(&["Tip"], [("name", Value::String("T3".into()))]);
-        let t4 = session.create_node_with_props(&["Tip"], [("name", Value::String("T4".into()))]);
-        let t5 = session.create_node_with_props(&["Tip"], [("name", Value::String("T5".into()))]);
-        let t6 = session.create_node_with_props(&["Tip"], [("name", Value::String("T6".into()))]);
-        let t7 = session.create_node_with_props(&["Tip"], [("name", Value::String("T7".into()))]);
+        let t1 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T1".into()))])
+            .unwrap();
+        let t2 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T2".into()))])
+            .unwrap();
+        let t3 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T3".into()))])
+            .unwrap();
+        let t4 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T4".into()))])
+            .unwrap();
+        let t5 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T5".into()))])
+            .unwrap();
+        let t6 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T6".into()))])
+            .unwrap();
+        let t7 = session
+            .create_node_with_props(&["Tip"], [("name", Value::String("T7".into()))])
+            .unwrap();
 
         session.create_edge(s1, t1, "ARM");
         session.create_edge(s1, t2, "ARM");

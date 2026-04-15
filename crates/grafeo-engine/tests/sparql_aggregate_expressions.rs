@@ -3,6 +3,8 @@
 //! Covers two areas:
 //!   1. **Projection functions**: STR(), STRLEN() used in SELECT (not just FILTER).
 //!   2. **GROUP BY with expressions**: STR() inside GROUP BY combined with COUNT.
+// Test values are small known constants
+#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 //!
 //! These tests verify the full pipeline: SPARQL translator projection handling,
 //! RDF planner expression pre-projection, and physical execution.

@@ -261,14 +261,6 @@ impl HnswIndex {
             vector.len()
         );
 
-        if let Some(max) = self.config.max_elements {
-            let count = self.nodes.read().len();
-            assert!(
-                count < max,
-                "HNSW index is full: max_elements={max}, current={count}"
-            );
-        }
-
         let level = self.random_level();
 
         // Create the new node (topology only)
@@ -279,6 +271,19 @@ impl HnswIndex {
         let mut nodes = self.nodes.write();
         let mut entry_point = self.entry_point.write();
         let mut max_level = self.max_level.write();
+
+        // Check capacity under the write lock to prevent concurrent over-insertion.
+        // Skip the check when the ID already exists (same-ID update replaces
+        // the entry without growing the map).
+        if let Some(max) = self.config.max_elements
+            && !nodes.contains_key(&id)
+        {
+            let count = nodes.len();
+            assert!(
+                count < max,
+                "HNSW index is full: max_elements={max}, current={count}"
+            );
+        }
 
         // First insertion
         if entry_point.is_none() {
@@ -2048,6 +2053,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test indices are small known values
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn test_filtered_search_ef_scaling() {
         // Verify that auto-scaling ef produces reasonable recall
         let n = 500;

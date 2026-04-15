@@ -2,6 +2,12 @@
 //!
 //! Verifies: HNSW at scale, persistence, BYOV 384-dim, concurrent reads,
 //! Python lifecycle (Rust side), storage size, and bulk import.
+// Test IDs and indices are small known values
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 //!
 //! ```bash
 //! # Correctness (non-ignored)

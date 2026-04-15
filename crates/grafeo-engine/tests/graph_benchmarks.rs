@@ -2,6 +2,8 @@
 //!
 //! Performance benchmarks similar to Memgraph vs Neo4j comparisons.
 //! Tests insertion throughput, traversal performance, and query patterns.
+// Benchmark values are small known constants
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 //!
 //! Run with: cargo test -p grafeo-engine --release -- graph_benchmarks --nocapture
 //!

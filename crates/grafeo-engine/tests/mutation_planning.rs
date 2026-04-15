@@ -20,33 +20,40 @@ fn create_social_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("NYC".into())),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("NYC".into())),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("London".into())),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("NYC".into())),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("NYC".into())),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("London".into())),
+            ],
+        )
+        .unwrap();
 
-    let techcorp =
-        session.create_node_with_props(&["Company"], [("name", Value::String("TechCorp".into()))]);
+    let techcorp = session
+        .create_node_with_props(&["Company"], [("name", Value::String("TechCorp".into()))])
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     session.create_edge(alix, harm, "KNOWS");
@@ -401,10 +408,12 @@ fn test_create_path_with_new_nodes() {
 
     // Create two nodes and an edge using the programmatic API
     // (exercises CreateNodeOp and CreateEdgeOp through a different code path)
-    let paris =
-        session.create_node_with_props(&["City"], [("name", Value::String("Paris".into()))]);
-    let france =
-        session.create_node_with_props(&["Country"], [("name", Value::String("France".into()))]);
+    let paris = session
+        .create_node_with_props(&["City"], [("name", Value::String("Paris".into()))])
+        .unwrap();
+    let france = session
+        .create_node_with_props(&["Country"], [("name", Value::String("France".into()))])
+        .unwrap();
     session.create_edge(paris, france, "IN");
 
     assert_eq!(db.node_count(), 2);
@@ -1709,13 +1718,15 @@ fn test_traits_create_with_props_convenience() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let node = session.create_node_with_props(
-        &["Widget"],
-        [
-            ("color", Value::String("blue".into())),
-            ("weight", Value::Int64(42)),
-        ],
-    );
+    let node = session
+        .create_node_with_props(
+            &["Widget"],
+            [
+                ("color", Value::String("blue".into())),
+                ("weight", Value::Int64(42)),
+            ],
+        )
+        .unwrap();
 
     let result = session
         .execute("MATCH (w:Widget) RETURN w.color, w.weight")
@@ -1725,7 +1736,9 @@ fn test_traits_create_with_props_convenience() {
     assert_eq!(result.rows()[0][0], Value::String("blue".into()));
     assert_eq!(result.rows()[0][1], Value::Int64(42));
 
-    let other = session.create_node_with_props(&["Box"], [("size", Value::Int64(10))]);
+    let other = session
+        .create_node_with_props(&["Box"], [("size", Value::Int64(10))])
+        .unwrap();
     session.create_edge(node, other, "FITS_IN");
 
     let edge_result = session

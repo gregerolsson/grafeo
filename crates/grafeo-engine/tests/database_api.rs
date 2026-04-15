@@ -419,20 +419,24 @@ fn test_execute_with_params() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-        ],
-    );
-    session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-        ],
-    );
+    session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+            ],
+        )
+        .unwrap();
 
     let params =
         std::collections::HashMap::from([("name".to_string(), Value::String("Alix".into()))]);

@@ -627,6 +627,8 @@ mod tests {
     }
 
     #[test]
+    // reason: loop index 0..5 fits usize
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn test_chunk_flatten() {
         let schema = [LogicalType::Int64, LogicalType::String];
         let mut builder = DataChunkBuilder::with_schema(&schema);

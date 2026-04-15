@@ -339,7 +339,11 @@ fn test_stress_concurrent_workload_memory_convergence() {
     let round2 = snapshots[1];
     let round3 = snapshots[2];
     let growth_pct = if round2 > 0 {
-        ((round3 as f64 - round2 as f64) / round2 as f64 * 100.0) as i64
+        // reason: Percentage growth is always small, fits i64
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ((round3 as f64 - round2 as f64) / round2 as f64 * 100.0) as i64
+        }
     } else {
         0
     };

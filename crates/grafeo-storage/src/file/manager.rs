@@ -317,6 +317,7 @@ impl GrafeoFileManager {
 
         // reason: snapshot_length is the size of serialized in-memory data, fits in usize on 64-bit targets;
         // on 32-bit targets the database would OOM long before reaching 4 GiB
+        // reason: value bounded by collection size, fits usize
         #[allow(clippy::cast_possible_truncation)]
         let length = active_header.snapshot_length as usize;
         let expected_checksum = active_header.checksum;
@@ -617,6 +618,7 @@ impl GrafeoFileManager {
 
         // reason: section length is bounded by file size, which fits in usize on 64-bit targets;
         // on 32-bit targets sections would OOM long before reaching 4 GiB
+        // reason: value bounded by collection size, fits usize
         #[allow(clippy::cast_possible_truncation)]
         let mut data = vec![0u8; entry.length as usize];
         std::io::Read::read_exact(&mut *file, &mut data)?;

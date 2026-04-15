@@ -1,6 +1,8 @@
 //! Tests for aggregate translator and execution coverage gaps.
 //!
 //! Targets: aggregate.rs (45.45%), common.rs (64.48%), expression.rs (82.32%)
+// Test values are small known constants
+#![allow(clippy::cast_possible_truncation)]
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --test coverage_aggregates
@@ -20,15 +22,17 @@ fn stats_graph() -> GrafeoDB {
         ("Jules", 4.0, 8.0),
         ("Mia", 5.0, 10.0),
     ] {
-        session.create_node_with_props(
-            &["Data"],
-            [
-                ("name", Value::String(name.into())),
-                ("x", Value::Float64(x)),
-                ("y", Value::Float64(y)),
-                ("score", Value::Int64(x as i64 * 10)),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Data"],
+                [
+                    ("name", Value::String(name.into())),
+                    ("x", Value::Float64(x)),
+                    ("y", Value::Float64(y)),
+                    ("score", Value::Int64(x as i64 * 10)),
+                ],
+            )
+            .unwrap();
     }
     db
 }
@@ -245,14 +249,16 @@ fn test_mixed_aggregates_with_group_by() {
         ("Vincent", "Berlin", 70),
         ("Jules", "Berlin", 85),
     ] {
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("name", Value::String(name.into())),
-                ("city", Value::String(city.into())),
-                ("score", Value::Int64(score)),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("name", Value::String(name.into())),
+                    ("city", Value::String(city.into())),
+                    ("score", Value::Int64(score)),
+                ],
+            )
+            .unwrap();
     }
     // Use RETURN with aggregates directly: non-aggregated p.city acts as grouping key
     let r = session
@@ -282,13 +288,15 @@ fn test_order_by_alias_after_aggregation() {
         ("Jules", "Amsterdam"),
         ("Mia", "Paris"),
     ] {
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("name", Value::String(name.into())),
-                ("city", Value::String(city.into())),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("name", Value::String(name.into())),
+                    ("city", Value::String(city.into())),
+                ],
+            )
+            .unwrap();
     }
     let r = session
         .execute("MATCH (p:Person) RETURN p.city AS city, count(p) AS cnt ORDER BY city")
@@ -311,13 +319,15 @@ fn test_order_by_aggregate_alias_desc() {
         ("Jules", "Amsterdam"),
         ("Mia", "Paris"),
     ] {
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("name", Value::String(name.into())),
-                ("city", Value::String(city.into())),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("name", Value::String(name.into())),
+                    ("city", Value::String(city.into())),
+                ],
+            )
+            .unwrap();
     }
     let r = session
         .execute("MATCH (p:Person) RETURN p.city AS city, count(p) AS cnt ORDER BY cnt DESC")
@@ -358,7 +368,8 @@ fn test_nullif_expression() {
 fn test_list_predicate_all() {
     let db = GrafeoDB::new_in_memory();
     let s = db.session();
-    s.create_node_with_props(&["Flag"], [("v", Value::Int64(1))]);
+    s.create_node_with_props(&["Flag"], [("v", Value::Int64(1))])
+        .unwrap();
     let r = s
         .execute("MATCH (f:Flag) WHERE all(x IN [2, 4, 6] WHERE x % 2 = 0) RETURN f.v AS v")
         .unwrap();
@@ -369,7 +380,8 @@ fn test_list_predicate_all() {
 fn test_list_predicate_any() {
     let db = GrafeoDB::new_in_memory();
     let s = db.session();
-    s.create_node_with_props(&["Flag"], [("v", Value::Int64(1))]);
+    s.create_node_with_props(&["Flag"], [("v", Value::Int64(1))])
+        .unwrap();
     let r = s
         .execute("MATCH (f:Flag) WHERE any(x IN [1, 2, 3] WHERE x > 2) RETURN f.v AS v")
         .unwrap();
@@ -401,7 +413,9 @@ fn test_count_distinct() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     for city in ["Amsterdam", "Amsterdam", "Berlin", "Berlin", "Paris"] {
-        session.create_node_with_props(&["City"], [("name", Value::String(city.into()))]);
+        session
+            .create_node_with_props(&["City"], [("name", Value::String(city.into()))])
+            .unwrap();
     }
     let r = session
         .execute("MATCH (c:City) RETURN count(DISTINCT c.name) AS unique_cities")
@@ -413,9 +427,15 @@ fn test_count_distinct() {
 fn test_count_expression_non_null() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Item"], [("val", Value::Int64(1))]);
-    session.create_node_with_props(&["Item"], [("val", Value::Null)]);
-    session.create_node_with_props(&["Item"], [("val", Value::Int64(3))]);
+    session
+        .create_node_with_props(&["Item"], [("val", Value::Int64(1))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Item"], [("val", Value::Null)])
+        .unwrap();
+    session
+        .create_node_with_props(&["Item"], [("val", Value::Int64(3))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (i:Item) RETURN count(i.val) AS cnt")
@@ -438,13 +458,15 @@ fn test_having_filters_groups() {
         ("Jules", "Berlin"),
         ("Mia", "Paris"),
     ] {
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("name", Value::String(name.into())),
-                ("city", Value::String(city.into())),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("name", Value::String(name.into())),
+                    ("city", Value::String(city.into())),
+                ],
+            )
+            .unwrap();
     }
     let r = session
         .execute(
@@ -471,7 +493,9 @@ fn test_having_no_matching_groups() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     for city in ["Amsterdam", "Berlin", "Paris"] {
-        session.create_node_with_props(&["City"], [("name", Value::String(city.into()))]);
+        session
+            .create_node_with_props(&["City"], [("name", Value::String(city.into()))])
+            .unwrap();
     }
     let r = session
         .execute(
@@ -495,14 +519,16 @@ fn test_having_with_sum_aggregate() {
         ("Jules", "Sales", 60),
         ("Mia", "Marketing", 70),
     ] {
-        session.create_node_with_props(
-            &["Employee"],
-            [
-                ("name", Value::String(name.into())),
-                ("dept", Value::String(dept.into())),
-                ("salary", Value::Int64(salary)),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Employee"],
+                [
+                    ("name", Value::String(name.into())),
+                    ("dept", Value::String(dept.into())),
+                    ("salary", Value::Int64(salary)),
+                ],
+            )
+            .unwrap();
     }
     let r = session
         .execute(
@@ -769,7 +795,9 @@ fn test_group_concat_distinct() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     for city in ["Amsterdam", "Berlin", "Amsterdam", "Berlin", "Paris"] {
-        session.create_node_with_props(&["City"], [("name", Value::String(city.into()))]);
+        session
+            .create_node_with_props(&["City"], [("name", Value::String(city.into()))])
+            .unwrap();
     }
     let r = session
         .execute("MATCH (c:City) RETURN group_concat(DISTINCT c.name) AS names")
@@ -792,7 +820,9 @@ fn test_group_concat_distinct_with_separator() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     for city in ["Amsterdam", "Berlin", "Amsterdam", "Berlin", "Paris"] {
-        session.create_node_with_props(&["City"], [("name", Value::String(city.into()))]);
+        session
+            .create_node_with_props(&["City"], [("name", Value::String(city.into()))])
+            .unwrap();
     }
     let r = session
         .execute("MATCH (c:City) RETURN group_concat(DISTINCT c.name, '|') AS names")
@@ -819,10 +849,18 @@ fn test_sum_distinct_mixed_int_float() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     // Insert nodes with Int64 and Float64 values; duplicates should be excluded
-    session.create_node_with_props(&["Val"], [("v", Value::Int64(10))]);
-    session.create_node_with_props(&["Val"], [("v", Value::Int64(10))]); // duplicate
-    session.create_node_with_props(&["Val"], [("v", Value::Float64(20.5))]);
-    session.create_node_with_props(&["Val"], [("v", Value::Float64(20.5))]); // duplicate
+    session
+        .create_node_with_props(&["Val"], [("v", Value::Int64(10))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Val"], [("v", Value::Int64(10))])
+        .unwrap(); // duplicate
+    session
+        .create_node_with_props(&["Val"], [("v", Value::Float64(20.5))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Val"], [("v", Value::Float64(20.5))])
+        .unwrap(); // duplicate
 
     let r = session
         .execute("MATCH (n:Val) RETURN sum(DISTINCT n.v) AS total")
@@ -882,7 +920,8 @@ fn test_covar_samp_single_row_returns_null() {
     s.create_node_with_props(
         &["Point"],
         [("x", Value::Float64(1.0)), ("y", Value::Float64(2.0))],
-    );
+    )
+    .unwrap();
     let r = s
         .execute("MATCH (p:Point) RETURN COVAR_SAMP(p.y, p.x) AS cov")
         .unwrap();
@@ -898,7 +937,8 @@ fn test_covar_pop_single_row_returns_zero() {
     s.create_node_with_props(
         &["Point"],
         [("x", Value::Float64(1.0)), ("y", Value::Float64(2.0))],
-    );
+    )
+    .unwrap();
     let r = s
         .execute("MATCH (p:Point) RETURN COVAR_POP(p.y, p.x) AS cov")
         .unwrap();
@@ -918,8 +958,10 @@ fn test_covar_pop_single_row_returns_zero() {
 fn test_optional_match_with_count_aggregate() {
     let db = GrafeoDB::new_in_memory();
     let s = db.session();
-    s.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    s.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
+    s.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    s.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
     // Alix has a friend, Gus does not
     s.execute(
         "MATCH (a:Person {name: 'Alix'}) MATCH (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)",
@@ -954,7 +996,8 @@ fn test_percentile_cont_interpolation() {
     let s = db.session();
     // Create 4 values: 10, 20, 30, 40
     for v in [10, 20, 30, 40] {
-        s.create_node_with_props(&["Item"], [("v", Value::Int64(v))]);
+        s.create_node_with_props(&["Item"], [("v", Value::Int64(v))])
+            .unwrap();
     }
     // percentile_cont at 0.5 should interpolate between 20 and 30 = 25.0
     let r = s
@@ -972,7 +1015,8 @@ fn test_percentile_cont_at_boundary() {
     let db = GrafeoDB::new_in_memory();
     let s = db.session();
     for v in [10, 20, 30, 40, 50] {
-        s.create_node_with_props(&["Item"], [("v", Value::Int64(v))]);
+        s.create_node_with_props(&["Item"], [("v", Value::Int64(v))])
+            .unwrap();
     }
     // percentile_cont at 0.25: rank = 0.25 * 4 = 1.0, so exact value at index 1 = 20.0
     let r = s
@@ -1011,7 +1055,8 @@ fn test_collect_distinct() {
     let db = GrafeoDB::new_in_memory();
     let s = db.session();
     for city in ["Amsterdam", "Berlin", "Amsterdam", "Berlin", "Paris"] {
-        s.create_node_with_props(&["City"], [("name", Value::String(city.into()))]);
+        s.create_node_with_props(&["City"], [("name", Value::String(city.into()))])
+            .unwrap();
     }
     let r = s
         .execute("MATCH (c:City) RETURN collect(DISTINCT c.name) AS names")
@@ -1040,7 +1085,8 @@ fn test_avg_distinct() {
     let s = db.session();
     // Values: 10, 10, 20, 20, 30 -> distinct: 10, 20, 30 -> avg = 20.0
     for v in [10, 10, 20, 20, 30] {
-        s.create_node_with_props(&["Val"], [("v", Value::Int64(v))]);
+        s.create_node_with_props(&["Val"], [("v", Value::Int64(v))])
+            .unwrap();
     }
     let r = s
         .execute("MATCH (n:Val) RETURN avg(DISTINCT n.v) AS a")

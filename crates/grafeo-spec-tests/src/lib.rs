@@ -172,9 +172,10 @@ pub fn value_to_string(value: &Value) -> String {
             format!("{total}")
         }
         Value::OnCounter { pos, neg } => {
-            let pos_sum: u64 = pos.values().sum();
-            let neg_sum: u64 = neg.values().sum();
-            format!("{}", pos_sum as i64 - neg_sum as i64)
+            // reason: individual CRDT counter values are small, sum fits i64
+            #[allow(clippy::cast_possible_wrap)]
+            let net = pos.values().sum::<u64>() as i64 - neg.values().sum::<u64>() as i64;
+            format!("{net}")
         }
         _ => value.to_string(),
     }
@@ -274,6 +275,8 @@ pub fn assert_columns(result: &QueryResult, expected: &[&str]) {
 /// Panics if row counts differ, column counts differ, or any cell value falls outside the tolerance.
 pub fn assert_rows_with_precision(result: &QueryResult, expected: &[Vec<String>], precision: u32) {
     let actual = result_to_strings(result);
+    // reason: precision is typically 0..10, fits i32 negated
+    #[allow(clippy::cast_possible_wrap)]
     let tolerance = 10f64.powi(-(precision as i32));
 
     assert_eq!(

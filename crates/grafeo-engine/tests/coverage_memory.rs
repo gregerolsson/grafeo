@@ -28,15 +28,19 @@ fn test_memory_usage_with_data() {
     let session = db.session();
 
     for i in 0..20 {
-        let n = session.create_node_with_props(
-            &["Person"],
-            [
-                ("name", Value::String(format!("Person{i}").into())),
-                ("age", Value::Int64(20 + i)),
-            ],
-        );
+        let n = session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("name", Value::String(format!("Person{i}").into())),
+                    ("age", Value::Int64(20 + i)),
+                ],
+            )
+            .unwrap();
         if i > 0 {
-            let prev = session.create_node_with_props(&["Marker"], [("idx", Value::Int64(i))]);
+            let prev = session
+                .create_node_with_props(&["Marker"], [("idx", Value::Int64(i))])
+                .unwrap();
             session.create_edge(prev, n, "LINKS_TO");
         }
     }
@@ -75,7 +79,9 @@ fn test_memory_usage_after_mutations() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let _n = session.create_node_with_props(&["Account"], [("balance", Value::Int64(100))]);
+    let _n = session
+        .create_node_with_props(&["Account"], [("balance", Value::Int64(100))])
+        .unwrap();
     let before = db.memory_usage();
 
     // Mutate to create version chains with depth > 1
@@ -110,7 +116,9 @@ fn test_memory_usage_after_mutations() {
 fn test_memory_usage_caches() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Tag"], [("name", Value::String("test".into()))]);
+    session
+        .create_node_with_props(&["Tag"], [("name", Value::String("test".into()))])
+        .unwrap();
 
     // Execute a query to populate query cache
     session.execute("MATCH (t:Tag) RETURN t.name").unwrap();

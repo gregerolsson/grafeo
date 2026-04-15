@@ -13,20 +13,24 @@ use grafeo_engine::GrafeoDB;
 fn setup() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-        ],
-    );
-    session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-        ],
-    );
+    session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+            ],
+        )
+        .unwrap();
     db
 }
 
@@ -101,7 +105,9 @@ fn test_viewing_epoch_lifecycle() {
 fn test_execute_at_epoch() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Item"], [("name", Value::String("original".into()))]);
+    session
+        .create_node_with_props(&["Item"], [("name", Value::String("original".into()))])
+        .unwrap();
 
     let epoch = db.current_epoch();
 
@@ -222,8 +228,12 @@ fn test_optional_match_no_match() {
 fn test_optional_match_with_where() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    let a = session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let b = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
+    let a = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let b = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
     session.create_edge(a, b, "KNOWS");
 
     let r = session
@@ -676,11 +686,15 @@ mod cdc_tests {
 fn setup_questioned_edge() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    let alix =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let gus = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-    let vincent =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))]);
+    let alix = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let gus = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))])
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     let _ = vincent;
@@ -740,11 +754,15 @@ fn test_questioned_edge_with_target_label_filter() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let amsterdam =
-        session.create_node_with_props(&["City"], [("name", Value::String("Amsterdam".into()))]);
-    let gus = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
+    let alix = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let amsterdam = session
+        .create_node_with_props(&["City"], [("name", Value::String("Amsterdam".into()))])
+        .unwrap();
+    let gus = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
 
     // Alix -> Amsterdam (LIVES_IN) and Alix -> Gus (KNOWS)
     session.create_edge(alix, amsterdam, "LIVES_IN");

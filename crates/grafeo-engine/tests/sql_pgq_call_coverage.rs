@@ -26,46 +26,56 @@ fn create_call_test_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("Amsterdam".into())),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("Berlin".into())),
-        ],
-    );
-    let vincent = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Vincent".into())),
-            ("age", Value::Int64(28)),
-            ("city", Value::String("Paris".into())),
-        ],
-    );
-    let mia = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Mia".into())),
-            ("age", Value::Int64(32)),
-            ("city", Value::String("Berlin".into())),
-        ],
-    );
-    let jules = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Jules".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("Amsterdam".into())),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("Amsterdam".into())),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("Berlin".into())),
+            ],
+        )
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Vincent".into())),
+                ("age", Value::Int64(28)),
+                ("city", Value::String("Paris".into())),
+            ],
+        )
+        .unwrap();
+    let mia = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Mia".into())),
+                ("age", Value::Int64(32)),
+                ("city", Value::String("Berlin".into())),
+            ],
+        )
+        .unwrap();
+    let jules = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Jules".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("Amsterdam".into())),
+            ],
+        )
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     session.create_edge(alix, vincent, "KNOWS");
@@ -168,14 +178,18 @@ fn test_call_labels_empty_graph() {
 fn test_call_labels_multi_label_graph() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(
-        &["Person", "Employee"],
-        [("name", Value::String("Django".into()))],
-    );
-    session.create_node_with_props(
-        &["Company"],
-        [("name", Value::String("GrafeoDB Inc".into()))],
-    );
+    session
+        .create_node_with_props(
+            &["Person", "Employee"],
+            [("name", Value::String("Django".into()))],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Company"],
+            [("name", Value::String("GrafeoDB Inc".into()))],
+        )
+        .unwrap();
 
     let result = session.execute_sql("CALL grafeo.labels()").unwrap();
     let labels: Vec<&str> = result.rows().iter().filter_map(|r| r[0].as_str()).collect();
@@ -372,7 +386,9 @@ fn test_call_pagerank_empty_graph() {
 fn test_call_pagerank_single_node() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Isolated"], [("name", Value::String("Alix".into()))]);
+    session
+        .create_node_with_props(&["Isolated"], [("name", Value::String("Alix".into()))])
+        .unwrap();
     let result = session.execute_sql("CALL grafeo.pagerank()").unwrap();
     assert_eq!(result.row_count(), 1);
 }
@@ -475,10 +491,15 @@ fn test_call_connected_components_basic() {
 fn test_call_connected_components_disconnected() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    let alix =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let gus = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-    session.create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))]);
+    let alix = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let gus = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))])
+        .unwrap();
     session.create_edge(alix, gus, "KNOWS");
 
     let result = session

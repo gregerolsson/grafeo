@@ -27,27 +27,33 @@ fn create_social_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+            ],
+        )
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     session.create_edge(alix, harm, "KNOWS");
@@ -252,10 +258,18 @@ fn create_chain_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let a = session.create_node_with_props(&["Person"], [("name", Value::String("A".into()))]);
-    let b = session.create_node_with_props(&["Person"], [("name", Value::String("B".into()))]);
-    let c = session.create_node_with_props(&["Person"], [("name", Value::String("C".into()))]);
-    let d = session.create_node_with_props(&["Person"], [("name", Value::String("D".into()))]);
+    let a = session
+        .create_node_with_props(&["Person"], [("name", Value::String("A".into()))])
+        .unwrap();
+    let b = session
+        .create_node_with_props(&["Person"], [("name", Value::String("B".into()))])
+        .unwrap();
+    let c = session
+        .create_node_with_props(&["Person"], [("name", Value::String("C".into()))])
+        .unwrap();
+    let d = session
+        .create_node_with_props(&["Person"], [("name", Value::String("D".into()))])
+        .unwrap();
 
     session.create_edge(a, b, "KNOWS");
     session.create_edge(b, c, "KNOWS");
@@ -527,11 +541,15 @@ fn create_partial_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let gus = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-    let vincent =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))]);
+    let alix = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let gus = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Vincent".into()))])
+        .unwrap();
 
     // Alix knows Gus, but Vincent knows nobody
     session.create_edge(alix, gus, "KNOWS");

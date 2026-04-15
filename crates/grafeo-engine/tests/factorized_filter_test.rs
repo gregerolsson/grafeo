@@ -12,7 +12,9 @@ fn test_filter_in_multihop_query() {
     // Create 5 Person nodes with id property
     let mut nodes = Vec::new();
     for i in 0..5 {
-        let id = session.create_node_with_props(&["Person"], [("id", Value::Int64(i))]);
+        let id = session
+            .create_node_with_props(&["Person"], [("id", Value::Int64(i))])
+            .unwrap();
         nodes.push(id);
         println!("Created node {} with id={}", id, i);
     }

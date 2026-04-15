@@ -1,9 +1,13 @@
 //! Benchmark comparison: Factorized vs Non-factorized execution
+// Test indices are small known values
+#![allow(clippy::cast_possible_wrap)]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
 use std::time::Instant;
 
+// reason: test node count is small, fits i64
+#[allow(clippy::cast_possible_wrap)]
 fn setup_graph_with_config(node_count: usize, avg_degree: usize, config: Config) -> GrafeoDB {
     let db = GrafeoDB::with_config(config).expect("Failed to create database");
     let session = db.session();
@@ -11,7 +15,9 @@ fn setup_graph_with_config(node_count: usize, avg_degree: usize, config: Config)
     // Create nodes
     let mut nodes = Vec::new();
     for i in 0..node_count {
-        let id = session.create_node_with_props(&["Person"], [("id", Value::Int64(i as i64))]);
+        let id = session
+            .create_node_with_props(&["Person"], [("id", Value::Int64(i as i64))])
+            .unwrap();
         nodes.push(id);
     }
 

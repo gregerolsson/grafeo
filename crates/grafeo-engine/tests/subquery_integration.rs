@@ -22,32 +22,39 @@ fn social_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("Amsterdam".into())),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("Berlin".into())),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("Paris".into())),
-        ],
-    );
-    let techcorp =
-        session.create_node_with_props(&["Company"], [("name", Value::String("TechCorp".into()))]);
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("Amsterdam".into())),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("Berlin".into())),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("Paris".into())),
+            ],
+        )
+        .unwrap();
+    let techcorp = session
+        .create_node_with_props(&["Company"], [("name", Value::String("TechCorp".into()))])
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     session.create_edge(alix, harm, "KNOWS");

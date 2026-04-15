@@ -28,37 +28,45 @@ fn create_social_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("Amsterdam".into())),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("Berlin".into())),
-        ],
-    );
-    let vincent = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Vincent".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("Paris".into())),
-        ],
-    );
-    let acme = session.create_node_with_props(
-        &["Company"],
-        [
-            ("name", Value::String("Acme".into())),
-            ("revenue", Value::Int64(1_000_000)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("Amsterdam".into())),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("Berlin".into())),
+            ],
+        )
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Vincent".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("Paris".into())),
+            ],
+        )
+        .unwrap();
+    let acme = session
+        .create_node_with_props(
+            &["Company"],
+            [
+                ("name", Value::String("Acme".into())),
+                ("revenue", Value::Int64(1_000_000)),
+            ],
+        )
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     session.create_edge(alix, vincent, "KNOWS");

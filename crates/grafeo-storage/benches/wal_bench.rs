@@ -75,7 +75,6 @@ fn bench_wal_write_sync(c: &mut Criterion) {
 }
 
 fn bench_wal_batch_commit(c: &mut Criterion) {
-    let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
         durability: DurabilityMode::NoSync,
         ..WalConfig::default()
@@ -83,7 +82,8 @@ fn bench_wal_batch_commit(c: &mut Criterion) {
 
     c.bench_function("wal_batch_commit_1000", |b| {
         b.iter(|| {
-            // Fresh WAL per iteration to avoid unbounded growth
+            // Fresh directory per iteration so the log never grows across runs
+            let dir = tempfile::tempdir().unwrap();
             let wal = WalManager::with_config(dir.path(), config.clone()).unwrap();
 
             for i in 0..1000u64 {

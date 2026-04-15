@@ -22,57 +22,69 @@ fn social_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("Amsterdam".into())),
-            ("score", Value::Float64(7.5)),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("Berlin".into())),
-            ("score", Value::Float64(8.2)),
-        ],
-    );
-    let vincent = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Vincent".into())),
-            ("age", Value::Int64(40)),
-            ("city", Value::String("Paris".into())),
-            ("score", Value::Float64(6.0)),
-        ],
-    );
-    let jules = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Jules".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("Amsterdam".into())),
-            ("score", Value::Float64(9.1)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("Amsterdam".into())),
+                ("score", Value::Float64(7.5)),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("Berlin".into())),
+                ("score", Value::Float64(8.2)),
+            ],
+        )
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Vincent".into())),
+                ("age", Value::Int64(40)),
+                ("city", Value::String("Paris".into())),
+                ("score", Value::Float64(6.0)),
+            ],
+        )
+        .unwrap();
+    let jules = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Jules".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("Amsterdam".into())),
+                ("score", Value::Float64(9.1)),
+            ],
+        )
+        .unwrap();
 
-    let techcorp = session.create_node_with_props(
-        &["Company"],
-        [
-            ("name", Value::String("TechCorp".into())),
-            ("founded", Value::Int64(2010)),
-        ],
-    );
-    let startup = session.create_node_with_props(
-        &["Company"],
-        [
-            ("name", Value::String("Startup".into())),
-            ("founded", Value::Int64(2020)),
-        ],
-    );
+    let techcorp = session
+        .create_node_with_props(
+            &["Company"],
+            [
+                ("name", Value::String("TechCorp".into())),
+                ("founded", Value::Int64(2010)),
+            ],
+        )
+        .unwrap();
+    let startup = session
+        .create_node_with_props(
+            &["Company"],
+            [
+                ("name", Value::String("Startup".into())),
+                ("founded", Value::Int64(2020)),
+            ],
+        )
+        .unwrap();
 
     // KNOWS: Alix -> Gus, Alix -> Vincent, Gus -> Jules, Vincent -> Jules
     session.create_edge(alix, gus, "KNOWS");
@@ -95,38 +107,52 @@ fn chain_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("rank", Value::Int64(1)),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("rank", Value::Int64(2)),
-        ],
-    );
-    let vincent = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Vincent".into())),
-            ("rank", Value::Int64(3)),
-        ],
-    );
-    let jules = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Jules".into())),
-            ("rank", Value::Int64(4)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("rank", Value::Int64(1)),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("rank", Value::Int64(2)),
+            ],
+        )
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Vincent".into())),
+                ("rank", Value::Int64(3)),
+            ],
+        )
+        .unwrap();
+    let jules = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Jules".into())),
+                ("rank", Value::Int64(4)),
+            ],
+        )
+        .unwrap();
 
-    session.create_edge_with_props(alix, gus, "FOLLOWS", [("weight", Value::Float64(1.0))]);
-    session.create_edge_with_props(gus, vincent, "FOLLOWS", [("weight", Value::Float64(2.0))]);
-    session.create_edge_with_props(vincent, jules, "FOLLOWS", [("weight", Value::Float64(3.0))]);
+    session
+        .create_edge_with_props(alix, gus, "FOLLOWS", [("weight", Value::Float64(1.0))])
+        .unwrap();
+    session
+        .create_edge_with_props(gus, vincent, "FOLLOWS", [("weight", Value::Float64(2.0))])
+        .unwrap();
+    session
+        .create_edge_with_props(vincent, jules, "FOLLOWS", [("weight", Value::Float64(3.0))])
+        .unwrap();
 
     db
 }
@@ -136,38 +162,46 @@ fn sparse_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("alpha".into())),
-            ("val", Value::Int64(10)),
-            ("tag", Value::String("x".into())),
-        ],
-    );
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("beta".into())),
-            // val is missing (NULL)
-            ("tag", Value::String("x".into())),
-        ],
-    );
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("gamma".into())),
-            ("val", Value::Int64(30)),
-            // tag is missing (NULL)
-        ],
-    );
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("delta".into())),
-            ("val", Value::Int64(20)),
-            ("tag", Value::String("y".into())),
-        ],
-    );
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("alpha".into())),
+                ("val", Value::Int64(10)),
+                ("tag", Value::String("x".into())),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("beta".into())),
+                // val is missing (NULL)
+                ("tag", Value::String("x".into())),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("gamma".into())),
+                ("val", Value::Int64(30)),
+                // tag is missing (NULL)
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("delta".into())),
+                ("val", Value::Int64(20)),
+                ("tag", Value::String("y".into())),
+            ],
+        )
+        .unwrap();
 
     db
 }

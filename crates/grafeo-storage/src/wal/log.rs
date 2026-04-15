@@ -410,6 +410,7 @@ impl WalManager {
             .duration_since(UNIX_EPOCH)
             // reason: millis since UNIX epoch fits in u64 for ~585 million years
             .map(|d| {
+                // reason: value is bounded by format constraints
                 #[allow(clippy::cast_possible_truncation)]
                 let ms = d.as_millis() as u64;
                 ms

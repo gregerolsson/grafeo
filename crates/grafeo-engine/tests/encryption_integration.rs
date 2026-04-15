@@ -79,6 +79,8 @@ fn test_large_payload_roundtrip() {
     let kc = grafeo_common::encryption::KeyChain::new([0x99; 32]);
     let enc = kc.encryptor_for("test", b"large");
 
+    // reason: i % 256 is always in [0, 255], fits u8
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let plaintext: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
     let nonce = grafeo_common::encryption::build_nonce(0, 0);
     let aad = b"large-payload";
