@@ -1,4 +1,4 @@
-//! [`Section`] implementation for [`CompactStore`].
+//! [`Section`](grafeo_common::storage::section::Section) implementation for [`CompactStore`].
 //!
 //! Serializes/deserializes a CompactStore to/from the `.grafeo` container
 //! format with versioned headers and CRC32 integrity.

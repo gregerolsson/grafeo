@@ -1,4 +1,4 @@
-//! [`GraphStore`] trait implementation for [`CompactStore`].
+//! [`GraphStore`](crate::graph::GraphStore) trait implementation for [`CompactStore`].
 //!
 //! All read operations (point lookups, traversal, scans, property access,
 //! filtered search, statistics, and visibility checks) are implemented here.

@@ -945,7 +945,7 @@ pub fn from_graph_store(
     builder.build()
 }
 
-/// Builds a [`CompactStore`] from any [`GraphStore`] with original ID preservation.
+/// Builds a [`CompactStore`] from any [`GraphStore`](crate::graph::GraphStore) with original ID preservation.
 ///
 /// Same columnar conversion as [`from_graph_store`], but the resulting store
 /// keeps a bidirectional mapping between the original `NodeId`/`EdgeId` values
