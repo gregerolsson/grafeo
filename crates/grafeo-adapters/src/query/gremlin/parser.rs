@@ -572,9 +572,11 @@ impl<'a> Parser<'a> {
                 "{context}() requires a non-negative integer, got {n}"
             )));
         }
-        // reason: negative values rejected above, and i64 fits in usize on 64-bit targets
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        Ok(n as usize)
+        usize::try_from(n).map_err(|_| {
+            self.error(&format!(
+                "{context}() value {n} exceeds maximum supported size"
+            ))
+        })
     }
 
     fn parse_has_args(&mut self) -> Result<HasStep> {

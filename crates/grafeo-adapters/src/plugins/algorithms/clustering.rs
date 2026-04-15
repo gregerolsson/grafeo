@@ -558,7 +558,7 @@ impl GraphAlgorithm for TotalTrianglesAlgorithm {
         let count = {
             let parallel = params.get_bool("parallel").unwrap_or(true);
             let threshold =
-                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(0);
+                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(50);
 
             if parallel {
                 total_triangles_parallel(store, threshold)
@@ -626,7 +626,7 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
         let result = {
             let parallel = params.get_bool("parallel").unwrap_or(true);
             let threshold =
-                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(0);
+                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(50);
 
             if parallel {
                 clustering_coefficient_parallel(store, threshold)

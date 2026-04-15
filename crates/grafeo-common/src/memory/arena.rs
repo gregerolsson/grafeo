@@ -117,12 +117,17 @@ impl Chunk {
             align.is_power_of_two(),
             "alignment must be a power of two, got {align}"
         );
+        let base_addr = self.ptr.as_ptr() as usize;
         loop {
             let current = self.offset.load(Ordering::Relaxed);
 
-            // Calculate aligned offset using checked arithmetic to prevent wrapping
+            // Align the absolute address (base + offset), then convert back to an
+            // offset. This is correct for any requested alignment, even when it
+            // exceeds the chunk's own 16-byte alignment.
             let align_mask = align.checked_sub(1)?;
-            let aligned = current.checked_add(align_mask)? & !align_mask;
+            let current_addr = base_addr.checked_add(current)?;
+            let aligned_addr = current_addr.checked_add(align_mask)? & !align_mask;
+            let aligned = aligned_addr - base_addr;
             let new_offset = aligned.checked_add(size)?;
 
             if new_offset > self.capacity {

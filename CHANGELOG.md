@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.5.39] - Unreleased
+## [0.5.39] - 2026-04-15
 
 Block-STM conflict partitioning, push-based query execution, AES-256-GCM encryption at rest, runtime metrics with Prometheus export, and a writable layered compact store.
 
@@ -28,6 +28,10 @@ Block-STM conflict partitioning, push-based query execution, AES-256-GCM encrypt
 
 ### Fixed
 
+- **SSI validation race**: concurrent commits could miss read-write conflicts due to a gap between state update and epoch recording. Both locks now held atomically.
+- **Transaction lock ordering**: consistent write-lock ordering in `commit()` and `gc()`, eliminating a potential deadlock from the previous read-then-upgrade pattern.
+- **EXPLAIN/PROFILE nesting bypass**: recursive EXPLAIN/PROFILE in GQL and Cypher now counts toward the 128-level nesting limit.
+- **Session commit atomicity**: `touched_graphs` clone-then-clear replaced with atomic `mem::take()`.
 - **WAL encryption nonces**: fixed reuse on restart, collisions across sections, and u64-to-u32 truncation. Old log file now fsynced before rotation.
 - **HKDF key derivation**: added domain-separation salt, preventing cross-protocol key reuse.
 - **Parser overflow hardening**: integer overflow in Cypher, SQL/PGQ, Gremlin, GraphQL now returns errors instead of silently producing `0`. Float overflow (`1e999`) in GraphQL rejected.

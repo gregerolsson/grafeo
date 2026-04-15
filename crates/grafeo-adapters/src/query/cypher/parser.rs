@@ -68,14 +68,18 @@ impl<'a> Parser<'a> {
             && self.current.text.eq_ignore_ascii_case("EXPLAIN")
         {
             self.advance(); // consume EXPLAIN
+            self.enter_nesting()?;
             let inner = self.parse()?;
+            self.exit_nesting();
             return Ok(Statement::Explain(Box::new(inner)));
         }
         if self.current.kind == TokenKind::Identifier
             && self.current.text.eq_ignore_ascii_case("PROFILE")
         {
             self.advance(); // consume PROFILE
+            self.enter_nesting()?;
             let inner = self.parse()?;
+            self.exit_nesting();
             return Ok(Statement::Profile(Box::new(inner)));
         }
 
@@ -4078,6 +4082,40 @@ mod tests {
         let mut parser = Parser::new(&query);
         let result = parser.parse();
         assert!(result.is_ok(), "50 levels of nesting should succeed");
+    }
+
+    #[test]
+    fn test_explain_recursion_depth_limit() {
+        let query = "EXPLAIN ".repeat(200) + "RETURN 1";
+        let mut parser = Parser::new(&query);
+        let result = parser.parse();
+        assert!(result.is_err(), "Deeply nested EXPLAIN should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nesting depth"),
+            "Expected nesting depth error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_profile_recursion_depth_limit() {
+        let query = "PROFILE ".repeat(200) + "RETURN 1";
+        let mut parser = Parser::new(&query);
+        let result = parser.parse();
+        assert!(result.is_err(), "Deeply nested PROFILE should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nesting depth"),
+            "Expected nesting depth error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_single_explain_succeeds() {
+        let query = "EXPLAIN RETURN 1";
+        let mut parser = Parser::new(query);
+        let result = parser.parse();
+        assert!(result.is_ok(), "Single EXPLAIN should succeed");
     }
 
     #[test]

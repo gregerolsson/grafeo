@@ -339,12 +339,13 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             let mut obj = std::ptr::null_mut();
             // SAFETY: env is valid; napi_create_object writes to our out-pointer
             check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
-            // reason: individual CRDT counter values are small, sum fits i64
-            #[allow(clippy::cast_possible_wrap)]
-            let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-            // reason: individual CRDT counter values are small, sum fits i64
-            #[allow(clippy::cast_possible_wrap)]
-            let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
+            let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+            let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+            let net = if pos_sum >= neg_sum {
+                (pos_sum - neg_sum) as f64
+            } else {
+                -((neg_sum - pos_sum) as f64)
+            };
             let pncounter_key =
                 CString::new("$pncounter").expect("static string has no null bytes");
             let mut true_val = std::ptr::null_mut();
@@ -356,9 +357,7 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             })?;
             let mut net_val = std::ptr::null_mut();
             // SAFETY: env is valid; napi_create_double writes to our out-pointer
-            check_napi(unsafe {
-                sys::napi_create_double(env, (pos_sum - neg_sum) as f64, &raw mut net_val)
-            })?;
+            check_napi(unsafe { sys::napi_create_double(env, net, &raw mut net_val) })?;
             let value_key = CString::new("$value").expect("static string has no null bytes");
             // SAFETY: env, obj, and net_val are valid
             check_napi(unsafe {

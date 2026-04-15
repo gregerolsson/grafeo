@@ -434,9 +434,7 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
         let count = subgraph_isomorphism_count_from_edges(store, &edges, node_count);
 
         let mut output = AlgorithmResult::new(vec!["count".to_string()]);
-        // reason: Isomorphism count is bounded by graph size, well within i64::MAX
-        #[allow(clippy::cast_possible_wrap)]
-        output.add_row(vec![Value::Int64(count as i64)]);
+        output.add_row(vec![Value::Int64(i64::try_from(count).unwrap_or(i64::MAX))]);
         Ok(output)
     }
 }

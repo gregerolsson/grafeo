@@ -383,16 +383,13 @@ impl PyValue {
             }
             Value::OnCounter { pos, neg } => {
                 use pyo3::conversion::IntoPyObjectExt;
-                // reason: individual CRDT counter values are small, sum fits i64
-                #[allow(clippy::cast_possible_wrap)]
-                let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-                // reason: individual CRDT counter values are small, sum fits i64
-                #[allow(clippy::cast_possible_wrap)]
-                let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
+                let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+                let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+                let net: i128 = pos_sum.cast_signed() - neg_sum.cast_signed();
                 let dict = PyDict::new(py);
                 dict.set_item("$pncounter", true)
                     .expect("dict.set_item only fails on memory exhaustion");
-                dict.set_item("$value", pos_sum - neg_sum)
+                dict.set_item("$value", net)
                     .expect("dict.set_item only fails on memory exhaustion");
                 dict.into_py_any(py)
                     .expect("dict to Python conversion cannot fail")

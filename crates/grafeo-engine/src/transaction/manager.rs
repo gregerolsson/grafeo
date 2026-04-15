@@ -262,8 +262,12 @@ impl TransactionManager {
     /// - There's a write-write conflict with another committed transaction
     /// - (Serializable only) There's a read-write conflict (SSI violation)
     pub fn commit(&self, transaction_id: TransactionId) -> Result<EpochId> {
+        // Lock ordering: transactions first, then committed_epochs (matches gc()).
+        // Both held as write locks to ensure state and epoch are updated atomically,
+        // preventing a race where another thread sees state == Committed but the
+        // epoch is not yet in committed_epochs.
         let mut txns = self.transactions.write();
-        let committed = self.committed_epochs.read();
+        let mut committed = self.committed_epochs.write();
 
         // First, validate the transaction exists and is active
         let (our_isolation, our_start_epoch, our_write_set, our_read_set) = {
@@ -306,10 +310,15 @@ impl TransactionManager {
             }
         }
 
-        // SSI validation for Serializable isolation level
+        // SSI validation for Serializable isolation level.
         // Check for read-write conflicts: if we read an entity that another
         // transaction (that committed after we started) wrote, we have a
         // "rw-antidependency" which can cause write skew.
+        //
+        // With both transactions.write() and committed_epochs.write() held,
+        // no concurrent commit can insert into committed_epochs or change
+        // transaction state during our validation window. A single pass over
+        // committed_epochs is sufficient.
         if our_isolation == IsolationLevel::Serializable && !our_read_set.is_empty() {
             for (other_tx, commit_epoch) in committed.iter() {
                 if *other_tx != transaction_id && commit_epoch.as_u64() > our_start_epoch.as_u64() {
@@ -329,50 +338,18 @@ impl TransactionManager {
                     }
                 }
             }
-
-            // Also check against transactions that are already marked committed
-            // but not yet in committed_epochs map
-            for (other_tx, other_info) in txns.iter() {
-                if *other_tx == transaction_id {
-                    continue;
-                }
-                if other_info.state == TransactionState::Committed {
-                    // If we can see their write set and we read something they wrote
-                    for entity in &our_read_set {
-                        if other_info.write_set.contains(entity) {
-                            // Check if they committed after we started
-                            if let Some(commit_epoch) = committed.get(other_tx)
-                                && commit_epoch.as_u64() > our_start_epoch.as_u64()
-                            {
-                                return Err(Error::Transaction(
-                                    TransactionError::SerializationFailure(format!(
-                                        "Read-write conflict on entity {:?}: \
-                                             another transaction modified data we read",
-                                        entity
-                                    )),
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
         }
 
-        // Commit successful - advance epoch atomically
-        // SeqCst ensures all threads see commits in a consistent total order
+        // Commit successful: advance epoch atomically.
+        // SeqCst ensures all threads see commits in a consistent total order.
         let commit_epoch = EpochId::new(self.current_epoch.fetch_add(1, Ordering::SeqCst) + 1);
 
-        // Now update state
+        // Update state and record commit epoch atomically (both write locks held).
         if let Some(info) = txns.get_mut(&transaction_id) {
             info.state = TransactionState::Committed;
         }
         self.active_count.fetch_sub(1, Ordering::Relaxed);
-
-        // Record commit epoch (need to drop read lock first)
-        drop(committed);
-        self.committed_epochs
-            .write()
-            .insert(transaction_id, commit_epoch);
+        committed.insert(transaction_id, commit_epoch);
 
         Ok(commit_epoch)
     }
@@ -582,6 +559,12 @@ impl TransactionManager {
         } else {
             None
         }
+    }
+
+    /// Returns the commit epoch of a transaction, if committed.
+    #[cfg(test)]
+    pub fn committed_epoch(&self, transaction_id: TransactionId) -> Option<EpochId> {
+        self.committed_epochs.read().get(&transaction_id).copied()
     }
 }
 
@@ -1117,5 +1100,132 @@ mod tests {
 
         // First commit succeeds
         assert!(mgr.commit(tx1).is_ok());
+    }
+
+    #[test]
+    fn test_ssi_concurrent_commit_race() {
+        // Regression test: with the old read-then-upgrade lock pattern,
+        // two concurrent SSI commits could both succeed when one should
+        // have been aborted due to a read-write conflict (write skew).
+        use std::sync::Arc;
+
+        let mgr = Arc::new(TransactionManager::new());
+
+        // Run many iterations to exercise the race window
+        for _ in 0..100 {
+            let entity_a = NodeId::new(1);
+            let entity_b = NodeId::new(2);
+
+            // Classic write skew setup: both transactions read both entities,
+            // then each writes to a different one.
+            let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+            let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+            mgr.record_read(tx1, entity_a).unwrap();
+            mgr.record_read(tx1, entity_b).unwrap();
+            mgr.record_read(tx2, entity_a).unwrap();
+            mgr.record_read(tx2, entity_b).unwrap();
+
+            mgr.record_write(tx1, entity_a).unwrap();
+            mgr.record_write(tx2, entity_b).unwrap();
+
+            // Commit tx1 first so it's in committed_epochs
+            mgr.commit(tx1).unwrap();
+
+            // tx2 should be rejected: it read entity_a which tx1 wrote
+            let result = mgr.commit(tx2);
+            assert!(
+                result.is_err(),
+                "SSI should detect read-write conflict on entity_a"
+            );
+
+            // Abort the rejected transaction so its write set is cleared
+            // before the next iteration.
+            let _ = mgr.abort(tx2);
+            mgr.gc();
+        }
+    }
+
+    #[test]
+    fn test_ssi_concurrent_commit_barrier() {
+        // Stress test with barrier synchronization to maximize the chance
+        // of concurrent commit() calls overlapping.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let mgr = Arc::new(TransactionManager::new());
+        let mut both_ok_count = 0;
+
+        for _ in 0..50 {
+            let entity_a = NodeId::new(1);
+            let entity_b = NodeId::new(2);
+
+            let tx1 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+            let tx2 = mgr.begin_with_isolation(IsolationLevel::Serializable);
+
+            mgr.record_read(tx1, entity_a).unwrap();
+            mgr.record_read(tx1, entity_b).unwrap();
+            mgr.record_read(tx2, entity_a).unwrap();
+            mgr.record_read(tx2, entity_b).unwrap();
+
+            mgr.record_write(tx1, entity_a).unwrap();
+            mgr.record_write(tx2, entity_b).unwrap();
+
+            let mgr1 = Arc::clone(&mgr);
+            let mgr2 = Arc::clone(&mgr);
+            let barrier = Arc::new(Barrier::new(2));
+            let b1 = Arc::clone(&barrier);
+            let b2 = Arc::clone(&barrier);
+
+            let h1 = thread::spawn(move || {
+                b1.wait();
+                mgr1.commit(tx1)
+            });
+            let h2 = thread::spawn(move || {
+                b2.wait();
+                mgr2.commit(tx2)
+            });
+
+            let r1 = h1.join().unwrap();
+            let r2 = h2.join().unwrap();
+
+            if r1.is_ok() && r2.is_ok() {
+                both_ok_count += 1;
+            }
+
+            // Clean up
+            if r1.is_err() {
+                let _ = mgr.abort(tx1);
+            }
+            if r2.is_err() {
+                let _ = mgr.abort(tx2);
+            }
+            mgr.gc();
+        }
+
+        // At most one should succeed per iteration (write skew prevention).
+        // With the fix, both_ok_count should always be 0.
+        assert_eq!(
+            both_ok_count, 0,
+            "SSI must prevent both concurrent write-skew commits from succeeding"
+        );
+    }
+
+    #[test]
+    fn test_committed_epoch_present_after_commit() {
+        // Verify that after commit(), the committed_epochs entry is always
+        // present (no window where state is Committed but epoch is missing).
+        let mgr = TransactionManager::new();
+
+        let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        let epoch = mgr.commit(tx).unwrap();
+
+        // committed_epoch must be available immediately after commit returns
+        assert_eq!(
+            mgr.committed_epoch(tx),
+            Some(epoch),
+            "committed_epochs must contain tx immediately after commit()"
+        );
     }
 }

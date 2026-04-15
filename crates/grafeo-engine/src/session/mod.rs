@@ -3719,7 +3719,12 @@ impl Session {
 
         // Validate the transaction first (conflict detection) before committing data.
         // If this fails, we rollback the data changes instead of making them permanent.
-        let touched = self.touched_graphs.lock().clone();
+        //
+        // Take ownership of the touched graphs in one lock acquisition. Since
+        // current_transaction was .take()'d above, no concurrent thread can call
+        // track_graph_touch() for this transaction (it checks current_transaction
+        // first), so this is safe.
+        let touched = std::mem::take(&mut *self.touched_graphs.lock());
         let commit_epoch = match self.transaction_manager.commit(transaction_id) {
             Ok(epoch) => epoch,
             Err(e) => {
@@ -3808,10 +3813,10 @@ impl Session {
             store.sync_epoch(current_epoch);
         }
 
-        // Reset read-only flag, clear savepoints and touched graphs
+        // Reset read-only flag and clear savepoints.
+        // touched_graphs was already emptied by mem::take above.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
-        self.touched_graphs.lock().clear();
 
         // Auto-GC: periodically prune old MVCC versions
         if self.gc_interval > 0 {

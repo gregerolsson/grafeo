@@ -724,7 +724,19 @@ impl_algorithm! {
     description: "Label Propagation community detection",
     params: label_prop_params,
     execute(store, params) {
-        let max_iter = usize::try_from(params.get_int("max_iterations").unwrap_or(100)).unwrap_or(0);
+        let max_iter = match params.get_int("max_iterations") {
+            Some(v) if v < 0 => {
+                return Err(grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations must be non-negative, got {v}"),
+                ));
+            }
+            Some(v) => usize::try_from(v).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations value {v} exceeds maximum supported size"),
+                )
+            })?,
+            None => 100,
+        };
 
         let communities = label_propagation(store, max_iter);
 
@@ -825,9 +837,11 @@ impl_algorithm! {
                     format!("num_blocks must be non-negative, got {v}"),
                 ));
             }
-            // reason: negative values rejected above, i64 fits usize on 64-bit
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            Some(v) => Some(v as usize),
+            Some(v) => Some(usize::try_from(v).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(
+                    format!("num_blocks value {v} exceeds maximum supported size"),
+                )
+            })?),
             None => None,
         };
         let max_iter = match params.get_int("max_iterations") {
@@ -836,9 +850,11 @@ impl_algorithm! {
                     format!("max_iterations must be non-negative, got {v}"),
                 ));
             }
-            // reason: negative values rejected above, i64 fits usize on 64-bit
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            Some(v) => v as usize,
+            Some(v) => usize::try_from(v).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations value {v} exceeds maximum supported size"),
+                )
+            })?,
             None => 100,
         };
 

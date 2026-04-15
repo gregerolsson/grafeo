@@ -4061,7 +4061,7 @@ fn value_to_node_id(value: &Value, col_name: &str) -> PyResult<NodeId> {
                 Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "invalid node ID {f} in column '{col_name}' (must be a non-negative integer)"
                 )))
-            } else if *f > u64::MAX as f64 {
+            } else if *f >= u64::MAX as f64 {
                 Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "node ID {f} in column '{col_name}' exceeds u64 range"
                 )))
