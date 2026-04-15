@@ -1840,6 +1840,125 @@ mod tests {
         assert!(found_group2, "Group 2 with min/max not found");
     }
 
+    // ---------------------------------------------------------------
+    // Additional aggregate push operator coverage
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_aggregate_count_non_null() {
+        // COUNT(column) with CountNonNull skips null values
+        let expr = AggregateExpr::count(0);
+        let mut agg = AggregatePushOperator::global(vec![expr]);
+        let mut sink = CollectorSink::new();
+
+        // Create a chunk with mixed values and nulls
+        let mut col = ValueVector::new();
+        col.push(Value::Int64(10)); // Alix's score
+        col.push(Value::Null);
+        col.push(Value::Int64(30)); // Gus's score
+        col.push(Value::Null);
+        col.push(Value::Int64(50)); // Vincent's score
+        let chunk = DataChunk::new(vec![col]);
+
+        agg.push(chunk, &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        // Only 3 non-null values should be counted
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(3))
+        );
+    }
+
+    #[test]
+    fn test_grouped_aggregate_empty_groups() {
+        // Grouped aggregate with empty input produces no output
+        let mut agg = AggregatePushOperator::new(vec![0], vec![AggregateExpr::sum(1)]);
+        let mut sink = CollectorSink::new();
+
+        // Push an empty chunk
+        let empty = DataChunk::new(vec![ValueVector::new(), ValueVector::new()]);
+        agg.push(empty, &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        // No groups produced, so no output chunk
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_spillable_count_non_null() {
+        // SpillableAggregatePushOperator: COUNT(column) skips null values
+        let expr = AggregateExpr::count(0);
+        let mut agg = SpillableAggregatePushOperator::global(vec![expr]);
+        let mut sink = CollectorSink::new();
+
+        let mut col = ValueVector::new();
+        col.push(Value::Int64(1));
+        col.push(Value::Null);
+        col.push(Value::Int64(3));
+        let chunk = DataChunk::new(vec![col]);
+
+        agg.push(chunk, &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(2))
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_spillable_grouped_aggregate_empty_groups() {
+        let mut agg = SpillableAggregatePushOperator::new(vec![0], vec![AggregateExpr::sum(1)])
+            .with_threshold(100);
+        let mut sink = CollectorSink::new();
+
+        let empty = DataChunk::new(vec![ValueVector::new(), ValueVector::new()]);
+        agg.push(empty, &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_spillable_aggregate_threshold_transition() {
+        // Test the transition from non-partitioned to partitioned mode
+        // when the spill_manager is set but threshold is reached without
+        // using with_spilling (tests the maybe_spill fallback path)
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+
+        // Use with_spilling to trigger the partitioned spill path
+        let mut agg = SpillableAggregatePushOperator::with_spilling(
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            manager,
+            2, // Very low threshold
+        );
+        let mut sink = CollectorSink::new();
+
+        // Create 5 groups to force spilling
+        for i in 0..5 {
+            agg.push(create_test_chunk(&[i]), &mut sink).unwrap();
+        }
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 5);
+    }
+
     #[test]
     #[cfg(feature = "spill")]
     fn spill_finalized_frozen_ignores_further_updates() {

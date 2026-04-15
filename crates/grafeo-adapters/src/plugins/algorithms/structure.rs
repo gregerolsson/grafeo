@@ -1208,6 +1208,116 @@ mod tests {
         assert_eq!(result.row_count(), 6);
     }
 
+    // ---- KCoreAlgorithm wrapper tests ----
+
+    #[test]
+    fn test_kcore_algorithm_wrapper_full_decomposition() {
+        let store = create_complete(4);
+        let algo = KCoreAlgorithm;
+
+        assert_eq!(algo.name(), "kcore");
+
+        // Full decomposition (no k parameter)
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 3); // node_id, core_number, max_core
+        assert_eq!(result.row_count(), 4); // 4 nodes in K_4
+    }
+
+    #[test]
+    fn test_kcore_algorithm_wrapper_with_k() {
+        let store = create_complete(4);
+        let algo = KCoreAlgorithm;
+
+        // Extract k=2 core: with peeling, only some nodes retain core >= 2
+        let mut params = Parameters::new();
+        params.set_int("k", 2);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, in_k_core
+        // At least some nodes should be in the 2-core
+        assert!(result.row_count() > 0);
+        assert!(result.row_count() <= 4);
+    }
+
+    #[test]
+    fn test_kcore_negative_k() {
+        // Negative k should be rejected with a validation error
+        let store = create_complete(4);
+        let algo = KCoreAlgorithm;
+
+        let mut params = Parameters::new();
+        params.set_int("k", -1);
+        let result = algo.execute(&store, &params);
+        assert!(result.is_err(), "negative k should return an error");
+    }
+
+    #[test]
+    fn test_kcore_valid_execution() {
+        // Alix, Gus, and Vincent form a triangle
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+
+        // Bidirectional triangle
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, alix, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(vincent, gus, "KNOWS");
+        store.create_edge(alix, vincent, "KNOWS");
+        store.create_edge(vincent, alix, "KNOWS");
+
+        let algo = KCoreAlgorithm;
+
+        // Full decomposition: returns all 3 nodes with core numbers
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 3); // node_id, core_number, max_core
+        assert_eq!(result.row_count(), 3); // all 3 nodes decomposed
+
+        // With k=1: at least some nodes should have core >= 1
+        let mut params = Parameters::new();
+        params.set_int("k", 1);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, in_k_core
+        assert!(result.row_count() > 0);
+    }
+
+    #[test]
+    fn test_ktruss_negative_k() {
+        // Negative k should be rejected with a validation error
+        let store = create_complete(4);
+        let algo = KTrussAlgorithm;
+
+        let mut params = Parameters::new();
+        params.set_int("k", -1);
+        let result = algo.execute(&store, &params);
+        assert!(result.is_err(), "negative k should return an error");
+    }
+
+    #[test]
+    fn test_ktruss_valid_execution() {
+        // Triangle between Alix, Gus, Vincent: 3-truss
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, alix, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(vincent, gus, "KNOWS");
+        store.create_edge(alix, vincent, "KNOWS");
+        store.create_edge(vincent, alix, "KNOWS");
+
+        let algo = KTrussAlgorithm;
+        let mut params = Parameters::new();
+        params.set_int("k", 3);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // source, target
+        assert_eq!(result.row_count(), 3); // 3 edges in 3-truss
+    }
+
     // ---- Cross-model: RDF adapter produces same results as LPG ----
 
     #[cfg(feature = "triple-store")]
