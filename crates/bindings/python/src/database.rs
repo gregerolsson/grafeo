@@ -1020,7 +1020,7 @@ impl PyGrafeoDB {
 
         // Convert to Python
         let mut results = Vec::with_capacity(node_ids.len());
-        for (node_id, props) in node_ids.iter().zip(props_batch.into_iter()) {
+        for (node_id, props) in node_ids.iter().zip(props_batch) {
             let py_dict = pyo3::types::PyDict::new(py);
             for (key, value) in props {
                 py_dict.set_item(key.as_str(), PyValue::to_py(&value, py))?;
