@@ -57,6 +57,7 @@ impl Session {
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),
             transaction_start_edge_count: AtomicUsize::new(0),
+            active_streams: AtomicUsize::new(0),
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "wal")]

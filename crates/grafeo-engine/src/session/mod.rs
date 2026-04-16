@@ -193,6 +193,10 @@ pub struct Session {
     /// `None` represents the default graph. Populated at `BEGIN` time and on each
     /// `USE GRAPH` / `SESSION SET GRAPH` switch within a transaction.
     touched_graphs: parking_lot::Mutex<Vec<Option<String>>>,
+    /// Count of active `ResultStream`s pinned to this session. Commit and
+    /// rollback block while any streams are outstanding so mid-iteration
+    /// snapshots are not invalidated.
+    active_streams: AtomicUsize,
     /// Shared metrics registry (populated when the `metrics` feature is enabled).
     #[cfg(feature = "metrics")]
     pub(crate) metrics: Option<Arc<crate::metrics::MetricsRegistry>>,
@@ -279,6 +283,7 @@ impl Session {
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             touched_graphs: parking_lot::Mutex::new(Vec::new()),
+            active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -404,6 +409,7 @@ impl Session {
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             touched_graphs: parking_lot::Mutex::new(Vec::new()),
+            active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -2733,6 +2739,170 @@ impl Session {
         result
     }
 
+    /// Executes a GQL query and returns a lazy result stream.
+    ///
+    /// The stream pulls chunks from the operator pipeline on demand. Use it
+    /// when the result set is too large to fit in memory or when you want
+    /// first-row latency (process rows as they arrive rather than waiting
+    /// for the whole query to complete).
+    ///
+    /// This is the read-only, pull-only path: `execute_streaming` rejects
+    /// mutations (INSERT/DELETE/SET), schema/session commands, EXPLAIN,
+    /// PROFILE, and queries whose planner emits a push-based pipeline. Run
+    /// those via [`execute`](Self::execute) instead.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.5.40. Signature may change before being promoted to Beta.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing or planning fails, if the query is a
+    /// kind that cannot be streamed, or if permission checks fail.
+    #[cfg(all(feature = "gql", feature = "lpg"))]
+    pub fn execute_streaming(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::ResultStream<'_>> {
+        use crate::query::executor::stream::{ResultStream, StreamGuard};
+
+        let (source, columns, deadline) = self.build_streaming_plan(query)?;
+        let guard = StreamGuard::new(&self.active_streams);
+        Ok(ResultStream::new(source, columns, deadline, guard))
+    }
+
+    /// Builds a pull-based physical pipeline for streaming, returning the
+    /// root operator and metadata needed to wrap it in a `ResultStream` or
+    /// `OwnedResultStream`.
+    ///
+    /// Rejects session/schema commands, mutations, EXPLAIN/PROFILE, and plans
+    /// that require a push-based pipeline. Used by both
+    /// [`Session::execute_streaming`] and [`GrafeoDB::execute_streaming`].
+    #[cfg(all(feature = "gql", feature = "lpg"))]
+    pub(crate) fn build_streaming_plan(
+        &self,
+        query: &str,
+    ) -> Result<(
+        Box<dyn grafeo_core::execution::operators::Operator>,
+        Vec<String>,
+        Option<Instant>,
+    )> {
+        use crate::query::{
+            binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
+            translators::gql,
+        };
+
+        self.require_lpg("GQL")?;
+
+        let _span = grafeo_info_span!(
+            "grafeo::session::execute_streaming",
+            language = "gql",
+            query_len = query.len(),
+        );
+
+        // Parse and translate, rejecting anything that isn't a streamable query.
+        let translation = gql::translate_full(query)?;
+        let logical_plan = match translation {
+            gql::GqlTranslationResult::SessionCommand(_) => {
+                return Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::new(
+                        grafeo_common::utils::error::QueryErrorKind::Semantic,
+                        "session commands cannot be streamed; use execute() instead",
+                    ),
+                ));
+            }
+            gql::GqlTranslationResult::SchemaCommand(_) => {
+                return Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::new(
+                        grafeo_common::utils::error::QueryErrorKind::Semantic,
+                        "schema DDL cannot be streamed; use execute() instead",
+                    ),
+                ));
+            }
+            gql::GqlTranslationResult::Plan(plan) => {
+                if plan.root.has_mutations() {
+                    return Err(grafeo_common::utils::error::Error::Query(
+                        grafeo_common::utils::error::QueryError::new(
+                            grafeo_common::utils::error::QueryErrorKind::Semantic,
+                            "mutating queries cannot be streamed; use execute() instead",
+                        ),
+                    ));
+                }
+                if !self.identity.can_admin() {
+                    self.require_permission(crate::auth::StatementKind::Read)?;
+                }
+                plan
+            }
+        };
+
+        // Cache + bind + optimize (same path as execute).
+        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
+        let optimized_plan = if let Some(cached) = self.query_cache.get_optimized(&cache_key) {
+            cached
+        } else {
+            let mut binder = Binder::new();
+            let _binding_context = binder.bind(&logical_plan)?;
+            let active = self.active_store();
+            let optimizer = Optimizer::from_graph_store(&*active);
+            let plan = optimizer.optimize(logical_plan)?;
+            self.query_cache.put_optimized(cache_key, plan.clone());
+            plan
+        };
+
+        if optimized_plan.explain || optimized_plan.profile {
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    "EXPLAIN and PROFILE cannot be streamed; use execute() instead",
+                ),
+            ));
+        }
+
+        // Plan to physical operators.
+        let active = self.active_store();
+        let has_active_tx = self.current_transaction.lock().is_some();
+        let (viewing_epoch, transaction_id) = self.get_transaction_context();
+        let planner = self.create_planner_for_store_with_read_only(
+            Arc::clone(&active),
+            viewing_epoch,
+            transaction_id,
+            !has_active_tx,
+        );
+        let physical_plan = planner.plan(&optimized_plan)?;
+        let columns = physical_plan.columns.clone();
+
+        // Streaming only supports the pure pull path. Reject plans that would
+        // require push operators (Sort, Aggregate, Distinct, etc.) so we never
+        // silently materialize under the hood.
+        let (source, push_ops) = {
+            #[cfg(feature = "spill")]
+            {
+                let memory_ctx = self.make_operator_memory_context();
+                grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
+                    physical_plan.into_operator(),
+                    memory_ctx,
+                )
+            }
+            #[cfg(not(feature = "spill"))]
+            {
+                grafeo_core::execution::pipeline_convert::convert_to_pipeline(
+                    physical_plan.into_operator(),
+                )
+            }
+        };
+        if !push_ops.is_empty() {
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    "query requires a push-based pipeline (ORDER BY / aggregate / DISTINCT) \
+                     which cannot be streamed; use execute() instead",
+                ),
+            ));
+        }
+
+        Ok((source, columns, self.query_deadline()))
+    }
+
     /// Executes a GQL query with visibility at the specified epoch.
     ///
     /// This enables time-travel queries: the query sees the database
@@ -3697,6 +3867,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn commit_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::commit");
+        self.check_no_active_streams("commit")?;
         // Nested transaction: release the auto-savepoint (changes are preserved).
         {
             let mut depth = self.transaction_nesting_depth.lock();
@@ -3893,6 +4064,7 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn rollback_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::rollback");
+        self.check_no_active_streams("rollback")?;
         // Nested transaction: rollback to the auto-savepoint.
         {
             let mut depth = self.transaction_nesting_depth.lock();
@@ -4266,6 +4438,20 @@ impl Session {
             || upper.contains("REMOVE")
             || upper.contains("DROP")
             || upper.contains("ALTER")
+    }
+
+    /// Returns `Err(Transaction(InvalidState))` if any `ResultStream` is
+    /// still outstanding for this session.
+    #[cfg(feature = "lpg")]
+    fn check_no_active_streams(&self, op: &str) -> Result<()> {
+        if self.active_streams.load(Ordering::Acquire) > 0 {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::InvalidState(format!(
+                    "Cannot {op} while streaming results are active; drop the stream first"
+                )),
+            ));
+        }
+        Ok(())
     }
 
     /// Computes the wall-clock deadline for query execution.

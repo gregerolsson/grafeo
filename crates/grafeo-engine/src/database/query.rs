@@ -39,6 +39,38 @@ impl super::GrafeoDB {
         self.with_session(|s| s.execute(query))
     }
 
+    /// Runs a read-only GQL query and returns a lazy result stream.
+    ///
+    /// The stream pulls chunks from the operator pipeline on demand, so
+    /// memory usage is bounded regardless of result-set size. Rejects
+    /// mutations, EXPLAIN/PROFILE, schema/session commands, and queries
+    /// whose planner emits a push-based pipeline (ORDER BY, aggregate,
+    /// DISTINCT, etc.). Use [`execute`](Self::execute) for those.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.5.40. Signature may change before being promoted to Beta.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing or planning fails, or if the query is a
+    /// kind that cannot be streamed.
+    #[cfg(all(feature = "gql", feature = "lpg"))]
+    pub fn execute_streaming(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::OwnedResultStream> {
+        use crate::query::executor::stream::OwnedResultStream;
+        let session = self.session();
+        let (source, columns, deadline) = session.build_streaming_plan(query)?;
+        // Sync graph/schema state back (parser may have changed the session's
+        // view, although streaming rejects session commands so this is a
+        // defensive no-op today).
+        *self.current_graph.write() = session.current_graph();
+        *self.current_schema.write() = session.current_schema();
+        Ok(OwnedResultStream::new(source, columns, deadline))
+    }
+
     /// Executes a GQL query with visibility at the specified epoch.
     ///
     /// This enables time-travel queries: the query sees the database

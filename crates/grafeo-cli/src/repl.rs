@@ -263,28 +263,24 @@ fn handle_meta_command(
         ":schema" => {
             let schema = db.schema();
             match schema {
-                grafeo_engine::SchemaInfo::Lpg(lpg) => {
-                    if !quiet {
-                        println!("Labels:");
-                        for label in &lpg.labels {
-                            println!("  :{} ({})", label.name, label.count);
-                        }
-                        println!("Edge Types:");
-                        for et in &lpg.edge_types {
-                            println!("  :{} ({})", et.name, et.count);
-                        }
-                        println!("Property Keys:");
-                        for key in &lpg.property_keys {
-                            println!("  .{key}");
-                        }
+                grafeo_engine::SchemaInfo::Lpg(lpg) if !quiet => {
+                    println!("Labels:");
+                    for label in &lpg.labels {
+                        println!("  :{} ({})", label.name, label.count);
+                    }
+                    println!("Edge Types:");
+                    for et in &lpg.edge_types {
+                        println!("  :{} ({})", et.name, et.count);
+                    }
+                    println!("Property Keys:");
+                    for key in &lpg.property_keys {
+                        println!("  .{key}");
                     }
                 }
-                grafeo_engine::SchemaInfo::Rdf(rdf) => {
-                    if !quiet {
-                        println!("Predicates:");
-                        for pred in &rdf.predicates {
-                            println!("  {} ({})", pred.iri, pred.count);
-                        }
+                grafeo_engine::SchemaInfo::Rdf(rdf) if !quiet => {
+                    println!("Predicates:");
+                    for pred in &rdf.predicates {
+                        println!("  {} ({})", pred.iri, pred.count);
                     }
                 }
                 _ => {}

@@ -4,6 +4,8 @@
 
 #[cfg(feature = "algos")]
 pub mod procedure_call;
+#[cfg(all(feature = "gql", feature = "lpg"))]
+pub mod stream;
 #[cfg(all(feature = "algos", feature = "gql"))]
 pub mod user_procedure;
 
@@ -385,7 +387,7 @@ impl Default for Executor {
 }
 
 /// Converts an operator error to a common error.
-fn convert_operator_error(err: OperatorError) -> Error {
+pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
     match err {
         OperatorError::TypeMismatch { expected, found } => Error::TypeMismatch { expected, found },
         OperatorError::ColumnNotFound(name) => {
