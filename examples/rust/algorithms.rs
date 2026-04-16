@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (node_id, in_deg, out_deg, total)
         })
         .collect();
-    degrees.sort_by(|a, b| b.3.cmp(&a.3));
+    degrees.sort_by_key(|row| std::cmp::Reverse(row.3));
 
     println!("\nDegree Centrality:");
     println!("  {:<10} {:<5} {:<6} Total", "Name", "In", "Out");
