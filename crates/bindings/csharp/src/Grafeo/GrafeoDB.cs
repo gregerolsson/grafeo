@@ -110,25 +110,32 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
 
         // Read columns once; the JSON string is heap-allocated and must be freed.
-        var colsPtr = NativeMethods.grafeo_stream_columns_json(streamPtr);
-        IReadOnlyList<string> columns;
-        if (colsPtr == nint.Zero)
-        {
-            NativeMethods.grafeo_stream_free(streamPtr);
-            throw GrafeoException.FromLastError(GrafeoStatus.Query);
-        }
+        // Any failure past this point must free streamPtr before propagating.
         try
         {
-            var json = Marshal.PtrToStringUTF8(colsPtr) ?? "[]";
-            columns = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json)
-                ?? new List<string>();
+            var colsPtr = NativeMethods.grafeo_stream_columns_json(streamPtr);
+            if (colsPtr == nint.Zero)
+            {
+                throw GrafeoException.FromLastError(GrafeoStatus.Query);
+            }
+            IReadOnlyList<string> columns;
+            try
+            {
+                var json = Marshal.PtrToStringUTF8(colsPtr) ?? "[]";
+                columns = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json)
+                    ?? new List<string>();
+            }
+            finally
+            {
+                NativeMethods.grafeo_free_string(colsPtr);
+            }
+            return new ResultStream(streamPtr, columns);
         }
-        finally
+        catch
         {
-            NativeMethods.grafeo_free_string(colsPtr);
+            NativeMethods.grafeo_stream_free(streamPtr);
+            throw;
         }
-
-        return new ResultStream(streamPtr, columns);
     }
 
     /// <summary>Execute a GQL query on the thread pool.</summary>

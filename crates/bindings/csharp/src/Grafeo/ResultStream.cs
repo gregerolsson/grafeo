@@ -26,7 +26,7 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
 {
     private readonly IReadOnlyList<string> _columns;
     private nint _handle;
-    private volatile bool _disposed;
+    private int _disposed; // 0 = live, 1 = disposed; updated via Interlocked for atomic guard.
 
     internal ResultStream(nint handle, IReadOnlyList<string> columns)
     {
@@ -94,8 +94,9 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // CompareExchange guarantees a single Dispose call owns the free,
+        // so concurrent callers cannot double-free the native handle.
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
         if (_handle != nint.Zero)
         {
             NativeMethods.grafeo_stream_free(_handle);
@@ -112,7 +113,7 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
 
     private void ThrowIfDisposed()
     {
-        if (_disposed)
+        if (Volatile.Read(ref _disposed) != 0)
         {
             throw new ObjectDisposedException(nameof(ResultStream));
         }

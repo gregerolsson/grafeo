@@ -53,7 +53,7 @@ pub struct JsResultStream {
     /// Keepalive: the database Arc must outlive the stream so the operator
     /// tree's shared stores do not get dropped mid-iteration.
     _database: Arc<RwLock<GrafeoDB>>,
-    columns: Vec<String>,
+    columns: Arc<Vec<String>>,
     /// Behind a `Mutex` because napi's async runtime can park tasks across
     /// threads, and `OwnedRowIterator` is not `Sync`.
     iter: Arc<Mutex<Option<OwnedRowIterator>>>,
@@ -61,7 +61,7 @@ pub struct JsResultStream {
 
 impl JsResultStream {
     pub(crate) fn new(database: Arc<RwLock<GrafeoDB>>, stream: OwnedResultStream) -> Self {
-        let columns = stream.columns().to_vec();
+        let columns = Arc::new(stream.columns().to_vec());
         Self {
             _database: database,
             columns,
@@ -75,7 +75,7 @@ impl JsResultStream {
     /// Column names in the order they appear in each row object.
     #[napi(getter)]
     pub fn columns(&self) -> Vec<String> {
-        self.columns.clone()
+        (*self.columns).clone()
     }
 
     /// Pulls the next row as a plain object, or `null` when the stream is
@@ -88,7 +88,7 @@ impl JsResultStream {
     #[napi]
     pub async fn next(&self) -> Result<Option<JsonValue>> {
         let iter = Arc::clone(&self.iter);
-        let columns = self.columns.clone();
+        let columns = Arc::clone(&self.columns);
 
         tokio::task::spawn_blocking(move || -> Result<Option<JsonValue>> {
             let mut guard = iter.lock();

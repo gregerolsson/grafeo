@@ -74,7 +74,7 @@ pub extern "C" fn grafeo_stream_open(
 /// Returns the column names as a JSON array string. The caller owns the
 /// returned pointer and must free it with `grafeo_free_string`.
 #[unsafe(no_mangle)]
-pub extern "C" fn grafeo_stream_columns_json(stream: *mut GrafeoStream) -> *mut c_char {
+pub extern "C" fn grafeo_stream_columns_json(stream: *const GrafeoStream) -> *mut c_char {
     if stream.is_null() {
         set_last_error("Null stream pointer");
         return std::ptr::null_mut();

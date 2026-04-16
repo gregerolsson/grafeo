@@ -152,7 +152,9 @@ impl<'s> ResultStream<'s> {
 /// # Stability: Experimental
 pub struct RowIterator<'s> {
     stream: ResultStream<'s>,
-    current: Option<DataChunk>,
+    // Indices are materialized once per chunk; re-collecting on every `next`
+    // would turn per-chunk iteration from O(n) into O(n^2).
+    current: Option<(DataChunk, Vec<usize>)>,
     cursor: usize,
 }
 
@@ -169,10 +171,7 @@ impl Iterator for RowIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(chunk) = &self.current {
-                // selected_indices() collapses selection-vector + len into a single
-                // stream; materialize once and index into it.
-                let indices: Vec<usize> = chunk.selected_indices().collect();
+            if let Some((chunk, indices)) = &self.current {
                 if self.cursor < indices.len() {
                     let row_idx = indices[self.cursor];
                     self.cursor += 1;
@@ -186,7 +185,8 @@ impl Iterator for RowIterator<'_> {
                     if chunk.row_count() == 0 {
                         continue;
                     }
-                    self.current = Some(chunk);
+                    let indices: Vec<usize> = chunk.selected_indices().collect();
+                    self.current = Some((chunk, indices));
                     self.cursor = 0;
                 }
                 Ok(None) => return None,
@@ -308,7 +308,7 @@ impl OwnedResultStream {
 /// # Stability: Experimental
 pub struct OwnedRowIterator {
     stream: OwnedResultStream,
-    current: Option<DataChunk>,
+    current: Option<(DataChunk, Vec<usize>)>,
     cursor: usize,
 }
 
@@ -325,8 +325,7 @@ impl Iterator for OwnedRowIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(chunk) = &self.current {
-                let indices: Vec<usize> = chunk.selected_indices().collect();
+            if let Some((chunk, indices)) = &self.current {
                 if self.cursor < indices.len() {
                     let row_idx = indices[self.cursor];
                     self.cursor += 1;
@@ -340,7 +339,8 @@ impl Iterator for OwnedRowIterator {
                     if chunk.row_count() == 0 {
                         continue;
                     }
-                    self.current = Some(chunk);
+                    let indices: Vec<usize> = chunk.selected_indices().collect();
+                    self.current = Some((chunk, indices));
                     self.cursor = 0;
                 }
                 Ok(None) => return None,

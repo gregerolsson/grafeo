@@ -56,7 +56,15 @@ class ResultStream implements Finalizable {
     try {
       final ptr = bindings.grafeoStreamOpen(dbHandle, queryPtr);
       if (ptr == nullptr) throwLastError(bindings);
-      final columns = _readColumns(ptr, bindings);
+      // _readColumns can throw; the NativeFinalizer is only attached by the
+      // ResultStream constructor, so on failure we must free the handle here.
+      final List<String> columns;
+      try {
+        columns = _readColumns(ptr, bindings);
+      } catch (_) {
+        bindings.grafeoStreamFree(ptr);
+        rethrow;
+      }
       return ResultStream._(ptr, columns, bindings);
     } finally {
       malloc.free(queryPtr);

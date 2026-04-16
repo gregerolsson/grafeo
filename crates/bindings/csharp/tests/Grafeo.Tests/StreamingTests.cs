@@ -28,11 +28,17 @@ public sealed class StreamingTests : IDisposable
         var streamed = stream.ToList();
 
         Assert.Equal(materialized.Rows.Count, streamed.Count);
-        var matNames = materialized.Rows
-            .Select(r => JsonElementToString(r["name"]))
+        var matRows = materialized.Rows
+            .Select(r => (
+                Name: JsonElementToString(r["name"]),
+                Age: JsonElementToString(r["age"])))
             .ToHashSet();
-        var strNames = streamed.Select(r => r["name"]?.ToString() ?? "").ToHashSet();
-        Assert.Equal(matNames, strNames);
+        var strRows = streamed
+            .Select(r => (
+                Name: r["name"]?.ToString() ?? "",
+                Age: r["age"]?.ToString() ?? ""))
+            .ToHashSet();
+        Assert.Equal(matRows, strRows);
     }
 
     [Fact]

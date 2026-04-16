@@ -117,10 +117,10 @@ void        grafeo_free_result(GrafeoResult* result);
 GrafeoStream* grafeo_stream_open(GrafeoDatabase* db, const char* query);
 
 /* Returns the column names as a JSON array. Caller frees with grafeo_free_string. */
-char* grafeo_stream_columns_json(GrafeoStream* stream);
+char* grafeo_stream_columns_json(const GrafeoStream* stream);
 
 /* Pulls the next row into *out_json as a JSON object.
- * On success (GrafeoStatus::Ok) with non-NULL *out_json: caller frees the
+ * On success (GRAFEO_OK) with non-NULL *out_json: caller frees the
  * string with grafeo_free_string. On success with NULL *out_json: stream
  * exhausted, stop iterating. On any other status, grafeo_last_error has
  * details. */
