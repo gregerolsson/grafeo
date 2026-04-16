@@ -25,6 +25,9 @@ namespace Grafeo;
 public sealed class ResultStream : IDisposable, IAsyncDisposable
 {
     private readonly IReadOnlyList<string> _columns;
+    // _sync serializes Next() with Dispose() so the native handle cannot be
+    // freed between ThrowIfDisposed and grafeo_stream_next_row_json.
+    private readonly object _sync = new();
     private nint _handle;
     private int _disposed; // 0 = live, 1 = disposed; updated via Interlocked for atomic guard.
 
@@ -42,8 +45,16 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
     /// </summary>
     public Dictionary<string, object?>? Next()
     {
-        ThrowIfDisposed();
-        var status = NativeMethods.grafeo_stream_next_row_json(_handle, out var rowPtr);
+        nint rowPtr;
+        int status;
+        // Hold _sync across the FFI call so a concurrent Dispose cannot free
+        // _handle while grafeo_stream_next_row_json is running. JSON decoding
+        // happens after the call returns and can be done outside the lock.
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            status = NativeMethods.grafeo_stream_next_row_json(_handle, out rowPtr);
+        }
         if (status != 0)
         {
             throw GrafeoException.FromLastError((GrafeoStatus)status);
@@ -97,10 +108,15 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         // CompareExchange guarantees a single Dispose call owns the free,
         // so concurrent callers cannot double-free the native handle.
         if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
-        if (_handle != nint.Zero)
+        // _sync waits for any in-flight Next() to exit its FFI call before we
+        // release the handle, preventing a use-after-free across threads.
+        lock (_sync)
         {
-            NativeMethods.grafeo_stream_free(_handle);
-            _handle = nint.Zero;
+            if (_handle != nint.Zero)
+            {
+                NativeMethods.grafeo_stream_free(_handle);
+                _handle = nint.Zero;
+            }
         }
     }
 

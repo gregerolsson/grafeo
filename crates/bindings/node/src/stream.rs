@@ -120,8 +120,17 @@ impl JsResultStream {
     /// Explicitly releases the underlying operator tree. After calling this,
     /// `next()` returns `null`. Useful when you want to break out of iteration
     /// early without waiting for GC.
+    ///
+    /// Async because acquiring the iterator mutex (and dropping the operator
+    /// tree it holds) can block while an in-flight `next()` completes; doing
+    /// that on the Node.js main thread would stall the event loop.
     #[napi]
-    pub fn close(&self) {
-        *self.iter.lock() = None;
+    pub async fn close(&self) -> Result<()> {
+        let iter = Arc::clone(&self.iter);
+        tokio::task::spawn_blocking(move || {
+            *iter.lock() = None;
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 }
