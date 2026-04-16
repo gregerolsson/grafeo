@@ -1424,14 +1424,14 @@ mod tests {
     // --- Path detail output tests ---
 
     #[test]
-    fn test_path_detail_output_contains_node_list() {
+    fn test_path_detail_output_node_and_edge_lists() {
         let store = Arc::new(LpgStore::new().unwrap());
 
         // Chain: Alix -> Gus -> Vincent
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let vincent = store.create_node(&["Person"]);
-        store.create_edge(alix, gus, "KNOWS");
+        let e1 = store.create_edge(alix, gus, "KNOWS");
         store.create_edge(gus, vincent, "KNOWS");
 
         let scan = Box::new(ScanOperator::with_label(
@@ -1450,24 +1450,37 @@ mod tests {
         .with_path_detail_output();
 
         let mut found_path_nodes = false;
+        let mut found_edge_with_correct_id = false;
         while let Ok(Some(chunk)) = expand.next() {
             // With path detail, extra columns: path_nodes (list), path_edges (list), path (Path)
             // Schema: [source_node, edge, target, path_nodes, path_edges, path]
             for i in 0..chunk.row_count() {
                 let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
-                if src == alix {
-                    // Path nodes column is at index 3 (source=0, edge=1, target=2)
-                    if let Some(col) = chunk.column(3)
-                        && let Some(val) = col.get_value(i)
-                        && let Some(list) = val.as_list()
-                    {
-                        // Should contain at least 2 node IDs (source + target)
-                        assert!(
-                            list.len() >= 2,
-                            "Path node list should have at least 2 entries"
-                        );
-                        found_path_nodes = true;
-                    }
+
+                // Check path nodes column (index 3) for any Alix-sourced path
+                if src == alix
+                    && let Some(col) = chunk.column(3)
+                    && let Some(val) = col.get_value(i)
+                    && let Some(list) = val.as_list()
+                {
+                    assert!(
+                        list.len() >= 2,
+                        "Path node list should have at least 2 entries"
+                    );
+                    found_path_nodes = true;
+                }
+
+                // Check path edges column (index 4) for the Alix->Gus single-hop path
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                if src == alix
+                    && dst == gus
+                    && let Some(col) = chunk.column(4)
+                    && let Some(val) = col.get_value(i)
+                    && let Some(list) = val.as_list()
+                {
+                    assert_eq!(list.len(), 1, "Single-hop path should have exactly 1 edge");
+                    assert_eq!(list[0].as_int64(), Some(e1.0.cast_signed()));
+                    found_edge_with_correct_id = true;
                 }
             }
         }
@@ -1475,53 +1488,6 @@ mod tests {
             found_path_nodes,
             "Should have found path node lists in output"
         );
-    }
-
-    #[test]
-    fn test_path_detail_output_contains_edge_list() {
-        let store = Arc::new(LpgStore::new().unwrap());
-
-        // Chain: Alix -> Gus -> Vincent
-        let alix = store.create_node(&["Person"]);
-        let gus = store.create_node(&["Person"]);
-        let vincent = store.create_node(&["Person"]);
-        let e1 = store.create_edge(alix, gus, "KNOWS");
-        let _e2 = store.create_edge(gus, vincent, "KNOWS");
-
-        let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStore>,
-            "Person",
-        ));
-        let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStore>,
-            scan,
-            0,
-            Direction::Outgoing,
-            vec!["KNOWS".to_string()],
-            1,
-            2,
-        )
-        .with_path_detail_output();
-
-        let mut found_edge_with_correct_id = false;
-        while let Ok(Some(chunk)) = expand.next() {
-            for i in 0..chunk.row_count() {
-                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
-                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
-                if src == alix && dst == gus {
-                    // Path edges column is at index 4
-                    if let Some(col) = chunk.column(4)
-                        && let Some(val) = col.get_value(i)
-                        && let Some(list) = val.as_list()
-                    {
-                        assert_eq!(list.len(), 1, "Single-hop path should have exactly 1 edge");
-                        // The edge ID is stored as Int64
-                        assert_eq!(list[0].as_int64(), Some(e1.0.cast_signed()));
-                        found_edge_with_correct_id = true;
-                    }
-                }
-            }
-        }
         assert!(
             found_edge_with_correct_id,
             "Should have found edge list with correct edge ID"

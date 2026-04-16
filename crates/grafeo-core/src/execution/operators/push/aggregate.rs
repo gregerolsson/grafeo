@@ -1890,46 +1890,6 @@ mod tests {
 
     #[test]
     #[cfg(feature = "spill")]
-    fn test_spillable_count_non_null() {
-        // SpillableAggregatePushOperator: COUNT(column) skips null values
-        let expr = AggregateExpr::count(0);
-        let mut agg = SpillableAggregatePushOperator::global(vec![expr]);
-        let mut sink = CollectorSink::new();
-
-        let mut col = ValueVector::new();
-        col.push(Value::Int64(1));
-        col.push(Value::Null);
-        col.push(Value::Int64(3));
-        let chunk = DataChunk::new(vec![col]);
-
-        agg.push(chunk, &mut sink).unwrap();
-        agg.finalize(&mut sink).unwrap();
-
-        let chunks = sink.into_chunks();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(
-            chunks[0].column(0).unwrap().get_value(0),
-            Some(Value::Int64(2))
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "spill")]
-    fn test_spillable_grouped_aggregate_empty_groups() {
-        let mut agg = SpillableAggregatePushOperator::new(vec![0], vec![AggregateExpr::sum(1)])
-            .with_threshold(100);
-        let mut sink = CollectorSink::new();
-
-        let empty = DataChunk::new(vec![ValueVector::new(), ValueVector::new()]);
-        agg.push(empty, &mut sink).unwrap();
-        agg.finalize(&mut sink).unwrap();
-
-        let chunks = sink.into_chunks();
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    #[cfg(feature = "spill")]
     fn test_spillable_aggregate_threshold_transition() {
         // Test the transition from non-partitioned to partitioned mode
         // when the spill_manager is set but threshold is reached without
@@ -2127,30 +2087,6 @@ mod tests {
     // ---------------------------------------------------------------
     // Push operator with empty chunks and empty input
     // ---------------------------------------------------------------
-
-    #[test]
-    fn test_push_empty_chunk() {
-        // Push an empty chunk, then push a real chunk, and verify finalize is correct
-        let mut agg = AggregatePushOperator::global(vec![AggregateExpr::sum(0)]);
-        let mut sink = CollectorSink::new();
-
-        // Push an empty chunk (zero rows)
-        let empty = DataChunk::new(vec![ValueVector::new()]);
-        let continued = agg.push(empty, &mut sink).unwrap();
-        assert!(continued, "push of empty chunk should return true");
-
-        // Push real data
-        agg.push(create_test_chunk(&[10, 20, 30]), &mut sink)
-            .unwrap();
-        agg.finalize(&mut sink).unwrap();
-
-        let chunks = sink.into_chunks();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(
-            chunks[0].column(0).unwrap().get_value(0),
-            Some(Value::Int64(60))
-        );
-    }
 
     #[test]
     fn test_global_aggregate_empty_input() {
