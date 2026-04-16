@@ -249,7 +249,7 @@ mod tests {
         let fm = Arc::new(GrafeoFileManager::create(&path).unwrap());
 
         let mut timer = CheckpointTimer::start(
-            Duration::from_secs(60), // Long interval
+            Duration::from_mins(1), // Long interval
             fm,
             store,
             catalog,

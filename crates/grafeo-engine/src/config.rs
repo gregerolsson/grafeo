@@ -943,8 +943,8 @@ mod tests {
 
     #[test]
     fn test_config_with_query_timeout() {
-        let config = Config::in_memory().with_query_timeout(Duration::from_secs(60));
-        assert_eq!(config.query_timeout, Some(Duration::from_secs(60)));
+        let config = Config::in_memory().with_query_timeout(Duration::from_mins(1));
+        assert_eq!(config.query_timeout, Some(Duration::from_mins(1)));
     }
 
     #[test]
@@ -1044,7 +1044,7 @@ mod tests {
             .with_schema_constraints()
             .without_backward_edges()
             .with_spill_path("/tmp/spill")
-            .with_query_timeout(Duration::from_secs(60));
+            .with_query_timeout(Duration::from_mins(1));
 
         assert_eq!(config.graph_model, GraphModel::Lpg);
         assert!(config.path.is_some());
@@ -1055,7 +1055,7 @@ mod tests {
         assert!(config.schema_constraints);
         assert!(!config.backward_edges);
         assert!(config.spill_path.is_some());
-        assert_eq!(config.query_timeout, Some(Duration::from_secs(60)));
+        assert_eq!(config.query_timeout, Some(Duration::from_mins(1)));
         assert!(config.validate().is_ok());
     }
 

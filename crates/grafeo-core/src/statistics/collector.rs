@@ -447,7 +447,7 @@ impl StatisticsCollector {
         // Find most common values
         let total_non_null = self.values.len() as f64;
         let mut freq_vec: Vec<_> = self.frequencies.into_iter().collect();
-        freq_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        freq_vec.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let most_common: Vec<(Value, f64)> = freq_vec
             .into_iter()
