@@ -72,18 +72,24 @@ echo "Output: ${OUT_DIR}/"
 echo "  Raw:    $(( RAW_SIZE / 1024 )) KB"
 echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 
-# Size thresholds (gzipped bytes)
-# 660 KB = 675840 bytes: warning threshold for browser profile
-# Binary is ~95% essential application code (parser, planner, executor),
-# competitive with sql.js (~600 KB). Profiled with twiggy in 0.5.39.
-WARN_THRESHOLD=675840
-FAIL_THRESHOLD=716800  # 700 KB: hard limit
+# Size thresholds (gzipped bytes) depend on feature set.
+# Default (browser profile, GQL + regex-lite): competitive with sql.js (~600 KB).
+# Full profile (all languages + AI): larger binary, ~1.2 MB gzipped.
+if [[ "$FEATURES" == *"full"* ]]; then
+    WARN_THRESHOLD=1258291   # 1.2 MB
+    FAIL_THRESHOLD=1468006   # 1.4 MB
+    LABEL="full profile"
+else
+    WARN_THRESHOLD=675840    # 660 KB
+    FAIL_THRESHOLD=716800    # 700 KB
+    LABEL="browser profile"
+fi
 
 if [[ "$GZ_SIZE" -gt "$FAIL_THRESHOLD" ]]; then
-    echo "  ERROR: ${GZ_SIZE} bytes gzipped exceeds 700 KB limit"
+    echo "  ERROR: ${GZ_SIZE} bytes gzipped exceeds $(( FAIL_THRESHOLD / 1024 )) KB limit (${LABEL})"
     exit 1
 elif [[ "$GZ_SIZE" -gt "$WARN_THRESHOLD" ]]; then
-    echo "  WARNING: ${GZ_SIZE} bytes gzipped exceeds 660 KB threshold"
+    echo "  WARNING: ${GZ_SIZE} bytes gzipped exceeds $(( WARN_THRESHOLD / 1024 )) KB threshold (${LABEL})"
 else
-    echo "  OK: ${GZ_SIZE} bytes gzipped (under 660 KB threshold)"
+    echo "  OK: ${GZ_SIZE} bytes gzipped (under $(( WARN_THRESHOLD / 1024 )) KB threshold, ${LABEL})"
 fi
