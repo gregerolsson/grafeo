@@ -162,6 +162,73 @@ impl ExecutionMemoryContextBuilder {
     }
 }
 
+/// Memory context passed to pipeline operators for pressure-aware spill decisions.
+///
+/// Lightweight and `Clone`-able (two `Arc` references). Operators that support
+/// memory-aware spilling receive this at construction time. It provides access
+/// to the `BufferManager` for pressure queries and consumer registration, and
+/// to a per-query `SpillManager` for creating spill files.
+#[cfg(feature = "spill")]
+#[derive(Clone)]
+pub struct OperatorMemoryContext {
+    /// The buffer manager for pressure queries and consumer registration.
+    buffer_manager: Arc<BufferManager>,
+    /// Per-query spill manager for creating spill files.
+    spill_manager: Arc<super::spill::SpillManager>,
+}
+
+#[cfg(feature = "spill")]
+impl OperatorMemoryContext {
+    /// Creates a new operator memory context.
+    #[must_use]
+    pub fn new(
+        buffer_manager: Arc<BufferManager>,
+        spill_manager: Arc<super::spill::SpillManager>,
+    ) -> Self {
+        Self {
+            buffer_manager,
+            spill_manager,
+        }
+    }
+
+    /// Returns the current pressure level.
+    #[must_use]
+    pub fn pressure_level(&self) -> PressureLevel {
+        self.buffer_manager.pressure_level()
+    }
+
+    /// Returns whether system pressure warrants spilling (High or Critical).
+    #[must_use]
+    pub fn should_spill(&self) -> bool {
+        self.pressure_level().should_spill()
+    }
+
+    /// Registers a memory consumer with the buffer manager.
+    pub fn register_consumer(
+        &self,
+        consumer: Arc<dyn grafeo_common::memory::buffer::MemoryConsumer>,
+    ) {
+        self.buffer_manager.register_consumer(consumer);
+    }
+
+    /// Unregisters a memory consumer by name.
+    pub fn unregister_consumer(&self, name: &str) {
+        self.buffer_manager.unregister_consumer(name);
+    }
+
+    /// Returns a reference to the buffer manager.
+    #[must_use]
+    pub fn buffer_manager(&self) -> &Arc<BufferManager> {
+        &self.buffer_manager
+    }
+
+    /// Returns a reference to the spill manager.
+    #[must_use]
+    pub fn spill_manager(&self) -> &Arc<super::spill::SpillManager> {
+        &self.spill_manager
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

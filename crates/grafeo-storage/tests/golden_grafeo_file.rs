@@ -8,6 +8,8 @@
 //! ## When these tests fail
 //!
 //! - **Accidental breakage** (no `FORMAT_VERSION` bump): fix the regression.
+// Test constants are small known values, casts are safe
+#![allow(clippy::cast_possible_truncation)]
 //! - **Intentional format change** (version bumped): regenerate the fixture:
 //!   ```
 //!   cargo test --all-features -p grafeo-adapters --test golden_grafeo_file -- regenerate_grafeo_fixture --ignored

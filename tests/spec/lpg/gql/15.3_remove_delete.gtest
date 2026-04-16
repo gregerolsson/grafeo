@@ -85,3 +85,78 @@ tests:
       - "MATCH ()-[r:REL]->() RETURN r"
     expect:
       empty: true
+
+  # ---------------------------------------------------------------------------
+  # Extended DELETE tests (M19)
+  # ---------------------------------------------------------------------------
+
+  - name: delete_node_with_return_count
+    setup:
+      - "INSERT (:Temp {name: 'A'})"
+      - "INSERT (:Temp {name: 'B'})"
+      - "INSERT (:Temp {name: 'C'})"
+    query: "MATCH (n:Temp) DELETE n RETURN count(n) AS deleted"
+    expect:
+      rows:
+        - [3]
+
+  - name: delete_edge_preserves_all_nodes
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})-[:KNOWS]->(:Person {name: 'Vincent'})"
+    statements:
+      - "MATCH ()-[r:KNOWS]->() DELETE r"
+      - "MATCH (n:Person) RETURN count(n) AS cnt"
+    expect:
+      rows:
+        - [3]
+
+  - name: conditional_delete
+    setup:
+      - "INSERT (:Person {name: 'Alix', active: true})"
+      - "INSERT (:Person {name: 'Gus', active: false})"
+    statements:
+      - "MATCH (n:Person) WHERE n.active = false DELETE n"
+      - "MATCH (n:Person) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: detach_delete_hub_node
+    setup:
+      - "INSERT (:Hub {name: 'center'})"
+      - "INSERT (:Leaf {name: 'L1'})"
+      - "INSERT (:Leaf {name: 'L2'})"
+      - "INSERT (:Leaf {name: 'L3'})"
+      - "MATCH (h:Hub), (l:Leaf {name: 'L1'}) INSERT (h)-[:LINK]->(l)"
+      - "MATCH (h:Hub), (l:Leaf {name: 'L2'}) INSERT (h)-[:LINK]->(l)"
+      - "MATCH (h:Hub), (l:Leaf {name: 'L3'}) INSERT (h)-[:LINK]->(l)"
+    statements:
+      - "MATCH (h:Hub) DETACH DELETE h"
+      - "MATCH ()-[r:LINK]->() RETURN count(r) AS cnt"
+    expect:
+      rows:
+        - [0]
+
+  - name: detach_delete_hub_preserves_leaves
+    setup:
+      - "INSERT (:Hub {name: 'center'})"
+      - "INSERT (:Leaf {name: 'L1'})"
+      - "INSERT (:Leaf {name: 'L2'})"
+      - "MATCH (h:Hub), (l:Leaf {name: 'L1'}) INSERT (h)-[:LINK]->(l)"
+      - "MATCH (h:Hub), (l:Leaf {name: 'L2'}) INSERT (h)-[:LINK]->(l)"
+    statements:
+      - "MATCH (h:Hub) DETACH DELETE h"
+      - "MATCH (n:Leaf) RETURN count(n) AS cnt"
+    expect:
+      rows:
+        - [2]
+
+  - name: remove_nonexistent_property
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    statements:
+      - "MATCH (n:Person {name: 'Alix'}) REMOVE n.nonexistent"
+      - "MATCH (n:Person {name: 'Alix'}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]

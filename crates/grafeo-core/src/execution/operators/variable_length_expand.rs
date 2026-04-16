@@ -599,8 +599,16 @@ impl Operator for VariableLengthExpandOperator {
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        .map(|id| grafeo_common::types::Value::Int64(id.0 as i64))
-                        .collect();
+                        .map(|id| {
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "NodeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
+                        })
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     col.push_value(grafeo_common::types::Value::List(nodes_list.into()));
                 }
 
@@ -611,8 +619,16 @@ impl Operator for VariableLengthExpandOperator {
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        .map(|id| grafeo_common::types::Value::Int64(id.0 as i64))
-                        .collect();
+                        .map(|id| {
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "EdgeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
+                        })
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     col.push_value(grafeo_common::types::Value::List(edges_list.into()));
                 }
 
@@ -623,15 +639,31 @@ impl Operator for VariableLengthExpandOperator {
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        .map(|id| grafeo_common::types::Value::Int64(id.0 as i64))
-                        .collect();
+                        .map(|id| {
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "NodeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
+                        })
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     let edges: Vec<grafeo_common::types::Value> = out_row
                         .path_edges
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
-                        .map(|id| grafeo_common::types::Value::Int64(id.0 as i64))
-                        .collect();
+                        .map(|id| {
+                            let signed = i64::try_from(id.0).map_err(|_| {
+                                OperatorError::Execution(format!(
+                                    "EdgeId {} exceeds i64 range",
+                                    id.0
+                                ))
+                            })?;
+                            Ok(grafeo_common::types::Value::Int64(signed))
+                        })
+                        .collect::<Result<Vec<_>, OperatorError>>()?;
                     col.push_value(grafeo_common::types::Value::Path {
                         nodes: nodes.into(),
                         edges: edges.into(),
@@ -1142,5 +1174,376 @@ mod tests {
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<VariableLengthExpandOperator>().is_ok());
+    }
+
+    // --- PathSegment collection tests ---
+
+    #[test]
+    fn test_path_segment_collect_nodes_single_hop() {
+        // Root (Alix) -> target (Gus): one hop
+        let root = Rc::new(PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        });
+        let hop1 = Rc::new(PathSegment {
+            node: NodeId(2),
+            edge: Some(EdgeId(100)),
+            parent: Some(Rc::clone(&root)),
+        });
+
+        let nodes = hop1.collect_nodes(1);
+        assert_eq!(nodes, vec![NodeId(1), NodeId(2)]);
+    }
+
+    #[test]
+    fn test_path_segment_collect_nodes_multi_hop() {
+        // Chain: Alix(1) -> Gus(2) -> Vincent(3) -> Jules(4)
+        let root = Rc::new(PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        });
+        let hop1 = Rc::new(PathSegment {
+            node: NodeId(2),
+            edge: Some(EdgeId(100)),
+            parent: Some(Rc::clone(&root)),
+        });
+        let hop2 = Rc::new(PathSegment {
+            node: NodeId(3),
+            edge: Some(EdgeId(101)),
+            parent: Some(Rc::clone(&hop1)),
+        });
+        let hop3 = Rc::new(PathSegment {
+            node: NodeId(4),
+            edge: Some(EdgeId(102)),
+            parent: Some(Rc::clone(&hop2)),
+        });
+
+        let nodes = hop3.collect_nodes(3);
+        assert_eq!(nodes, vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)]);
+    }
+
+    #[test]
+    fn test_path_segment_collect_edges_single_hop() {
+        let root = Rc::new(PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        });
+        let hop1 = Rc::new(PathSegment {
+            node: NodeId(2),
+            edge: Some(EdgeId(100)),
+            parent: Some(Rc::clone(&root)),
+        });
+
+        let edges = hop1.collect_edges(1);
+        assert_eq!(edges, vec![EdgeId(100)]);
+    }
+
+    #[test]
+    fn test_path_segment_collect_edges_multi_hop() {
+        // Chain: 3 edges connecting 4 nodes
+        let root = Rc::new(PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        });
+        let hop1 = Rc::new(PathSegment {
+            node: NodeId(2),
+            edge: Some(EdgeId(10)),
+            parent: Some(Rc::clone(&root)),
+        });
+        let hop2 = Rc::new(PathSegment {
+            node: NodeId(3),
+            edge: Some(EdgeId(20)),
+            parent: Some(Rc::clone(&hop1)),
+        });
+        let hop3 = Rc::new(PathSegment {
+            node: NodeId(4),
+            edge: Some(EdgeId(30)),
+            parent: Some(Rc::clone(&hop2)),
+        });
+
+        let edges = hop3.collect_edges(3);
+        assert_eq!(edges, vec![EdgeId(10), EdgeId(20), EdgeId(30)]);
+    }
+
+    #[test]
+    fn test_path_segment_root_has_no_edges() {
+        let root = PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        };
+
+        let edges = root.collect_edges(0);
+        assert!(edges.is_empty(), "Root segment should yield no edges");
+
+        let nodes = root.collect_nodes(0);
+        assert_eq!(
+            nodes,
+            vec![NodeId(1)],
+            "Root should yield only its own node"
+        );
+    }
+
+    #[test]
+    fn test_path_segment_contains_node() {
+        let root = Rc::new(PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        });
+        let hop1 = Rc::new(PathSegment {
+            node: NodeId(2),
+            edge: Some(EdgeId(100)),
+            parent: Some(Rc::clone(&root)),
+        });
+
+        assert!(hop1.contains_node(NodeId(1)), "Should find root node");
+        assert!(hop1.contains_node(NodeId(2)), "Should find current node");
+        assert!(
+            !hop1.contains_node(NodeId(3)),
+            "Should not find absent node"
+        );
+    }
+
+    #[test]
+    fn test_path_segment_contains_edge() {
+        let root = Rc::new(PathSegment {
+            node: NodeId(1),
+            edge: None,
+            parent: None,
+        });
+        let hop1 = Rc::new(PathSegment {
+            node: NodeId(2),
+            edge: Some(EdgeId(100)),
+            parent: Some(Rc::clone(&root)),
+        });
+
+        assert!(hop1.contains_edge(EdgeId(100)), "Should find current edge");
+        assert!(
+            !hop1.contains_edge(EdgeId(999)),
+            "Should not find absent edge"
+        );
+    }
+
+    // --- Expansion validation tests (via operator integration) ---
+
+    #[test]
+    fn test_walk_mode_allows_everything() {
+        let store = Arc::new(LpgStore::new().unwrap());
+
+        // Create cycle: Alix -> Gus -> Alix
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, alix, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            "Person",
+        ));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            1,
+            3,
+        )
+        .with_path_mode(PathMode::Walk);
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                results.push((src, dst));
+            }
+        }
+
+        // Walk mode should allow repeated nodes and edges
+        // From Alix: Gus(1), Alix(2), Gus(3) = 3 results
+        let alix_results: Vec<_> = results.iter().filter(|(s, _)| *s == alix).collect();
+        assert_eq!(
+            alix_results.len(),
+            3,
+            "Walk mode should allow all 3 hops from Alix in a cycle"
+        );
+    }
+
+    #[test]
+    fn test_simple_mode_rejects_repeated_node() {
+        let store = Arc::new(LpgStore::new().unwrap());
+
+        // Triangle: Vincent -> Jules -> Mia -> Vincent
+        let vincent = store.create_node(&["Person"]);
+        let jules = store.create_node(&["Person"]);
+        let mia = store.create_node(&["Person"]);
+        store.create_edge(vincent, jules, "KNOWS");
+        store.create_edge(jules, mia, "KNOWS");
+        store.create_edge(mia, vincent, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            "Person",
+        ));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            1,
+            5,
+        )
+        .with_path_mode(PathMode::Simple);
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                results.push((src, dst));
+            }
+        }
+
+        // From Vincent: Jules(1), Mia(2), Vincent(3, allowed: start=end)
+        // No further expansion because Vincent was already visited
+        let vincent_results: Vec<_> = results.iter().filter(|(s, _)| *s == vincent).collect();
+        assert_eq!(
+            vincent_results.len(),
+            3,
+            "Simple: Vincent -> Jules, Mia, back to Vincent (start=end allowed)"
+        );
+    }
+
+    // --- Path detail output tests ---
+
+    #[test]
+    fn test_path_detail_output_node_and_edge_lists() {
+        let store = Arc::new(LpgStore::new().unwrap());
+
+        // Chain: Alix -> Gus -> Vincent
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+        let e1 = store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            "Person",
+        ));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            scan,
+            0,
+            Direction::Outgoing,
+            vec!["KNOWS".to_string()],
+            1,
+            2,
+        )
+        .with_path_detail_output();
+
+        let mut found_path_nodes = false;
+        let mut found_edge_with_correct_id = false;
+        while let Ok(Some(chunk)) = expand.next() {
+            // With path detail, extra columns: path_nodes (list), path_edges (list), path (Path)
+            // Schema: [source_node, edge, target, path_nodes, path_edges, path]
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+
+                // Check path nodes column (index 3) for any Alix-sourced path
+                if src == alix
+                    && let Some(col) = chunk.column(3)
+                    && let Some(val) = col.get_value(i)
+                    && let Some(list) = val.as_list()
+                {
+                    assert!(
+                        list.len() >= 2,
+                        "Path node list should have at least 2 entries"
+                    );
+                    found_path_nodes = true;
+                }
+
+                // Check path edges column (index 4) for the Alix->Gus single-hop path
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                if src == alix
+                    && dst == gus
+                    && let Some(col) = chunk.column(4)
+                    && let Some(val) = col.get_value(i)
+                    && let Some(list) = val.as_list()
+                {
+                    assert_eq!(list.len(), 1, "Single-hop path should have exactly 1 edge");
+                    assert_eq!(list[0].as_int64(), Some(e1.0.cast_signed()));
+                    found_edge_with_correct_id = true;
+                }
+            }
+        }
+        assert!(
+            found_path_nodes,
+            "Should have found path node lists in output"
+        );
+        assert!(
+            found_edge_with_correct_id,
+            "Should have found edge list with correct edge ID"
+        );
+    }
+
+    // --- Edge type filtering tests ---
+
+    #[test]
+    fn test_edge_type_filter_case_insensitive() {
+        let store = Arc::new(LpgStore::new().unwrap());
+
+        // Alix -[:KNOWS]-> Gus, Alix -[:LIKES]-> Vincent
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(alix, vincent, "LIKES");
+
+        // Filter with lowercase "knows", should still match "KNOWS"
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            "Person",
+        ));
+        let mut expand = VariableLengthExpandOperator::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            scan,
+            0,
+            Direction::Outgoing,
+            vec!["knows".to_string()],
+            1,
+            1,
+        );
+
+        let mut results = Vec::new();
+        while let Ok(Some(chunk)) = expand.next() {
+            for i in 0..chunk.row_count() {
+                let src = chunk.column(0).unwrap().get_node_id(i).unwrap();
+                let dst = chunk.column(2).unwrap().get_node_id(i).unwrap();
+                results.push((src, dst));
+            }
+        }
+
+        // From Alix, only Gus should be reached (KNOWS matches "knows")
+        let alix_targets: Vec<NodeId> = results
+            .iter()
+            .filter(|(s, _)| *s == alix)
+            .map(|(_, t)| *t)
+            .collect();
+        assert!(
+            alix_targets.contains(&gus),
+            "Case-insensitive match should find KNOWS edge"
+        );
+        assert!(
+            !alix_targets.contains(&vincent),
+            "LIKES edge should be filtered out"
+        );
     }
 }

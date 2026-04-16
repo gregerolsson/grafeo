@@ -138,6 +138,8 @@ impl<'a> RingIterator<'a> {
             1 => self.ring.predicates_wt(),
             _ => self.ring.objects_wt(),
         };
+        // reason: wavelet tree values are dictionary IDs, fit u32
+        #[allow(clippy::cast_possible_truncation)]
         Some(wt.access(self.pos) as u32)
     }
 

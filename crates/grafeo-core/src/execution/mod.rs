@@ -53,6 +53,8 @@ pub use collector::{
     Collector, CollectorStats, CountCollector, LimitCollector, MaterializeCollector,
     PartitionCollector, StatsCollector,
 };
+#[cfg(feature = "spill")]
+pub use memory::OperatorMemoryContext;
 pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
 #[cfg(feature = "parallel")]
 pub use parallel::{

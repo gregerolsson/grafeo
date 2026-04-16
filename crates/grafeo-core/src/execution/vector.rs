@@ -196,6 +196,8 @@ impl ValueVector {
                 self.len += 1;
             }
             VectorData::Generic(vec) => {
+                // reason: entity IDs stored as i64, standard encoding
+                #[allow(clippy::cast_possible_wrap)]
                 vec.push(Value::Int64(value.as_u64() as i64));
                 self.len += 1;
             }
@@ -211,6 +213,8 @@ impl ValueVector {
                 self.len += 1;
             }
             VectorData::Generic(vec) => {
+                // reason: entity IDs stored as i64, standard encoding
+                #[allow(clippy::cast_possible_wrap)]
                 vec.push(Value::Int64(value.as_u64() as i64));
                 self.len += 1;
             }
@@ -242,8 +246,12 @@ impl ValueVector {
             (VectorData::Float64(vec), Value::Float64(f)) => vec.push(*f),
             (VectorData::String(vec), Value::String(s)) => vec.push(s.clone()),
             // Handle Int64 -> NodeId conversion (from get_value roundtrip)
+            // reason: ID encoding: i64 <-> u64 round-trip
+            #[allow(clippy::cast_sign_loss)]
             (VectorData::NodeId(vec), Value::Int64(i)) => vec.push(NodeId::new(*i as u64)),
             // Handle Int64 -> EdgeId conversion (from get_value roundtrip)
+            // reason: ID encoding: i64 <-> u64 round-trip
+            #[allow(clippy::cast_sign_loss)]
             (VectorData::EdgeId(vec), Value::Int64(i)) => vec.push(EdgeId::new(*i as u64)),
             (VectorData::Generic(vec), _) => vec.push(value),
             _ => {
@@ -324,6 +332,8 @@ impl ValueVector {
             VectorData::NodeId(vec) => vec.get(index).copied(),
             // Handle Generic vectors that contain node IDs stored as Int64
             VectorData::Generic(vec) => match vec.get(index) {
+                // reason: ID encoding: i64 <-> u64 round-trip
+                #[allow(clippy::cast_sign_loss)]
                 Some(Value::Int64(i)) => Some(NodeId::new(*i as u64)),
                 _ => None,
             },
@@ -341,6 +351,8 @@ impl ValueVector {
             VectorData::EdgeId(vec) => vec.get(index).copied(),
             // Handle Generic vectors that contain edge IDs stored as Int64
             VectorData::Generic(vec) => match vec.get(index) {
+                // reason: ID encoding: i64 <-> u64 round-trip
+                #[allow(clippy::cast_sign_loss)]
                 Some(Value::Int64(i)) => Some(EdgeId::new(*i as u64)),
                 _ => None,
             },
@@ -360,8 +372,21 @@ impl ValueVector {
             VectorData::Int64(vec) => vec.get(index).map(|&v| Value::Int64(v)),
             VectorData::Float64(vec) => vec.get(index).map(|&v| Value::Float64(v)),
             VectorData::String(vec) => vec.get(index).map(|v| Value::String(v.clone())),
-            VectorData::NodeId(vec) => vec.get(index).map(|&v| Value::Int64(v.as_u64() as i64)),
-            VectorData::EdgeId(vec) => vec.get(index).map(|&v| Value::Int64(v.as_u64() as i64)),
+            // reason: entity IDs stored as i64, standard encoding
+            VectorData::NodeId(vec) => vec.get(index).map(|&v| {
+                // reason: entity IDs are sequential counters, well within i64::MAX
+                #[allow(clippy::cast_possible_wrap)]
+                let val = Value::Int64(v.as_u64() as i64);
+                val
+            }),
+            // reason: entity IDs stored as i64, standard encoding
+            // reason: entity IDs are sequential counters, well within i64::MAX
+            VectorData::EdgeId(vec) => vec.get(index).map(|&v| {
+                // reason: entity IDs are sequential counters, well within i64::MAX
+                #[allow(clippy::cast_possible_wrap)]
+                let val = Value::Int64(v.as_u64() as i64);
+                val
+            }),
             VectorData::Generic(vec) => vec.get(index).cloned(),
         }
     }

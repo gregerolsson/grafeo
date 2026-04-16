@@ -39,12 +39,8 @@ highlight = "all"
 
 # Known acceptable duplicates (transitive deps pulling different major versions).
 skip = [
-    # dashmap v6 uses hashbrown 0.14, our direct deps use 0.16
+    # dashmap v6 uses hashbrown 0.14, our direct deps use 0.17
     { crate = "hashbrown@0.14", reason = "dashmap v6 transitive dep" },
-    # rustyline pulls both windows-sys 0.59 (via fd-lock) and 0.60
-    { crate = "windows-sys@0.59", reason = "rustyline transitive dep (fd-lock)" },
-    # windows-sys 0.59 needs windows-targets 0.52, while 0.60 needs 0.53
-    { crate = "windows-targets@0.52", reason = "transitive via windows-sys 0.59 (fd-lock)" },
 ]
 
 deny = []

@@ -148,7 +148,7 @@ impl FactorizedAggregate {
         multiplicities: Option<&[usize]>,
     ) -> Value {
         match self {
-            Self::Count => Value::Int64(chunk.count_rows() as i64),
+            Self::Count => Value::Int64(i64::try_from(chunk.count_rows()).unwrap_or(i64::MAX)),
 
             Self::CountColumn { column_idx } => {
                 // Count non-null values at deepest level, weighted by multiplicity
@@ -180,7 +180,7 @@ impl FactorizedAggregate {
                     if let Some(value) = col.get_physical(phys_idx)
                         && !matches!(value, Value::Null)
                     {
-                        count += *mult as i64;
+                        count = count.saturating_add(i64::try_from(*mult).unwrap_or(i64::MAX));
                     }
                 }
 

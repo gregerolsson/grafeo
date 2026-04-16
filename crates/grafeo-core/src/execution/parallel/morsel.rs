@@ -117,6 +117,8 @@ pub fn compute_morsel_size_with_base(base_size: usize, pressure_level: PressureL
         _ => MIN_MORSEL_SIZE as f64 / base_size as f64,
     };
 
+    // reason: product of base_size * factor is non-negative and bounded
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     ((base_size as f64 * factor) as usize).max(MIN_MORSEL_SIZE)
 }
 

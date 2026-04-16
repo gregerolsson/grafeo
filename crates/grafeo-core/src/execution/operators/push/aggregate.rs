@@ -329,6 +329,13 @@ impl PushOperator for AggregatePushOperator {
 #[cfg(feature = "spill")]
 pub const DEFAULT_AGGREGATE_SPILL_THRESHOLD: usize = 50_000;
 
+/// Minimum number of groups before memory-pressure spilling can trigger.
+///
+/// Prevents "noisy neighbor" scenarios where a tiny aggregate buffer gets
+/// spilled because unrelated subsystems consumed memory.
+#[cfg(feature = "spill")]
+const AGGREGATE_MIN_BUFFER_GROUPS: usize = 500;
+
 /// Tag bytes for aggregate state variants used during spill serialization.
 ///
 /// Each tag identifies both the aggregate function AND how to reconstruct
@@ -445,6 +452,8 @@ fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
     // Read key values
     let mut len_buf = [0u8; 8];
     r.read_exact(&mut len_buf)?;
+    // reason: deserialized counts are bounded by available data
+    #[allow(clippy::cast_possible_truncation)]
     let num_keys = u64::from_le_bytes(len_buf) as usize;
 
     let mut key_values = Vec::with_capacity(num_keys);
@@ -454,6 +463,8 @@ fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
 
     // Read accumulators with tag-based reconstruction
     r.read_exact(&mut len_buf)?;
+    // reason: deserialized counts are bounded by available data
+    #[allow(clippy::cast_possible_truncation)]
     let num_accumulators = u64::from_le_bytes(len_buf) as usize;
 
     let mut accumulators = Vec::with_capacity(num_accumulators);
@@ -531,6 +542,8 @@ fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
             spill_tag::COLLECT => {
                 let mut buf = [0u8; 8];
                 r.read_exact(&mut buf)?;
+                // reason: deserialized lengths are bounded by available data
+                #[allow(clippy::cast_possible_truncation)]
                 let len = u64::from_le_bytes(buf) as usize;
                 let mut list = Vec::with_capacity(len);
                 for _ in 0..len {
@@ -557,13 +570,22 @@ fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
 ///
 /// Uses partitioned hash table that can spill cold partitions to disk
 /// when memory pressure is high.
+///
+/// Two spill modes are supported:
+///
+/// 1. **Memory-aware** (when constructed with `with_memory_context`): registers
+///    as a `MemoryConsumer` with the `BufferManager` and spills when system
+///    pressure is High/Critical or when eviction is explicitly requested.
+///
+/// 2. **Row-count fallback** (when constructed with `new` or `with_spilling`):
+///    spills when `groups.len() >= spill_threshold` (default 50K groups).
 #[cfg(feature = "spill")]
 pub struct SpillableAggregatePushOperator {
     /// Columns to group by.
     group_by: Vec<usize>,
     /// Aggregate expressions.
     aggregates: Vec<AggregateExpr>,
-    /// Spill manager (None = no spilling).
+    /// Spill manager (None = no spilling, used by row-count fallback mode).
     spill_manager: Option<Arc<SpillManager>>,
     /// Partitioned groups (used when spilling is enabled).
     partitioned_groups: Option<PartitionedState<GroupState>>,
@@ -571,15 +593,21 @@ pub struct SpillableAggregatePushOperator {
     groups: HashMap<GroupKey, GroupState>,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
-    /// Spill threshold (number of groups).
+    /// Spill threshold (number of groups, used by fallback mode).
     spill_threshold: usize,
     /// Whether we've switched to partitioned mode.
     using_partitioned: bool,
+    /// Memory context for pressure-aware spilling.
+    memory_ctx: Option<crate::execution::memory::OperatorMemoryContext>,
+    /// Shared state with the registered MemoryConsumer adapter.
+    spill_state: Option<std::sync::Arc<super::spill_state::OperatorSpillState>>,
+    /// Running total of estimated group memory in bytes (incremental tracking).
+    estimated_bytes: usize,
 }
 
 #[cfg(feature = "spill")]
 impl SpillableAggregatePushOperator {
-    /// Create a new spillable aggregate operator.
+    /// Create a new spillable aggregate operator (row-count fallback mode).
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
         let global_state = if group_by.is_empty() {
             Some(aggregates.iter().map(state_for_expr).collect())
@@ -596,10 +624,13 @@ impl SpillableAggregatePushOperator {
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
+            memory_ctx: None,
+            spill_state: None,
+            estimated_bytes: 0,
         }
     }
 
-    /// Create a spillable aggregate operator with spilling enabled.
+    /// Create a spillable aggregate operator with spilling enabled (row-count mode).
     pub fn with_spilling(
         group_by: Vec<usize>,
         aggregates: Vec<AggregateExpr>,
@@ -628,6 +659,56 @@ impl SpillableAggregatePushOperator {
             global_state,
             spill_threshold: threshold,
             using_partitioned: true,
+            memory_ctx: None,
+            spill_state: None,
+            estimated_bytes: 0,
+        }
+    }
+
+    /// Create a spillable aggregate operator with memory-aware spilling.
+    ///
+    /// Registers as a `MemoryConsumer` with the `BufferManager` and spills
+    /// based on system memory pressure rather than group count thresholds.
+    pub fn with_memory_context(
+        group_by: Vec<usize>,
+        aggregates: Vec<AggregateExpr>,
+        ctx: crate::execution::memory::OperatorMemoryContext,
+    ) -> Self {
+        use super::spill_state::{OperatorConsumerAdapter, OperatorSpillState};
+
+        let global_state = if group_by.is_empty() {
+            Some(aggregates.iter().map(state_for_expr).collect())
+        } else {
+            None
+        };
+
+        let state = std::sync::Arc::new(OperatorSpillState::new(
+            "SpillableAggregatePush".to_string(),
+        ));
+        let adapter =
+            std::sync::Arc::new(OperatorConsumerAdapter::new(std::sync::Arc::clone(&state)));
+        ctx.register_consumer(adapter);
+
+        // Pre-create partitioned state using the spill manager from memory context
+        let partitioned = PartitionedState::new(
+            std::sync::Arc::clone(ctx.spill_manager()),
+            256,
+            serialize_group_state,
+            deserialize_group_state,
+        );
+
+        Self {
+            group_by,
+            aggregates,
+            spill_manager: None,
+            partitioned_groups: Some(partitioned),
+            groups: HashMap::new(),
+            global_state,
+            spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
+            using_partitioned: true,
+            memory_ctx: Some(ctx),
+            spill_state: Some(state),
+            estimated_bytes: 0,
         }
     }
 
@@ -636,19 +717,58 @@ impl SpillableAggregatePushOperator {
         Self::new(Vec::new(), aggregates)
     }
 
-    /// Sets the spill threshold.
+    /// Sets the spill threshold (row-count fallback mode).
     pub fn with_threshold(mut self, threshold: usize) -> Self {
         self.spill_threshold = threshold;
         self
     }
 
-    /// Switches to partitioned mode if needed.
+    /// Checks whether spilling should occur and performs it if needed.
     fn maybe_spill(&mut self) -> Result<(), OperatorError> {
         if self.global_state.is_some() {
             // Global aggregation doesn't need spilling
             return Ok(());
         }
 
+        if self.spill_state.is_some() {
+            // Memory-aware mode
+            self.maybe_spill_memory_aware()
+        } else {
+            // Row-count fallback mode
+            self.maybe_spill_row_count()
+        }
+    }
+
+    /// Memory-aware spill decision: check eviction flag and system pressure.
+    fn maybe_spill_memory_aware(&mut self) -> Result<(), OperatorError> {
+        let should_spill = if let Some(ref state) = self.spill_state {
+            let eviction = state.take_eviction_request().is_some();
+            let pressure = self.memory_ctx.as_ref().map_or(false, |c| c.should_spill());
+
+            // Determine current group count for minimum buffer guard
+            let group_count = if let Some(ref partitioned) = self.partitioned_groups {
+                partitioned.total_size()
+            } else {
+                self.groups.len()
+            };
+            let above_minimum = group_count >= AGGREGATE_MIN_BUFFER_GROUPS;
+
+            (eviction || pressure) && above_minimum
+        } else {
+            false
+        };
+
+        if should_spill && let Some(ref mut partitioned) = self.partitioned_groups {
+            partitioned
+                .spill_largest()
+                .map_err(|e| OperatorError::Execution(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Row-count fallback spill decision.
+    fn maybe_spill_row_count(&mut self) -> Result<(), OperatorError> {
         // If using partitioned state, check if we need to spill
         if let Some(ref mut partitioned) = self.partitioned_groups {
             if partitioned.total_size() >= self.spill_threshold {
@@ -680,6 +800,13 @@ impl SpillableAggregatePushOperator {
         }
 
         Ok(())
+    }
+
+    /// Unregisters this operator's consumer from the BufferManager.
+    fn unregister_consumer(&self) {
+        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
+            ctx.unregister_consumer(state.name());
+        }
     }
 }
 
@@ -752,6 +879,23 @@ impl PushOperator for SpillableAggregatePushOperator {
             }
         }
 
+        // Update memory consumer usage estimate
+        if let Some(ref spill_state) = self.spill_state {
+            // Estimate: each group has key_values + accumulators
+            // Rough sizing: key columns * Value size + num_aggregates * 64 bytes per accumulator
+            let group_count = if self.using_partitioned {
+                self.partitioned_groups
+                    .as_ref()
+                    .map_or(0, |p| p.total_size())
+            } else {
+                self.groups.len()
+            };
+            let key_size = self.group_by.len() * std::mem::size_of::<Value>();
+            let acc_size = self.aggregates.len() * 64; // rough accumulator size
+            self.estimated_bytes = group_count * (key_size + acc_size + 48);
+            spill_state.set_usage(self.estimated_bytes);
+        }
+
         // Check if we need to spill
         self.maybe_spill()?;
 
@@ -803,6 +947,9 @@ impl PushOperator for SpillableAggregatePushOperator {
                 }
             }
         }
+
+        // Unregister consumer before emitting results
+        self.unregister_consumer();
 
         if !columns.is_empty() && !columns[0].is_empty() {
             let chunk = DataChunk::new(columns);
@@ -1693,6 +1840,85 @@ mod tests {
         assert!(found_group2, "Group 2 with min/max not found");
     }
 
+    // ---------------------------------------------------------------
+    // Additional aggregate push operator coverage
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_aggregate_count_non_null() {
+        // COUNT(column) with CountNonNull skips null values
+        let expr = AggregateExpr::count(0);
+        let mut agg = AggregatePushOperator::global(vec![expr]);
+        let mut sink = CollectorSink::new();
+
+        // Create a chunk with mixed values and nulls
+        let mut col = ValueVector::new();
+        col.push(Value::Int64(10)); // Alix's score
+        col.push(Value::Null);
+        col.push(Value::Int64(30)); // Gus's score
+        col.push(Value::Null);
+        col.push(Value::Int64(50)); // Vincent's score
+        let chunk = DataChunk::new(vec![col]);
+
+        agg.push(chunk, &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        // Only 3 non-null values should be counted
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(3))
+        );
+    }
+
+    #[test]
+    fn test_grouped_aggregate_empty_groups() {
+        // Grouped aggregate with empty input produces no output
+        let mut agg = AggregatePushOperator::new(vec![0], vec![AggregateExpr::sum(1)]);
+        let mut sink = CollectorSink::new();
+
+        // Push an empty chunk
+        let empty = DataChunk::new(vec![ValueVector::new(), ValueVector::new()]);
+        agg.push(empty, &mut sink).unwrap();
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        // No groups produced, so no output chunk
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_spillable_aggregate_threshold_transition() {
+        // Test the transition from non-partitioned to partitioned mode
+        // when the spill_manager is set but threshold is reached without
+        // using with_spilling (tests the maybe_spill fallback path)
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+
+        // Use with_spilling to trigger the partitioned spill path
+        let mut agg = SpillableAggregatePushOperator::with_spilling(
+            vec![0],
+            vec![AggregateExpr::count_star()],
+            manager,
+            2, // Very low threshold
+        );
+        let mut sink = CollectorSink::new();
+
+        // Create 5 groups to force spilling
+        for i in 0..5 {
+            agg.push(create_test_chunk(&[i]), &mut sink).unwrap();
+        }
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 5);
+    }
+
     #[test]
     #[cfg(feature = "spill")]
     fn spill_finalized_frozen_ignores_further_updates() {
@@ -1719,5 +1945,226 @@ mod tests {
         restored.accumulators[0].update(Some(Value::Float64(200.0)));
 
         assert_eq!(restored.accumulators[0].finalize(), expected);
+    }
+
+    // ---------------------------------------------------------------
+    // Serialization roundtrip: end-to-end through push operator
+    // ---------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_serialize_deserialize_sum_state() {
+        // Sum with float values to exercise SumFloat serialization path
+        let state = GroupState {
+            key_values: vec![Value::String("Alix".into())],
+            accumulators: vec![
+                AggregateState::SumInt(42, 3),
+                AggregateState::SumFloat(2.72, 0.001, 2),
+            ],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+
+        assert_eq!(restored.key_values, vec![Value::String("Alix".into())]);
+        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(42));
+        assert_eq!(restored.accumulators[1].finalize(), Value::Float64(2.72));
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_serialize_deserialize_avg_state() {
+        // Avg with sum=30.0, count=6 => finalize should produce 5.0
+        let state = GroupState {
+            key_values: vec![Value::String("Gus".into())],
+            accumulators: vec![AggregateState::Avg(30.0, 6)],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+
+        assert_eq!(restored.key_values, vec![Value::String("Gus".into())]);
+        assert_eq!(restored.accumulators[0].finalize(), Value::Float64(5.0));
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_serialize_deserialize_count_state() {
+        let state = GroupState {
+            key_values: vec![Value::String("Vincent".into())],
+            accumulators: vec![AggregateState::Count(17)],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+
+        assert_eq!(restored.key_values, vec![Value::String("Vincent".into())]);
+        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(17));
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_serialize_deserialize_min_max_state() {
+        // Test with String values (not just Int64) to cover different value types
+        let state = GroupState {
+            key_values: vec![Value::String("Jules".into())],
+            accumulators: vec![
+                AggregateState::Min(Some(Value::String("Amsterdam".into()))),
+                AggregateState::Max(Some(Value::Float64(99.9))),
+                AggregateState::Min(None),
+                AggregateState::Max(None),
+            ],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+
+        assert_eq!(
+            restored.accumulators[0].finalize(),
+            Value::String("Amsterdam".into())
+        );
+        assert_eq!(restored.accumulators[1].finalize(), Value::Float64(99.9));
+        // None values serialize as Null and deserialize as Min(None)
+        assert_eq!(restored.accumulators[2].finalize(), Value::Null);
+        assert_eq!(restored.accumulators[3].finalize(), Value::Null);
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_serialize_deserialize_collect_state() {
+        // Collect with mixed value types
+        let state = GroupState {
+            key_values: vec![Value::String("Mia".into())],
+            accumulators: vec![AggregateState::Collect(vec![
+                Value::Int64(1),
+                Value::String("Berlin".into()),
+                Value::Float64(2.5),
+                Value::Bool(true),
+            ])],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+
+        let result = restored.accumulators[0].finalize();
+        if let Value::List(list) = result {
+            assert_eq!(list.len(), 4);
+            assert_eq!(list[0], Value::Int64(1));
+            assert_eq!(list[1], Value::String("Berlin".into()));
+            assert_eq!(list[2], Value::Float64(2.5));
+            assert_eq!(list[3], Value::Bool(true));
+        } else {
+            panic!("expected List, got {result:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_serialize_deserialize_count_distinct() {
+        use crate::execution::operators::accumulator::HashableValue;
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        seen.insert(HashableValue::from(Value::String("Paris".into())));
+        seen.insert(HashableValue::from(Value::String("Prague".into())));
+        seen.insert(HashableValue::from(Value::String("Barcelona".into())));
+        let state = GroupState {
+            key_values: vec![Value::String("Butch".into())],
+            accumulators: vec![AggregateState::CountDistinct(3, seen)],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let restored = deserialize_group_state(&mut &buf[..]).unwrap();
+
+        // CountDistinct serializes as FINALIZED, so deserialized as Frozen(Int64(3))
+        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(3));
+        assert!(
+            matches!(restored.accumulators[0], AggregateState::Frozen(_)),
+            "DISTINCT should be deserialized as Frozen"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Push operator with empty chunks and empty input
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_global_aggregate_empty_input() {
+        // Global aggregate with no input at all should produce correct defaults
+        let mut agg = AggregatePushOperator::global(vec![
+            AggregateExpr::count_star(),
+            AggregateExpr::sum(0),
+            AggregateExpr::min(0),
+            AggregateExpr::max(0),
+        ]);
+        let mut sink = CollectorSink::new();
+
+        // No push calls at all, directly finalize
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        // COUNT(*) with no input should be 0
+        assert_eq!(
+            chunks[0].column(0).unwrap().get_value(0),
+            Some(Value::Int64(0))
+        );
+        // SUM with no input should be Null
+        assert_eq!(chunks[0].column(1).unwrap().get_value(0), Some(Value::Null));
+        // MIN with no input should be Null
+        assert_eq!(chunks[0].column(2).unwrap().get_value(0), Some(Value::Null));
+        // MAX with no input should be Null
+        assert_eq!(chunks[0].column(3).unwrap().get_value(0), Some(Value::Null));
+    }
+
+    // ---------------------------------------------------------------
+    // Spillable aggregate: memory pressure triggers spilling
+    // ---------------------------------------------------------------
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn test_spillable_aggregate_memory_pressure() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+
+        // Extremely low threshold of 2 to force spilling quickly
+        let mut agg = SpillableAggregatePushOperator::with_spilling(
+            vec![0],
+            vec![AggregateExpr::sum(1)],
+            Arc::clone(&manager),
+            2,
+        );
+        let mut sink = CollectorSink::new();
+
+        // Push many distinct groups to trigger memory pressure and spilling
+        for i in 0..20 {
+            let chunk = create_two_column_chunk(&[i], &[i * 5]);
+            agg.push(chunk, &mut sink).unwrap();
+        }
+
+        // Verify spilling happened (manager should have active spill files)
+        assert!(
+            manager.active_file_count() > 0,
+            "expected spill files to be created under memory pressure"
+        );
+
+        agg.finalize(&mut sink).unwrap();
+
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 20);
+
+        // Verify all sums are correct
+        let mut sums: Vec<i64> = Vec::new();
+        for i in 0..chunks[0].len() {
+            if let Some(Value::Int64(sum)) = chunks[0].column(1).unwrap().get_value(i) {
+                sums.push(sum);
+            }
+        }
+        sums.sort_unstable();
+        let expected: Vec<i64> = (0..20).map(|i| i * 5).collect();
+        assert_eq!(sums, expected);
     }
 }

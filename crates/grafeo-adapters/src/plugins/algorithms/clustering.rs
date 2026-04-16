@@ -557,7 +557,8 @@ impl GraphAlgorithm for TotalTrianglesAlgorithm {
         #[cfg(feature = "parallel")]
         let count = {
             let parallel = params.get_bool("parallel").unwrap_or(true);
-            let threshold = params.get_int("parallel_threshold").unwrap_or(50) as usize;
+            let threshold =
+                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(50);
 
             if parallel {
                 total_triangles_parallel(store, threshold)
@@ -573,6 +574,8 @@ impl GraphAlgorithm for TotalTrianglesAlgorithm {
         };
 
         let mut output = AlgorithmResult::new(vec!["total_triangles".to_string()]);
+        // reason: Triangle count is bounded by graph size, well within i64::MAX
+        #[allow(clippy::cast_possible_wrap)]
         output.add_row(vec![Value::Int64(count as i64)]);
         Ok(output)
     }
@@ -622,7 +625,8 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
         #[cfg(feature = "parallel")]
         let result = {
             let parallel = params.get_bool("parallel").unwrap_or(true);
-            let threshold = params.get_int("parallel_threshold").unwrap_or(50) as usize;
+            let threshold =
+                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(50);
 
             if parallel {
                 clustering_coefficient_parallel(store, threshold)
@@ -645,6 +649,8 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
 
         for (node, coefficient) in result.coefficients {
             let triangles = *result.triangle_counts.get(&node).unwrap_or(&0);
+            // reason: Node IDs and triangle counts are bounded by graph size, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Float64(coefficient),
@@ -678,6 +684,8 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
 
         for (node, coefficient) in result.coefficients {
             let triangles = *result.triangle_counts.get(&node).unwrap_or(&0);
+            // reason: Node IDs and triangle counts are bounded by graph size, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Float64(coefficient),

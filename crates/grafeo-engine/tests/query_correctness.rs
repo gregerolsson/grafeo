@@ -29,43 +29,53 @@ fn create_social_network() -> GrafeoDB {
     let session = db.session();
 
     // Create people
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+            ],
+        )
+        .unwrap();
 
     // Create companies
-    let techcorp = session.create_node_with_props(
-        &["Company"],
-        [
-            ("name", Value::String("TechCorp".into())),
-            ("founded", Value::Int64(2010)),
-        ],
-    );
-    let startup = session.create_node_with_props(
-        &["Company"],
-        [
-            ("name", Value::String("Startup".into())),
-            ("founded", Value::Int64(2020)),
-        ],
-    );
+    let techcorp = session
+        .create_node_with_props(
+            &["Company"],
+            [
+                ("name", Value::String("TechCorp".into())),
+                ("founded", Value::Int64(2010)),
+            ],
+        )
+        .unwrap();
+    let startup = session
+        .create_node_with_props(
+            &["Company"],
+            [
+                ("name", Value::String("Startup".into())),
+                ("founded", Value::Int64(2020)),
+            ],
+        )
+        .unwrap();
 
     // Create KNOWS relationships
     session.create_edge(alix, gus, "KNOWS");
@@ -85,10 +95,18 @@ fn create_chain() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let a = session.create_node_with_props(&["Node"], [("id", Value::String("A".into()))]);
-    let b = session.create_node_with_props(&["Node"], [("id", Value::String("B".into()))]);
-    let c = session.create_node_with_props(&["Node"], [("id", Value::String("C".into()))]);
-    let d = session.create_node_with_props(&["Node"], [("id", Value::String("D".into()))]);
+    let a = session
+        .create_node_with_props(&["Node"], [("id", Value::String("A".into()))])
+        .unwrap();
+    let b = session
+        .create_node_with_props(&["Node"], [("id", Value::String("B".into()))])
+        .unwrap();
+    let c = session
+        .create_node_with_props(&["Node"], [("id", Value::String("C".into()))])
+        .unwrap();
+    let d = session
+        .create_node_with_props(&["Node"], [("id", Value::String("D".into()))])
+        .unwrap();
 
     session.create_edge(a, b, "NEXT");
     session.create_edge(b, c, "NEXT");
@@ -102,13 +120,17 @@ fn create_star() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let center = session.create_node_with_props(&["Hub"], [("id", Value::String("center".into()))]);
+    let center = session
+        .create_node_with_props(&["Hub"], [("id", Value::String("center".into()))])
+        .unwrap();
 
     for i in 0..5 {
-        let spoke = session.create_node_with_props(
-            &["Spoke"],
-            [("id", Value::String(format!("spoke_{}", i).into()))],
-        );
+        let spoke = session
+            .create_node_with_props(
+                &["Spoke"],
+                [("id", Value::String(format!("spoke_{}", i).into()))],
+            )
+            .unwrap();
         session.create_edge(center, spoke, "CONNECTS");
     }
 
@@ -131,13 +153,15 @@ fn create_numeric_data() -> GrafeoDB {
     ];
 
     for (price, category) in prices.iter().zip(categories.iter()) {
-        session.create_node_with_props(
-            &["Product"],
-            [
-                ("price", Value::Int64(*price)),
-                ("category", Value::String((*category).into())),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Product"],
+                [
+                    ("price", Value::Int64(*price)),
+                    ("category", Value::String((*category).into())),
+                ],
+            )
+            .unwrap();
     }
 
     db
@@ -148,41 +172,51 @@ fn create_tree() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let root = session.create_node_with_props(
-        &["TreeNode"],
-        [
-            ("name", Value::String("root".into())),
-            ("level", Value::Int64(0)),
-        ],
-    );
-    let child1 = session.create_node_with_props(
-        &["TreeNode"],
-        [
-            ("name", Value::String("child1".into())),
-            ("level", Value::Int64(1)),
-        ],
-    );
-    let child2 = session.create_node_with_props(
-        &["TreeNode"],
-        [
-            ("name", Value::String("child2".into())),
-            ("level", Value::Int64(1)),
-        ],
-    );
-    let leaf1 = session.create_node_with_props(
-        &["TreeNode"],
-        [
-            ("name", Value::String("leaf1".into())),
-            ("level", Value::Int64(2)),
-        ],
-    );
-    let leaf2 = session.create_node_with_props(
-        &["TreeNode"],
-        [
-            ("name", Value::String("leaf2".into())),
-            ("level", Value::Int64(2)),
-        ],
-    );
+    let root = session
+        .create_node_with_props(
+            &["TreeNode"],
+            [
+                ("name", Value::String("root".into())),
+                ("level", Value::Int64(0)),
+            ],
+        )
+        .unwrap();
+    let child1 = session
+        .create_node_with_props(
+            &["TreeNode"],
+            [
+                ("name", Value::String("child1".into())),
+                ("level", Value::Int64(1)),
+            ],
+        )
+        .unwrap();
+    let child2 = session
+        .create_node_with_props(
+            &["TreeNode"],
+            [
+                ("name", Value::String("child2".into())),
+                ("level", Value::Int64(1)),
+            ],
+        )
+        .unwrap();
+    let leaf1 = session
+        .create_node_with_props(
+            &["TreeNode"],
+            [
+                ("name", Value::String("leaf1".into())),
+                ("level", Value::Int64(2)),
+            ],
+        )
+        .unwrap();
+    let leaf2 = session
+        .create_node_with_props(
+            &["TreeNode"],
+            [
+                ("name", Value::String("leaf2".into())),
+                ("level", Value::Int64(2)),
+            ],
+        )
+        .unwrap();
 
     session.create_edge(root, child1, "HAS_CHILD");
     session.create_edge(root, child2, "HAS_CHILD");
@@ -1098,10 +1132,18 @@ mod gql_direction_tests {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
 
-        let a = session.create_node_with_props(&["User"], [("name", Value::String("A".into()))]);
-        let b = session.create_node_with_props(&["User"], [("name", Value::String("B".into()))]);
-        let c = session.create_node_with_props(&["User"], [("name", Value::String("C".into()))]);
-        let d = session.create_node_with_props(&["User"], [("name", Value::String("D".into()))]);
+        let a = session
+            .create_node_with_props(&["User"], [("name", Value::String("A".into()))])
+            .unwrap();
+        let b = session
+            .create_node_with_props(&["User"], [("name", Value::String("B".into()))])
+            .unwrap();
+        let c = session
+            .create_node_with_props(&["User"], [("name", Value::String("C".into()))])
+            .unwrap();
+        let d = session
+            .create_node_with_props(&["User"], [("name", Value::String("D".into()))])
+            .unwrap();
 
         session.create_edge(a, b, "FOLLOWS"); // A -> B
         session.create_edge(b, c, "FOLLOWS"); // B -> C
@@ -1745,20 +1787,24 @@ mod cypher_db_execute {
     fn test_cypher_multiple_match_with_create() {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("id", Value::String("src".into())),
-                ("name", Value::String("Src".into())),
-            ],
-        );
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("id", Value::String("dst".into())),
-                ("name", Value::String("Dst".into())),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("id", Value::String("src".into())),
+                    ("name", Value::String("Src".into())),
+                ],
+            )
+            .unwrap();
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("id", Value::String("dst".into())),
+                    ("name", Value::String("Dst".into())),
+                ],
+            )
+            .unwrap();
 
         let mut params = HashMap::new();
         params.insert("src_id".to_string(), Value::String("src".into()));
@@ -1780,20 +1826,24 @@ mod cypher_db_execute {
     fn test_cypher_merge_relationship() {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("id", Value::String("a".into())),
-                ("name", Value::String("Alix".into())),
-            ],
-        );
-        session.create_node_with_props(
-            &["Person"],
-            [
-                ("id", Value::String("b".into())),
-                ("name", Value::String("Gus".into())),
-            ],
-        );
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("id", Value::String("a".into())),
+                    ("name", Value::String("Alix".into())),
+                ],
+            )
+            .unwrap();
+        session
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("id", Value::String("b".into())),
+                    ("name", Value::String("Gus".into())),
+                ],
+            )
+            .unwrap();
 
         // MERGE should create the relationship since it doesn't exist
         let result = db
@@ -1820,8 +1870,12 @@ mod cypher_db_execute {
     fn test_cypher_merge_relationship_with_properties() {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-        session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
+        session
+            .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+            .unwrap();
 
         // MERGE with match properties
         let result = db
@@ -1848,8 +1902,12 @@ mod cypher_db_execute {
     fn test_cypher_merge_relationship_then_set() {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-        session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
+        session
+            .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+            .unwrap();
 
         // MERGE relationship then SET a property on it
         let result = db
@@ -1868,8 +1926,12 @@ mod cypher_db_execute {
         // This is the Deriva-style query pattern
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
-        session.create_node_with_props(&["Node"], [("id", Value::String("src".into()))]);
-        session.create_node_with_props(&["Node"], [("id", Value::String("dst".into()))]);
+        session
+            .create_node_with_props(&["Node"], [("id", Value::String("src".into()))])
+            .unwrap();
+        session
+            .create_node_with_props(&["Node"], [("id", Value::String("dst".into()))])
+            .unwrap();
 
         let mut params = HashMap::new();
         params.insert("src_id".to_string(), Value::String("src".into()));

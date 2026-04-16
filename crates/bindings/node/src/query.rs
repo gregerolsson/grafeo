@@ -31,7 +31,10 @@ impl QueryResult {
     /// Get number of rows.
     #[napi(getter)]
     pub fn length(&self) -> u32 {
-        self.rows.len() as u32
+        // reason: Result sets are bounded by graph size, well within u32::MAX
+        #[allow(clippy::cast_possible_truncation)]
+        let len = self.rows.len() as u32;
+        len
     }
 
     /// Query execution time in milliseconds (if available).
@@ -160,11 +163,15 @@ impl QueryResult {
             for (j, val) in row.iter().enumerate() {
                 let napi_val = types::value_to_napi(env_raw, val)?;
                 // SAFETY: env_raw, row_arr, and napi_val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements
+                #[allow(clippy::cast_possible_truncation)]
                 types::check_napi(unsafe {
                     sys::napi_set_element(env_raw, row_arr, j as u32, napi_val)
                 })?;
             }
             // SAFETY: env_raw, arr, and row_arr are valid napi values
+            // reason: JS arrays are limited to 2^32-1 elements
+            #[allow(clippy::cast_possible_truncation)]
             types::check_napi(unsafe { sys::napi_set_element(env_raw, arr, i as u32, row_arr) })?;
         }
         Ok(Object::from_raw(env_raw, arr))

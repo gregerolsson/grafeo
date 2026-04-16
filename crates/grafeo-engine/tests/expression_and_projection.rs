@@ -21,30 +21,36 @@ fn create_test_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("NYC".into())),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("NYC".into())),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("London".into())),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("NYC".into())),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("NYC".into())),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("London".into())),
+            ],
+        )
+        .unwrap();
 
     session.create_edge(alix, gus, "KNOWS");
     session.create_edge(alix, harm, "KNOWS");
@@ -167,12 +173,18 @@ fn create_mixed_label_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let gus = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-    let harm =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Harm".into()))]);
-    let fritz = session.create_node_with_props(&["Bot"], [("name", Value::String("Fritz".into()))]);
+    let alix = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let gus = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
+    let harm = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Harm".into()))])
+        .unwrap();
+    let fritz = session
+        .create_node_with_props(&["Bot"], [("name", Value::String("Fritz".into()))])
+        .unwrap();
 
     session.create_edge(alix, gus, "MENTORS"); // Person -> Person
     session.create_edge(fritz, gus, "MENTORS"); // Bot    -> Person
@@ -281,9 +293,12 @@ fn test_exists_source_label_not_leaked_to_end_labels() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let jules =
-        session.create_node_with_props(&["Person"], [("name", Value::String("Jules".into()))]);
-    let mia = session.create_node_with_props(&["Bot"], [("name", Value::String("Mia".into()))]);
+    let jules = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Jules".into()))])
+        .unwrap();
+    let mia = session
+        .create_node_with_props(&["Bot"], [("name", Value::String("Mia".into()))])
+        .unwrap();
     session.create_edge(jules, mia, "FOLLOWS");
     drop(session);
 
@@ -326,39 +341,50 @@ fn create_multi_hop_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+            ],
+        )
+        .unwrap();
     // Dave has no LIVES_IN edge
-    let dave = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Dave".into())),
-            ("age", Value::Int64(40)),
-        ],
-    );
+    let dave = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Dave".into())),
+                ("age", Value::Int64(40)),
+            ],
+        )
+        .unwrap();
 
-    let nyc = session.create_node_with_props(&["City"], [("name", Value::String("NYC".into()))]);
-    let london =
-        session.create_node_with_props(&["City"], [("name", Value::String("London".into()))]);
+    let nyc = session
+        .create_node_with_props(&["City"], [("name", Value::String("NYC".into()))])
+        .unwrap();
+    let london = session
+        .create_node_with_props(&["City"], [("name", Value::String("London".into()))])
+        .unwrap();
 
     // KNOWS edges
     session.create_edge(alix, gus, "KNOWS");
@@ -1756,14 +1782,18 @@ fn test_gql_concat_with_non_string() {
 fn test_gql_is_null_in_where() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Item"], [("name", Value::String("widget".into()))]);
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("gadget".into())),
-            ("color", Value::String("red".into())),
-        ],
-    );
+    session
+        .create_node_with_props(&["Item"], [("name", Value::String("widget".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("gadget".into())),
+                ("color", Value::String("red".into())),
+            ],
+        )
+        .unwrap();
 
     let r = session
         .execute("MATCH (i:Item) WHERE i.color IS NULL RETURN i.name AS name")
@@ -1776,14 +1806,18 @@ fn test_gql_is_null_in_where() {
 fn test_gql_is_not_null_in_where() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Item"], [("name", Value::String("widget".into()))]);
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("gadget".into())),
-            ("color", Value::String("red".into())),
-        ],
-    );
+    session
+        .create_node_with_props(&["Item"], [("name", Value::String("widget".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("gadget".into())),
+                ("color", Value::String("red".into())),
+            ],
+        )
+        .unwrap();
 
     let r = session
         .execute("MATCH (i:Item) WHERE i.color IS NOT NULL RETURN i.name AS name")

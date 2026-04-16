@@ -225,6 +225,8 @@ impl LabelRegistry {
         if let Some(&id) = self.name_to_id.get(name) {
             return id;
         }
+        // reason: label registry size bounded by practical limits, fits u32
+        #[allow(clippy::cast_possible_truncation)]
         let id = self.id_to_name.len() as u32;
         let label: ArcStr = name.into();
         self.name_to_id.insert(label.clone(), id);
@@ -554,6 +556,37 @@ impl LpgStore {
             .fetch_max(epoch.as_u64(), Ordering::AcqRel);
     }
 
+    /// Returns the current next node ID counter value.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn next_node_id(&self) -> u64 {
+        self.next_node_id.load(Ordering::Acquire)
+    }
+
+    /// Returns the current next edge ID counter value.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn next_edge_id(&self) -> u64 {
+        self.next_edge_id.load(Ordering::Acquire)
+    }
+
+    /// Sets the next node ID counter.
+    ///
+    /// Used by [`LayeredStore`](crate::graph::compact::layered::LayeredStore)
+    /// to seed the overlay's ID allocator above the compact base's maximum ID.
+    #[doc(hidden)]
+    pub fn set_next_node_id(&self, id: u64) {
+        self.next_node_id.store(id, Ordering::Release);
+    }
+
+    /// Sets the next edge ID counter.
+    ///
+    /// See [`set_next_node_id`](Self::set_next_node_id).
+    #[doc(hidden)]
+    pub fn set_next_edge_id(&self, id: u64) {
+        self.next_edge_id.store(id, Ordering::Release);
+    }
+
     /// Removes all data from the store, resetting it to an empty state.
     ///
     /// Acquires locks in the documented ordering to prevent deadlocks.
@@ -737,6 +770,8 @@ impl LpgStore {
             return id;
         }
 
+        // reason: edge type registry size bounded by practical limits, fits u32
+        #[allow(clippy::cast_possible_truncation)]
         let id = id_to_type.len() as u32;
         let edge_type: ArcStr = edge_type.into();
         type_to_id.insert(edge_type.clone(), id);
@@ -763,6 +798,8 @@ impl LpgStore {
     /// Decrements the live edge count for a given edge type.
     pub(super) fn decrement_edge_type_count(&self, type_id: u32) {
         let mut counts = self.edge_type_live_counts.write();
+        // reason: counts.len() is bounded by edge type registry size, fits u32
+        #[allow(clippy::cast_possible_truncation)]
         if type_id < counts.len() as u32 {
             counts[type_id as usize] -= 1;
         }

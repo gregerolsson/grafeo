@@ -64,7 +64,10 @@ fn golden_records() -> Vec<WalRecord> {
 fn encode_frame(record: &WalRecord) -> Vec<u8> {
     let data = bincode::serde::encode_to_vec(record, bincode::config::standard()).unwrap();
     let mut frame = Vec::with_capacity(4 + data.len() + 4);
-    frame.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    // reason: WAL frames are small (bytes to KBs), well within u32::MAX
+    #[allow(clippy::cast_possible_truncation)]
+    let data_len = data.len() as u32;
+    frame.extend_from_slice(&data_len.to_le_bytes());
     frame.extend_from_slice(&data);
     frame.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
     frame

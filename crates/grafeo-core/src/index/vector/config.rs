@@ -84,6 +84,12 @@ pub struct HnswConfig {
     ///
     /// Typical values: 1.0-1.4.
     pub alpha: f32,
+
+    /// Maximum number of elements the index will accept.
+    ///
+    /// When set, `insert()` returns an error once this limit is reached.
+    /// `None` means no limit (default).
+    pub max_elements: Option<usize>,
 }
 
 impl HnswConfig {
@@ -102,6 +108,7 @@ impl HnswConfig {
             ef: 50,
             ml: 1.0 / (m as f64).ln(),
             alpha: 1.0,
+            max_elements: None,
         }
     }
 
@@ -121,6 +128,7 @@ impl HnswConfig {
             ef: 100,
             ml: 1.0 / (m as f64).ln(),
             alpha: 1.2,
+            max_elements: None,
         }
     }
 
@@ -139,6 +147,7 @@ impl HnswConfig {
             ef: 32,
             ml: 1.0 / (m as f64).ln(),
             alpha: 1.0,
+            max_elements: None,
         }
     }
 
@@ -182,6 +191,15 @@ impl HnswConfig {
         self
     }
 
+    /// Sets the maximum number of elements the index will accept.
+    ///
+    /// Once this limit is reached, `insert()` panics.
+    #[must_use]
+    pub fn with_max_elements(mut self, max: usize) -> Self {
+        self.max_elements = Some(max);
+        self
+    }
+
     /// Returns the maximum number of layers expected for a given number of nodes.
     ///
     /// This is a rough estimate based on the probability distribution.
@@ -190,7 +208,10 @@ impl HnswConfig {
         if n == 0 {
             return 0;
         }
-        ((n as f64).ln() * self.ml).ceil() as usize
+        // reason: log(n) * ml is non-negative and bounded, fits usize
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let result = ((n as f64).ln() * self.ml).ceil() as usize;
+        result
     }
 }
 
@@ -309,5 +330,17 @@ mod tests {
         // Large index
         let level_1m = config.expected_max_level(1_000_000);
         assert!(level_1m > level_100);
+    }
+
+    #[test]
+    fn test_hnsw_config_max_elements() {
+        let config = HnswConfig::new(384, DistanceMetric::Cosine).with_max_elements(10_000);
+        assert_eq!(config.max_elements, Some(10_000));
+    }
+
+    #[test]
+    fn test_hnsw_config_no_max_elements_by_default() {
+        let config = HnswConfig::new(384, DistanceMetric::Cosine);
+        assert!(config.max_elements.is_none());
     }
 }

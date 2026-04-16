@@ -214,6 +214,8 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_STRING => {
             let mut len_buf = [0u8; 8];
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let len = u64::from_le_bytes(len_buf) as usize;
             let mut str_buf = vec![0u8; len];
             r.read_exact(&mut str_buf)?;
@@ -224,6 +226,8 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_BYTES => {
             let mut len_buf = [0u8; 8];
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let len = u64::from_le_bytes(len_buf) as usize;
             let mut bytes_buf = vec![0u8; len];
             r.read_exact(&mut bytes_buf)?;
@@ -240,6 +244,8 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_LIST => {
             let mut len_buf = [0u8; 8];
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let len = u64::from_le_bytes(len_buf) as usize;
             let mut items = Vec::with_capacity(len);
             for _ in 0..len {
@@ -250,12 +256,16 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_MAP => {
             let mut len_buf = [0u8; 8];
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let len = u64::from_le_bytes(len_buf) as usize;
             let mut map = BTreeMap::new();
             for _ in 0..len {
                 // Read key
                 let mut key_len_buf = [0u8; 8];
                 r.read_exact(&mut key_len_buf)?;
+                // reason: deserialized key length is bounded by available data
+                #[allow(clippy::cast_possible_truncation)]
                 let key_len = u64::from_le_bytes(key_len_buf) as usize;
                 let mut key_buf = vec![0u8; key_len];
                 r.read_exact(&mut key_buf)?;
@@ -271,6 +281,8 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_VECTOR => {
             let mut len_buf = [0u8; 8];
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let len = u64::from_le_bytes(len_buf) as usize;
             let mut floats = Vec::with_capacity(len);
             let mut buf = [0u8; 4];
@@ -332,12 +344,16 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_PATH => {
             let mut len_buf = [0u8; 8];
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let nodes_len = u64::from_le_bytes(len_buf) as usize;
             let mut nodes = Vec::with_capacity(nodes_len);
             for _ in 0..nodes_len {
                 nodes.push(deserialize_value(r)?);
             }
             r.read_exact(&mut len_buf)?;
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let edges_len = u64::from_le_bytes(len_buf) as usize;
             let mut edges = Vec::with_capacity(edges_len);
             for _ in 0..edges_len {
@@ -351,10 +367,14 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         TAG_GCOUNTER => {
             let mut u64_buf = [0u8; 8];
             r.read_exact(&mut u64_buf)?;
+            // reason: deserialized counts are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let count = u64::from_le_bytes(u64_buf) as usize;
             let mut map = std::collections::HashMap::with_capacity(count);
             for _ in 0..count {
                 r.read_exact(&mut u64_buf)?;
+                // reason: deserialized key length is bounded by available data
+                #[allow(clippy::cast_possible_truncation)]
                 let key_len = u64::from_le_bytes(u64_buf) as usize;
                 let mut key_buf = vec![0u8; key_len];
                 r.read_exact(&mut key_buf)?;
@@ -375,10 +395,14 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
             ];
             for map in &mut maps {
                 r.read_exact(&mut u64_buf)?;
+                // reason: deserialized counts are bounded by available data
+                #[allow(clippy::cast_possible_truncation)]
                 let count = u64::from_le_bytes(u64_buf) as usize;
                 map.reserve(count);
                 for _ in 0..count {
                     r.read_exact(&mut u64_buf)?;
+                    // reason: deserialized key length is bounded by available data
+                    #[allow(clippy::cast_possible_truncation)]
                     let key_len = u64::from_le_bytes(u64_buf) as usize;
                     let mut key_buf = vec![0u8; key_len];
                     r.read_exact(&mut key_buf)?;
@@ -437,6 +461,8 @@ pub fn deserialize_row<R: Read + ?Sized>(
 ) -> std::io::Result<Vec<Value>> {
     let mut len_buf = [0u8; 8];
     r.read_exact(&mut len_buf)?;
+    // reason: column count is bounded by practical query sizes
+    #[allow(clippy::cast_possible_truncation)]
     let num_columns = u64::from_le_bytes(len_buf) as usize;
 
     if expected_columns > 0 && num_columns != expected_columns {

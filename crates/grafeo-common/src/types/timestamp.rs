@@ -53,6 +53,8 @@ impl Timestamp {
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(StdDuration::ZERO);
+        // reason: current wall-clock micros since epoch fit i64 for ~292,000 years
+        #[allow(clippy::cast_possible_truncation)]
         Self::from_micros(duration.as_micros() as i64)
     }
 
@@ -81,9 +83,11 @@ impl Timestamp {
     #[must_use]
     pub fn as_system_time(&self) -> Option<SystemTime> {
         if self.0 >= 0 {
+            // reason: self.0 is checked >= 0 on the line above
+            #[allow(clippy::cast_sign_loss)]
             Some(UNIX_EPOCH + StdDuration::from_micros(self.0 as u64))
         } else {
-            UNIX_EPOCH.checked_sub(StdDuration::from_micros((-self.0) as u64))
+            UNIX_EPOCH.checked_sub(StdDuration::from_micros(self.0.unsigned_abs()))
         }
     }
 
@@ -111,6 +115,8 @@ impl Timestamp {
     #[must_use]
     pub fn from_date_time(date: super::Date, time: super::Time) -> Self {
         let day_micros = date.as_days() as i64 * 86_400_000_000;
+        // reason: time nanos < 86.4e12, divided by 1000 is well within i64 range
+        #[allow(clippy::cast_possible_wrap)]
         let time_micros = (time.as_nanos() / 1000) as i64;
         // If the time has an offset, subtract it to get UTC
         let offset_micros = time.offset_seconds().unwrap_or(0) as i64 * 1_000_000;
@@ -120,6 +126,8 @@ impl Timestamp {
     /// Extracts the date component (UTC).
     #[must_use]
     pub fn to_date(self) -> super::Date {
+        // reason: i64 micros / 86.4e9 yields a day count within i32 range for any valid timestamp
+        #[allow(clippy::cast_possible_truncation)]
         let days = self.0.div_euclid(86_400_000_000) as i32;
         super::Date::from_days(days)
     }
@@ -205,6 +213,8 @@ impl fmt::Display for Timestamp {
         let micros = self.0;
         let micro_frac = micros.rem_euclid(1_000_000) as u64;
 
+        // reason: i64 micros / 86.4e9 yields a day count within i32 range for any valid timestamp
+        #[allow(clippy::cast_possible_truncation)]
         let total_days = micros.div_euclid(86_400_000_000) as i32;
         let day_micros = micros.rem_euclid(86_400_000_000);
         let day_secs = day_micros / 1_000_000;
@@ -240,8 +250,14 @@ impl TryFrom<SystemTime> for Timestamp {
 
     fn try_from(time: SystemTime) -> Result<Self, Self::Error> {
         match time.duration_since(UNIX_EPOCH) {
-            Ok(duration) => Ok(Self::from_micros(duration.as_micros() as i64)),
-            Err(e) => Ok(Self::from_micros(-(e.duration().as_micros() as i64))),
+            Ok(duration) => {
+                let micros = i64::try_from(duration.as_micros()).map_err(|_| ())?;
+                Ok(Self::from_micros(micros))
+            }
+            Err(e) => {
+                let micros = i64::try_from(e.duration().as_micros()).map_err(|_| ())?;
+                Ok(Self::from_micros(micros.checked_neg().ok_or(())?))
+            }
         }
     }
 }

@@ -194,7 +194,10 @@ impl super::GrafeoDB {
                 let entry = entry?;
                 let metadata = entry.metadata()?;
                 if metadata.is_file() {
-                    total += metadata.len() as usize;
+                    // reason: file sizes fit usize on 64-bit targets
+                    #[allow(clippy::cast_possible_truncation)]
+                    let file_len = metadata.len() as usize;
+                    total += file_len;
                 } else if metadata.is_dir() {
                     total += Self::calculate_disk_usage(&entry.path())?;
                 }
@@ -323,6 +326,8 @@ impl super::GrafeoDB {
                 enabled: true,
                 path: self.config.path.as_ref().map(|p| p.join("wal")),
                 size_bytes: wal.size_bytes(),
+                // reason: WAL record count fits usize on 64-bit targets
+                #[allow(clippy::cast_possible_truncation)]
                 record_count: wal.record_count() as usize,
                 last_checkpoint: wal.last_checkpoint_timestamp(),
                 current_epoch: self.lpg_store().current_epoch().as_u64(),

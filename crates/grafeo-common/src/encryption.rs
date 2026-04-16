@@ -36,6 +36,15 @@ pub const KEY_SIZE: usize = 32;
 /// Overhead added per encrypted record: nonce + tag.
 pub const ENCRYPTION_OVERHEAD: usize = NONCE_SIZE + TAG_SIZE;
 
+/// Fixed salt for HKDF key derivation (version 1).
+///
+/// Using a fixed, domain-specific salt ensures that DEK derivation is
+/// deterministic across versions. Changing this salt would invalidate all
+/// previously derived DEKs, making encrypted data undecryptable. If the
+/// derivation scheme ever needs to change, introduce a new versioned
+/// constant (e.g., `HKDF_SALT_V2`) and a migration path.
+const HKDF_SALT_V1: &[u8] = b"grafeo-hkdf-v1";
+
 // -------------------------------------------------------------------------
 // PageEncryptor
 // -------------------------------------------------------------------------
@@ -160,7 +169,7 @@ impl KeyChain {
     /// SHA-256, which supports up to 255 * 32 = 8160 bytes).
     #[must_use]
     pub fn derive_dek(&self, context: &str, id: &[u8]) -> Zeroizing<[u8; KEY_SIZE]> {
-        let hk = Hkdf::<Sha256>::new(None, &*self.me);
+        let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT_V1), &*self.me);
         let mut info = Vec::with_capacity(context.len() + id.len());
         info.extend_from_slice(context.as_bytes());
         info.extend_from_slice(id);
@@ -336,7 +345,11 @@ mod tests {
     fn test_key() -> [u8; KEY_SIZE] {
         let mut key = [0u8; KEY_SIZE];
         for (i, byte) in key.iter_mut().enumerate() {
-            *byte = i as u8;
+            // reason: KEY_SIZE is 32, index fits u8
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *byte = i as u8;
+            }
         }
         key
     }
@@ -443,7 +456,11 @@ mod tests {
         let root_key = test_key();
         let mut me = [0u8; KEY_SIZE];
         for (i, byte) in me.iter_mut().enumerate() {
-            *byte = (255 - i) as u8;
+            // reason: KEY_SIZE is 32, (255 - i) fits u8
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *byte = (255 - i) as u8;
+            }
         }
 
         let wrapped = wrap_me(&root_key, &me).unwrap();
@@ -548,5 +565,28 @@ mod tests {
         let encrypted = encryptor.encrypt(&plaintext, &nonce, b"snapshot").unwrap();
         let decrypted = encryptor.decrypt(&encrypted, b"snapshot").unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn hkdf_uses_fixed_salt_not_none() {
+        // Verify that derive_dek uses a fixed salt, not None.
+        // Derive a DEK with the real code (which uses HKDF_SALT_V1),
+        // then derive one manually with None salt: they must differ.
+        let me = test_key();
+        let chain = KeyChain::new(me);
+        let dek_with_salt = chain.derive_dek("grafeo-wal", &1u64.to_be_bytes());
+
+        // Manual derivation with None salt (the old, broken behavior)
+        let hk_no_salt = Hkdf::<Sha256>::new(None, &me);
+        let mut info = Vec::new();
+        info.extend_from_slice(b"grafeo-wal");
+        info.extend_from_slice(&1u64.to_be_bytes());
+        let mut dek_no_salt = [0u8; KEY_SIZE];
+        hk_no_salt.expand(&info, &mut dek_no_salt).unwrap();
+
+        assert_ne!(
+            *dek_with_salt, dek_no_salt,
+            "derive_dek must use a fixed salt, not None"
+        );
     }
 }

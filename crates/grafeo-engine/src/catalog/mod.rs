@@ -1920,6 +1920,8 @@ pub struct CatalogConstraintValidator {
     graph_name: Option<String>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup.
     store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
+    /// Optional maximum property value size in bytes.
+    max_property_size: Option<usize>,
 }
 
 impl CatalogConstraintValidator {
@@ -1929,6 +1931,7 @@ impl CatalogConstraintValidator {
             catalog,
             graph_name: None,
             store: None,
+            max_property_size: None,
         }
     }
 
@@ -1943,6 +1946,12 @@ impl CatalogConstraintValidator {
         self.store = Some(store);
         self
     }
+
+    /// Sets the maximum property value size in bytes.
+    pub fn with_max_property_size(mut self, limit: Option<usize>) -> Self {
+        self.max_property_size = limit;
+        self
+    }
 }
 
 impl ConstraintValidator for CatalogConstraintValidator {
@@ -1952,6 +1961,15 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
+        if let Some(limit) = self.max_property_size {
+            let size = value.estimated_size_bytes();
+            if size > limit {
+                return Err(OperatorError::ConstraintViolation(format!(
+                    "property '{key}' value exceeds maximum size of {} MiB ({size} bytes)",
+                    limit / (1024 * 1024)
+                )));
+            }
+        }
         for label in labels {
             if let Some(type_def) = self.catalog.resolved_node_type(label)
                 && let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key)
@@ -2083,6 +2101,15 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
+        if let Some(limit) = self.max_property_size {
+            let size = value.estimated_size_bytes();
+            if size > limit {
+                return Err(OperatorError::ConstraintViolation(format!(
+                    "property '{key}' value exceeds maximum size of {} MiB ({size} bytes)",
+                    limit / (1024 * 1024)
+                )));
+            }
+        }
         if let Some(type_def) = self.catalog.get_edge_type_def(edge_type)
             && let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key)
         {

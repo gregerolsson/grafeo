@@ -104,6 +104,8 @@ impl InvertedIndex {
         }
 
         let tokens = self.tokenizer.tokenize(text);
+        // reason: document token count fits u32 for practical text sizes
+        #[allow(clippy::cast_possible_truncation)]
         let doc_len = tokens.len() as u32;
 
         if doc_len == 0 {

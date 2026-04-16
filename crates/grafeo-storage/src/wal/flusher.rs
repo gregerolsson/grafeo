@@ -173,6 +173,8 @@ impl AdaptiveFlusher {
 
                     // Update statistics
                     stats.flush_count += 1;
+                    // reason: flush durations are sub-second, so micros always fits in u64
+                    #[allow(clippy::cast_possible_truncation)]
                     let flush_us = last_flush_duration.as_micros() as u64;
                     stats.total_flush_time_us += flush_us;
                     stats.max_flush_time_us = stats.max_flush_time_us.max(flush_us);

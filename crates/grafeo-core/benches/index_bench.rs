@@ -1,4 +1,6 @@
 //! Benchmarks for index structures.
+// reason: bench code uses small known constants
+#![allow(clippy::cast_possible_truncation)]
 
 use std::hint::black_box;
 

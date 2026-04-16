@@ -55,6 +55,8 @@ impl FileHeader {
         let copy_len = version_bytes.len().min(32);
         creator_version[..copy_len].copy_from_slice(&version_bytes[..copy_len]);
 
+        // reason: millis since UNIX epoch fits in u64 for ~585 million years
+        #[allow(clippy::cast_possible_truncation)]
         let creation_timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -63,6 +65,8 @@ impl FileHeader {
         Self {
             magic: MAGIC,
             format_version: FORMAT_VERSION,
+            // reason: FILE_HEADER_SIZE is 4096, a constant that fits in u32
+            #[allow(clippy::cast_possible_truncation)]
             page_size: FILE_HEADER_SIZE as u32,
             creation_timestamp_ms,
             creator_version,

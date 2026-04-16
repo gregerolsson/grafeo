@@ -227,7 +227,7 @@ tx.commit()  # balance = 1000, no bonus property
 ### Usage (Rust)
 
 ```rust
-let session = db.session();
+let mut session = db.session();
 session.begin_transaction()?;
 
 session.execute("MATCH (a:Account {id: 'A001'}) SET a.balance = 1000")?;
@@ -303,7 +303,7 @@ In Rust, the same behavior applies when a `Session` is dropped:
 
 ```rust
 {
-    let session = db.session();
+    let mut session = db.session();
     session.begin_transaction()?;
     session.execute("INSERT (:Temp {data: 'test'})")?;
     // session dropped here, transaction auto-rolled back
@@ -318,7 +318,7 @@ In Rust, the same behavior applies when a `Session` is dropped:
 For workflows that need to inspect pending mutations before finalizing, use `prepare_commit()`:
 
 ```rust
-let session = db.session();
+let mut session = db.session();
 session.begin_transaction()?;
 session.execute("INSERT (:Person {name: 'Alix'})")?;
 session.execute("MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)")?;
@@ -390,10 +390,10 @@ tx.execute("RELEASE SAVEPOINT sp1")
 
 ```rust
 // Start transaction
-let tx_id = session.begin_transaction()?;
+session.begin_transaction()?;
 
 // With isolation level
-let tx_id = session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
 
 // Execute queries
 let result = session.execute("MATCH (n) RETURN n")?;

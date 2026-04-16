@@ -13,30 +13,36 @@ use grafeo_engine::GrafeoDB;
 fn setup_with_nulls() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("alpha".into())),
-            ("val", Value::Int64(10)),
-            ("score", Value::Float64(1.5)),
-        ],
-    );
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("beta".into())),
-            ("val", Value::Null),
-            ("score", Value::Float64(2.5)),
-        ],
-    );
-    session.create_node_with_props(
-        &["Item"],
-        [
-            ("name", Value::String("gamma".into())),
-            ("val", Value::Int64(30)),
-            ("score", Value::Null),
-        ],
-    );
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("alpha".into())),
+                ("val", Value::Int64(10)),
+                ("score", Value::Float64(1.5)),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("beta".into())),
+                ("val", Value::Null),
+                ("score", Value::Float64(2.5)),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Item"],
+            [
+                ("name", Value::String("gamma".into())),
+                ("val", Value::Int64(30)),
+                ("score", Value::Null),
+            ],
+        )
+        .unwrap();
     db
 }
 
@@ -190,7 +196,9 @@ fn test_null_comparison_gt_filters_out() {
 fn test_missing_property_is_null() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Thing"], [("name", Value::String("only_name".into()))]);
+    session
+        .create_node_with_props(&["Thing"], [("name", Value::String("only_name".into()))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (t:Thing) RETURN t.nonexistent AS val")
@@ -300,7 +308,9 @@ fn test_case_when_null_goes_to_else() {
 fn test_case_when_with_null_value() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["X"], [("v", Value::Int64(1))]);
+    session
+        .create_node_with_props(&["X"], [("v", Value::Int64(1))])
+        .unwrap();
     let r = session
         .execute(
             "MATCH (x:X) \
@@ -319,9 +329,15 @@ fn test_case_when_with_null_value() {
 fn test_where_value_in_list_with_null() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["N"], [("v", Value::Int64(1))]);
-    session.create_node_with_props(&["N"], [("v", Value::Int64(2))]);
-    session.create_node_with_props(&["N"], [("v", Value::Int64(5))]);
+    session
+        .create_node_with_props(&["N"], [("v", Value::Int64(1))])
+        .unwrap();
+    session
+        .create_node_with_props(&["N"], [("v", Value::Int64(2))])
+        .unwrap();
+    session
+        .create_node_with_props(&["N"], [("v", Value::Int64(5))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:N) WHERE n.v IN [1, NULL, 5] RETURN n.v AS v ORDER BY v")
@@ -362,7 +378,9 @@ fn test_null_arithmetic_returns_null() {
 fn test_int_float_comparison_gt() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Num"], [("v", Value::Int64(3))]);
+    session
+        .create_node_with_props(&["Num"], [("v", Value::Int64(3))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:Num) WHERE n.v > 2.5 RETURN n.v AS v")
@@ -375,7 +393,9 @@ fn test_int_float_comparison_gt() {
 fn test_int_float_comparison_lt() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Num"], [("v", Value::Int64(2))]);
+    session
+        .create_node_with_props(&["Num"], [("v", Value::Int64(2))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:Num) WHERE n.v < 2.5 RETURN n.v AS v")
@@ -387,7 +407,9 @@ fn test_int_float_comparison_lt() {
 fn test_int_float_arithmetic() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Num"], [("v", Value::Int64(3))]);
+    session
+        .create_node_with_props(&["Num"], [("v", Value::Int64(3))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:Num) RETURN n.v + 0.5 AS result")
@@ -408,9 +430,15 @@ fn test_int_float_arithmetic() {
 fn test_sum_mixed_int_float() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Val"], [("n", Value::Int64(10))]);
-    session.create_node_with_props(&["Val"], [("n", Value::Float64(20.5))]);
-    session.create_node_with_props(&["Val"], [("n", Value::Int64(30))]);
+    session
+        .create_node_with_props(&["Val"], [("n", Value::Int64(10))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Val"], [("n", Value::Float64(20.5))])
+        .unwrap();
+    session
+        .create_node_with_props(&["Val"], [("n", Value::Int64(30))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (v:Val) RETURN sum(v.n) AS total")
@@ -433,7 +461,9 @@ fn test_sum_mixed_int_float() {
 fn test_int_equality_with_float() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Num"], [("v", Value::Int64(5))]);
+    session
+        .create_node_with_props(&["Num"], [("v", Value::Int64(5))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:Num) WHERE n.v = 5.0 RETURN n.v AS v")
@@ -446,7 +476,9 @@ fn test_int_equality_with_float() {
 fn test_same_type_int_comparison() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Num"], [("v", Value::Int64(3))]);
+    session
+        .create_node_with_props(&["Num"], [("v", Value::Int64(3))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:Num) WHERE n.v > 2 RETURN n.v AS v")
@@ -460,7 +492,9 @@ fn test_same_type_int_comparison() {
 fn test_same_type_float_comparison() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Num"], [("v", Value::Float64(3.5))]);
+    session
+        .create_node_with_props(&["Num"], [("v", Value::Float64(3.5))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (n:Num) WHERE n.v > 2.0 RETURN n.v AS v")
@@ -480,11 +514,21 @@ fn test_same_type_float_comparison() {
 fn test_distinct_with_nulls() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["D"], [("v", Value::Int64(1))]);
-    session.create_node_with_props(&["D"], [("v", Value::Int64(1))]);
-    session.create_node_with_props(&["D"], [("v", Value::Null)]);
-    session.create_node_with_props(&["D"], [("v", Value::Null)]);
-    session.create_node_with_props(&["D"], [("v", Value::Int64(2))]);
+    session
+        .create_node_with_props(&["D"], [("v", Value::Int64(1))])
+        .unwrap();
+    session
+        .create_node_with_props(&["D"], [("v", Value::Int64(1))])
+        .unwrap();
+    session
+        .create_node_with_props(&["D"], [("v", Value::Null)])
+        .unwrap();
+    session
+        .create_node_with_props(&["D"], [("v", Value::Null)])
+        .unwrap();
+    session
+        .create_node_with_props(&["D"], [("v", Value::Int64(2))])
+        .unwrap();
 
     let r = session
         .execute("MATCH (d:D) RETURN DISTINCT d.v AS v ORDER BY v")
@@ -506,28 +550,36 @@ fn test_distinct_with_nulls() {
 fn test_group_by_null_key() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(
-        &["Sale"],
-        [
-            ("region", Value::String("North".into())),
-            ("amount", Value::Int64(100)),
-        ],
-    );
-    session.create_node_with_props(
-        &["Sale"],
-        [("region", Value::Null), ("amount", Value::Int64(50))],
-    );
-    session.create_node_with_props(
-        &["Sale"],
-        [
-            ("region", Value::String("North".into())),
-            ("amount", Value::Int64(200)),
-        ],
-    );
-    session.create_node_with_props(
-        &["Sale"],
-        [("region", Value::Null), ("amount", Value::Int64(75))],
-    );
+    session
+        .create_node_with_props(
+            &["Sale"],
+            [
+                ("region", Value::String("North".into())),
+                ("amount", Value::Int64(100)),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Sale"],
+            [("region", Value::Null), ("amount", Value::Int64(50))],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Sale"],
+            [
+                ("region", Value::String("North".into())),
+                ("amount", Value::Int64(200)),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Sale"],
+            [("region", Value::Null), ("amount", Value::Int64(75))],
+        )
+        .unwrap();
 
     let r = session
         .execute(

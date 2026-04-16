@@ -1028,6 +1028,8 @@ impl RdfPlanner {
                 && let TripleComponent::Iri(graph_iri) = graph
             {
                 let ng = self.store.graph(graph_iri)?;
+                // reason: triple count will not exceed i64::MAX
+                #[allow(clippy::cast_possible_wrap)]
                 return Some(ng.len() as i64);
             }
             return None;
@@ -1035,6 +1037,8 @@ impl RdfPlanner {
 
         // Fully unbound: ?s ?p ?o
         if s_var && p_var && o_var {
+            // reason: triple count will not exceed i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             return Some(self.store.len() as i64);
         }
 
@@ -1042,6 +1046,8 @@ impl RdfPlanner {
         #[cfg(feature = "ring-index")]
         if let Some(ring) = self.store.ring() {
             let pattern = self.build_triple_pattern(scan);
+            // reason: triple count will not exceed i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             return Some(ring.count(&pattern) as i64);
         }
 
@@ -1050,6 +1056,8 @@ impl RdfPlanner {
             if let TripleComponent::Iri(pred_iri) = &scan.predicate {
                 let stats = self.store.get_or_collect_statistics();
                 if let Some(pred_stats) = stats.get_predicate(pred_iri) {
+                    // reason: predicate triple count will not exceed i64::MAX
+                    #[allow(clippy::cast_possible_wrap)]
                     return Some(pred_stats.triple_count as i64);
                 }
             }
@@ -3409,7 +3417,10 @@ impl Operator for DictResolveOperator {
                     if in_col.is_null(row) {
                         out_col.push_value(Value::Null);
                     } else if let Some(term_id) = in_col.get_int64(row) {
-                        if let Some(term) = self.dictionary.get_term(term_id as u32) {
+                        // reason: term IDs are assigned sequentially from 0 and fit u32
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let tid = term_id as u32;
+                        if let Some(term) = self.dictionary.get_term(tid) {
                             out_col.push_string(term_to_string(term));
                         } else {
                             out_col.push_value(Value::Null);
@@ -4201,6 +4212,8 @@ impl RdfExpressionPredicate {
                     Value::String(s) => s.to_string(),
                     v => value_to_string(&v),
                 };
+                // reason: string length will not exceed i64::MAX
+                #[allow(clippy::cast_possible_wrap)]
                 Some(Value::Int64(text.chars().count() as i64))
             }
 
@@ -4238,11 +4251,15 @@ impl RdfExpressionPredicate {
                     v => value_to_string(&v),
                 };
                 let start = match self.eval_expr(&args[1], chunk, row)? {
+                    // reason: clamped to >= 0 by .max(1) - 1
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     Value::Int64(i) => (i.max(1) - 1) as usize, // SPARQL uses 1-based indexing
                     _ => return None,
                 };
                 let len = if args.len() >= 3 {
                     match self.eval_expr(&args[2], chunk, row)? {
+                        // reason: clamped to >= 0 by .max(0)
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         Value::Int64(i) => Some(i.max(0) as usize),
                         _ => return None,
                     }
@@ -4987,6 +5004,8 @@ impl RdfExpressionPredicate {
                 let state = RAND_STATE.fetch_add(1, Ordering::Relaxed);
                 let mut hasher = DefaultHasher::new();
                 state.hash(&mut hasher);
+                // reason: truncation is intentional for hash seed entropy
+                #[allow(clippy::cast_possible_truncation)]
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0u64, |d| d.as_nanos() as u64)
@@ -5333,7 +5352,11 @@ fn value_to_string(value: &Value) -> String {
             format!("GCounter({total})")
         }
         Value::OnCounter { pos, neg } => {
+            // reason: counter values are small increments, sum will not overflow i64
+            #[allow(clippy::cast_possible_wrap)]
             let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
+            // reason: value is a small counter, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
             format!("OnCounter({})", pos_sum - neg_sum)
         }

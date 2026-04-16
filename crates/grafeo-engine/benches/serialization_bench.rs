@@ -3,6 +3,8 @@
 //! Covers the bincode hot paths used by persistence, WAL, and spill-to-disk.
 //!
 //! Run with: cargo bench -p grafeo-engine --bench serialization_bench
+// Bench values are small known constants
+#![allow(clippy::cast_possible_wrap)]
 
 use std::hint::black_box;
 

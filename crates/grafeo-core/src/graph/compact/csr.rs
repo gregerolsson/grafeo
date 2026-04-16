@@ -150,6 +150,8 @@ impl CsrAdjacency {
             }
         }
 
+        // reason: CSR position index fits u32
+        #[allow(clippy::cast_possible_truncation)]
         Some(lo as u32)
     }
 
@@ -169,6 +171,96 @@ impl CsrAdjacency {
         self.offsets[i]
     }
 
+    /// Reconstructs from pre-built raw parts.
+    ///
+    /// Used by section deserialization.
+    #[must_use]
+    pub fn from_raw_parts(
+        offsets: Vec<u32>,
+        targets: Vec<u32>,
+        edge_data: Option<Vec<u32>>,
+    ) -> Self {
+        Self {
+            offsets,
+            targets,
+            edge_data,
+        }
+    }
+
+    /// Returns the raw offsets array.
+    #[must_use]
+    pub fn offsets(&self) -> &[u32] {
+        &self.offsets
+    }
+
+    /// Returns the raw targets array.
+    #[must_use]
+    pub fn targets(&self) -> &[u32] {
+        &self.targets
+    }
+
+    /// Returns the raw edge_data array, if set.
+    #[must_use]
+    pub fn edge_data(&self) -> Option<&[u32]> {
+        self.edge_data.as_deref()
+    }
+
+    /// Serializes this CSR to a byte buffer.
+    pub fn write_to(&self, buf: &mut Vec<u8>) {
+        // offsets
+        write_usize_as_u32(buf, self.offsets.len());
+        for &o in &self.offsets {
+            buf.extend_from_slice(&o.to_le_bytes());
+        }
+        // targets
+        write_usize_as_u32(buf, self.targets.len());
+        for &t in &self.targets {
+            buf.extend_from_slice(&t.to_le_bytes());
+        }
+        // edge_data
+        match &self.edge_data {
+            Some(ed) => {
+                buf.push(1);
+                write_usize_as_u32(buf, ed.len());
+                for &d in ed {
+                    buf.extend_from_slice(&d.to_le_bytes());
+                }
+            }
+            None => buf.push(0),
+        }
+    }
+
+    /// Deserializes a CSR from a byte buffer at the given offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if data is truncated.
+    pub fn read_from(data: &[u8], pos: &mut usize) -> Result<Self, &'static str> {
+        let offsets_len = read_u32_le(data, pos)? as usize;
+        let mut offsets = Vec::with_capacity(offsets_len);
+        for _ in 0..offsets_len {
+            offsets.push(read_u32_le(data, pos)?);
+        }
+        let targets_len = read_u32_le(data, pos)? as usize;
+        let mut targets = Vec::with_capacity(targets_len);
+        for _ in 0..targets_len {
+            targets.push(read_u32_le(data, pos)?);
+        }
+        let has_edge_data = *data.get(*pos).ok_or("truncated edge_data flag")?;
+        *pos += 1;
+        let edge_data = if has_edge_data == 1 {
+            let ed_len = read_u32_le(data, pos)? as usize;
+            let mut ed = Vec::with_capacity(ed_len);
+            for _ in 0..ed_len {
+                ed.push(read_u32_le(data, pos)?);
+            }
+            Some(ed)
+        } else {
+            None
+        };
+        Ok(Self::from_raw_parts(offsets, targets, edge_data))
+    }
+
     /// Returns the approximate heap memory usage in bytes.
     #[must_use]
     pub fn memory_bytes(&self) -> usize {
@@ -179,6 +271,20 @@ impl CsrAdjacency {
                 .as_ref()
                 .map_or(0, |d| d.len() * std::mem::size_of::<u32>())
     }
+}
+
+fn write_usize_as_u32(buf: &mut Vec<u8>, v: usize) {
+    let n = u32::try_from(v).expect("value exceeds u32::MAX in CSR serialization");
+    buf.extend_from_slice(&n.to_le_bytes());
+}
+
+fn read_u32_le(data: &[u8], pos: &mut usize) -> Result<u32, &'static str> {
+    if *pos + 4 > data.len() {
+        return Err("truncated u32");
+    }
+    let v = u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+    *pos += 4;
+    Ok(v)
 }
 
 #[cfg(test)]

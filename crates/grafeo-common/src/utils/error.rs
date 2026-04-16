@@ -419,7 +419,26 @@ impl QueryError {
     /// Creates a query timeout error.
     #[must_use]
     pub fn timeout() -> Self {
-        Self::new(QueryErrorKind::Execution, "Query exceeded timeout")
+        Self::new(QueryErrorKind::Timeout, "Query exceeded timeout")
+    }
+
+    /// Creates a query timeout error that includes the configured limit.
+    #[must_use]
+    pub fn timeout_with_limit(limit: std::time::Duration) -> Self {
+        let millis = limit.as_millis();
+        let timeout_display = if millis >= 1000 && millis.is_multiple_of(1000) {
+            format!("{}s", millis / 1000)
+        } else {
+            format!("{millis}ms")
+        };
+        Self::new(
+            QueryErrorKind::Timeout,
+            format!("Query exceeded the {timeout_display} timeout"),
+        )
+        .with_hint(
+            "Increase with Config::with_query_timeout() or disable with Config::without_query_timeout()"
+                .to_string(),
+        )
     }
 
     /// Returns the machine-readable error code for this query error.
@@ -430,6 +449,7 @@ impl QueryError {
             QueryErrorKind::Semantic => ErrorCode::QuerySemantic,
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
             QueryErrorKind::Execution => ErrorCode::QueryExecution,
+            QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
         }
     }
 
@@ -508,6 +528,8 @@ pub enum QueryErrorKind {
     Optimization,
     /// Execution error.
     Execution,
+    /// Timeout error (query exceeded configured time limit).
+    Timeout,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -518,6 +540,7 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::Semantic => write!(f, "semantic error"),
             QueryErrorKind::Optimization => write!(f, "optimization error"),
             QueryErrorKind::Execution => write!(f, "execution error"),
+            QueryErrorKind::Timeout => write!(f, "timeout error"),
         }
     }
 }
@@ -590,7 +613,9 @@ mod tests {
     #[test]
     fn test_query_timeout() {
         let err = QueryError::timeout();
-        assert_eq!(err.kind, QueryErrorKind::Execution);
+        assert_eq!(err.kind, QueryErrorKind::Timeout);
+        assert_eq!(err.error_code(), ErrorCode::QueryTimeout);
+        assert!(err.error_code().is_retryable());
         assert!(err.message.contains("timeout"));
     }
 

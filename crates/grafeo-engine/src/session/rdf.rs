@@ -51,6 +51,8 @@ impl Session {
             factorized_execution: cfg.factorized_execution,
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
+            max_property_size: cfg.max_property_size,
+            buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),
@@ -87,7 +89,7 @@ impl Session {
     #[cfg(feature = "graphql")]
     pub fn execute_graphql_rdf(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{
-            Executor, optimizer::Optimizer, planner::rdf::RdfPlanner, translators::graphql_rdf,
+            optimizer::Optimizer, planner::rdf::RdfPlanner, translators::graphql_rdf,
         };
 
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
@@ -111,8 +113,7 @@ impl Session {
             planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
-        let executor = Executor::with_columns(physical_plan.columns.clone())
-            .with_deadline(self.query_deadline());
+        let executor = self.make_executor(physical_plan.columns.clone());
         let result = executor.execute(physical_plan.operator.as_mut());
 
         #[cfg(feature = "metrics")]
@@ -139,7 +140,7 @@ impl Session {
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            Executor, optimizer::Optimizer, planner::rdf::RdfPlanner, processor::substitute_params,
+            optimizer::Optimizer, planner::rdf::RdfPlanner, processor::substitute_params,
             translators::graphql_rdf,
         };
 
@@ -177,8 +178,7 @@ impl Session {
             planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
-        let executor = Executor::with_columns(physical_plan.columns.clone())
-            .with_deadline(self.query_deadline());
+        let executor = self.make_executor(physical_plan.columns.clone());
         let result = executor.execute(physical_plan.operator.as_mut());
 
         #[cfg(feature = "metrics")]
@@ -200,9 +200,7 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
     pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
-        use crate::query::{
-            Executor, optimizer::Optimizer, planner::rdf::RdfPlanner, translators::sparql,
-        };
+        use crate::query::{optimizer::Optimizer, planner::rdf::RdfPlanner, translators::sparql};
 
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start_time = Instant::now();
@@ -232,8 +230,7 @@ impl Session {
             planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
-        let executor = Executor::with_columns(physical_plan.columns.clone())
-            .with_deadline(self.query_deadline());
+        let executor = self.make_executor(physical_plan.columns.clone());
         let result = executor.execute(physical_plan.operator.as_mut());
 
         #[cfg(feature = "metrics")]
@@ -260,7 +257,7 @@ impl Session {
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            Executor, optimizer::Optimizer, planner::rdf::RdfPlanner, processor::substitute_params,
+            optimizer::Optimizer, planner::rdf::RdfPlanner, processor::substitute_params,
             translators::sparql,
         };
 
@@ -294,8 +291,7 @@ impl Session {
             planner.with_cdc_log(Some(Arc::clone(&self.cdc_log)), self.store.current_epoch());
         let mut physical_plan = planner.plan(&optimized_plan)?;
 
-        let executor = Executor::with_columns(physical_plan.columns.clone())
-            .with_deadline(self.query_deadline());
+        let executor = self.make_executor(physical_plan.columns.clone());
         let result = executor.execute(physical_plan.operator.as_mut());
 
         #[cfg(feature = "metrics")]

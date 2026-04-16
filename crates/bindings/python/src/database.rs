@@ -2975,6 +2975,8 @@ impl PyGrafeoDB {
 
         let count = count_nodes_with_label(&session, &safe_label) - before_count;
 
+        // reason: .max(0) guarantees non-negative, so cast to u64 is safe
+        #[allow(clippy::cast_sign_loss)]
         Ok(count.max(0) as u64)
     }
 
@@ -3021,6 +3023,8 @@ impl PyGrafeoDB {
 
         let count = count_nodes_with_label(&session, &safe_label) - before_count;
 
+        // reason: .max(0) guarantees non-negative, so cast to u64 is safe
+        #[allow(clippy::cast_sign_loss)]
         Ok(count.max(0) as u64)
     }
 
@@ -4047,6 +4051,7 @@ fn value_to_node_id(value: &Value, col_name: &str) -> PyResult<NodeId> {
                     "negative node ID {i} in column '{col_name}'"
                 )))
             } else {
+                // reason: negative values rejected above, cast is safe
                 #[allow(clippy::cast_sign_loss)]
                 Ok(NodeId(*i as u64))
             }
@@ -4056,7 +4061,12 @@ fn value_to_node_id(value: &Value, col_name: &str) -> PyResult<NodeId> {
                 Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "invalid node ID {f} in column '{col_name}' (must be a non-negative integer)"
                 )))
+            } else if *f >= u64::MAX as f64 {
+                Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "node ID {f} in column '{col_name}' exceeds u64 range"
+                )))
             } else {
+                // reason: negative, fractional, and out-of-range values rejected above
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 Ok(NodeId(*f as u64))
             }

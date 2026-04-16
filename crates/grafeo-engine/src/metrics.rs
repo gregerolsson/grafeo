@@ -91,6 +91,8 @@ impl AtomicHistogram {
             return 0.0;
         }
 
+        // reason: p is in 0..1 and total is non-negative, so product is always non-negative
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target = (p * total as f64).ceil() as u64;
         let mut cumulative: u64 = 0;
 

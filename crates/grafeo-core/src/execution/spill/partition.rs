@@ -108,7 +108,11 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     #[must_use]
     pub fn partition_for(&self, key: &[Value]) -> usize {
         let hash = hash_key(key);
-        hash as usize % self.num_partitions
+        // reason: on 64-bit targets u64 == usize; on 32-bit the modulo handles overflow
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            hash as usize % self.num_partitions
+        }
     }
 
     /// Updates access time for a partition.
@@ -163,17 +167,23 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         let mut reader = spill_file.reader()?;
         let mut adapter = SpillReaderAdapter(&mut reader);
 
+        // reason: deserialized counts are bounded by available data
+        #[allow(clippy::cast_possible_truncation)]
         let num_entries = read_u64(&mut adapter)? as usize;
         let mut partition = HashMap::with_capacity(num_entries);
 
         for _ in 0..num_entries {
             // Read key
+            // reason: deserialized lengths are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let key_len = read_u64(&mut adapter)? as usize;
             let mut key_buf = vec![0u8; key_len];
             adapter.read_exact(&mut key_buf)?;
             let serialized_key = SerializedKey(key_buf);
 
             // Read number of key columns
+            // reason: deserialized counts are bounded by available data
+            #[allow(clippy::cast_possible_truncation)]
             let num_key_columns = read_u64(&mut adapter)? as usize;
 
             // Read value
@@ -263,6 +273,8 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         self.partition_sizes[partition_idx] = partition.len();
         self.spill_files[partition_idx] = Some(spill_file);
 
+        // reason: bytes written is bounded by available disk space, fits usize
+        #[allow(clippy::cast_possible_truncation)]
         Ok(bytes_written as usize)
     }
 

@@ -60,6 +60,8 @@ impl<'de> serde::Deserialize<'de> for SuccinctPermutation {
         // and that each value appears exactly once (valid permutation)
         if raw.n > 0 {
             let n = raw.n;
+            // reason: permutation size fits u32 for practical data sizes
+            #[allow(clippy::cast_possible_truncation)]
             let n32 = n as u32;
 
             let mut forward_seen = vec![false; n];
@@ -94,6 +96,8 @@ impl<'de> serde::Deserialize<'de> for SuccinctPermutation {
 
             // Validate that forward and inverse are actually inverses of each other
             for (i, &fwd) in raw.forward.iter().enumerate() {
+                // reason: permutation index fits u32
+                #[allow(clippy::cast_possible_truncation)]
                 if raw.inverse[fwd as usize] != i as u32 {
                     return Err(D::Error::custom(format!(
                         "inverse[forward[{i}]] != {i}: forward and inverse are inconsistent"
@@ -130,12 +134,24 @@ impl SuccinctPermutation {
         }
 
         // Build forward mapping
-        let forward: Vec<u32> = permutation.iter().map(|&x| x as u32).collect();
+        let forward: Vec<u32> = permutation
+            .iter()
+            .map(|&x| {
+                // reason: permutation values fit u32
+                #[allow(clippy::cast_possible_truncation)]
+                let v = x as u32;
+                v
+            })
+            .collect();
 
         // Build inverse mapping
         let mut inverse = vec![0u32; n];
         for (i, &target) in permutation.iter().enumerate() {
-            inverse[target] = i as u32;
+            // reason: index fits u32 for practical permutation sizes
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                inverse[target] = i as u32;
+            }
         }
 
         Self {

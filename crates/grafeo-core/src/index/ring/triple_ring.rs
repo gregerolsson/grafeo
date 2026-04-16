@@ -60,6 +60,8 @@ impl TermDictionary {
             return id;
         }
 
+        // reason: term dictionary size fits u32
+        #[allow(clippy::cast_possible_truncation)]
         let id = self.id_to_term.len() as u32;
         self.id_to_term.push(Arc::clone(&term));
         self.term_to_id.insert(term, id);
@@ -246,8 +248,14 @@ impl TripleRing {
             return None;
         }
 
+        // reason: dictionary IDs fit u32
+        #[allow(clippy::cast_possible_truncation)]
         let s_id = self.subjects.access(index) as u32;
+        // reason: dictionary IDs fit u32
+        #[allow(clippy::cast_possible_truncation)]
         let p_id = self.predicates.access(index) as u32;
+        // reason: dictionary IDs fit u32
+        #[allow(clippy::cast_possible_truncation)]
         let o_id = self.objects.access(index) as u32;
 
         let s = self.dict.get_term(s_id)?.clone();
@@ -379,6 +387,8 @@ impl TripleRing {
                 // Check if predicate and object also match at this position
                 let p = self.predicates.access(pos);
                 let o = self.objects.access(pos);
+                // reason: wavelet tree values are dictionary IDs, fit u32
+                #[allow(clippy::cast_possible_truncation)]
                 if p as u32 == p_id && o as u32 == o_id {
                     return true;
                 }

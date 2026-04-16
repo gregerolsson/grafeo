@@ -14,12 +14,21 @@ fn chain_graph() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let na = session.create_node_with_props(&["Node"], [("name", Value::String("A".into()))]);
-    let nb = session.create_node_with_props(&["Node"], [("name", Value::String("B".into()))]);
-    let nc = session.create_node_with_props(&["Node"], [("name", Value::String("C".into()))]);
-    let and = session.create_node_with_props(&["Node"], [("name", Value::String("D".into()))]);
-    let ne =
-        session.create_node_with_props(&["Node", "Special"], [("name", Value::String("E".into()))]);
+    let na = session
+        .create_node_with_props(&["Node"], [("name", Value::String("A".into()))])
+        .unwrap();
+    let nb = session
+        .create_node_with_props(&["Node"], [("name", Value::String("B".into()))])
+        .unwrap();
+    let nc = session
+        .create_node_with_props(&["Node"], [("name", Value::String("C".into()))])
+        .unwrap();
+    let and = session
+        .create_node_with_props(&["Node"], [("name", Value::String("D".into()))])
+        .unwrap();
+    let ne = session
+        .create_node_with_props(&["Node", "Special"], [("name", Value::String("E".into()))])
+        .unwrap();
 
     session.create_edge(na, nb, "LINK");
     session.create_edge(nb, nc, "LINK");
@@ -225,8 +234,12 @@ fn test_merge_edge_pattern() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    session.create_node_with_props(&["City"], [("name", Value::String("Amsterdam".into()))]);
-    session.create_node_with_props(&["City"], [("name", Value::String("Berlin".into()))]);
+    session
+        .create_node_with_props(&["City"], [("name", Value::String("Amsterdam".into()))])
+        .unwrap();
+    session
+        .create_node_with_props(&["City"], [("name", Value::String("Berlin".into()))])
+        .unwrap();
 
     session
         .execute(
@@ -268,8 +281,12 @@ fn test_path_length() {
 fn test_edge_property_filter() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    let a = session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-    let b = session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
+    let a = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
+    let b = session
+        .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+        .unwrap();
     let e = session.create_edge(a, b, "RATED");
     db.set_edge_property(e, "stars", Value::Int64(5));
 
@@ -321,7 +338,9 @@ fn test_path_with_intermediate_filter() {
 fn test_delete_node() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Temp"], [("x", Value::Int64(1))]);
+    session
+        .create_node_with_props(&["Temp"], [("x", Value::Int64(1))])
+        .unwrap();
     session.execute("MATCH (t:Temp) DETACH DELETE t").unwrap();
     let r = session
         .execute("MATCH (t:Temp) RETURN count(t) AS cnt")
@@ -337,7 +356,9 @@ fn test_delete_node() {
 fn test_set_multiple_properties() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    session.create_node_with_props(&["Item"], [("name", Value::String("widget".into()))]);
+    session
+        .create_node_with_props(&["Item"], [("name", Value::String("widget".into()))])
+        .unwrap();
     session
         .execute("MATCH (i:Item) SET i.price = 9.99, i.stock = 100")
         .unwrap();

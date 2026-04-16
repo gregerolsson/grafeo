@@ -305,14 +305,20 @@ impl GqlTranslator {
                 if let Some(skip_expr) = &return_clause.skip
                     && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
                 {
-                    plan = wrap_skip(plan, *n as usize);
+                    // reason: SKIP/LIMIT literals are non-negative in practice
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let count = *n as usize;
+                    plan = wrap_skip(plan, count);
                 }
 
                 // Apply LIMIT
                 if let Some(limit_expr) = &return_clause.limit
                     && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
                 {
-                    plan = wrap_limit(plan, *n as usize);
+                    // reason: SKIP/LIMIT literals are non-negative in practice
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let count = *n as usize;
+                    plan = wrap_limit(plan, count);
                 }
             } else if !return_clause.items.is_empty() {
                 let return_items = return_clause
@@ -358,7 +364,10 @@ impl GqlTranslator {
                 if let Some(skip_expr) = &return_clause.skip
                     && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
                 {
-                    plan = wrap_skip(plan, *n as usize);
+                    // reason: SKIP/LIMIT literals are non-negative in practice
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let count = *n as usize;
+                    plan = wrap_skip(plan, count);
                 }
             }
 
@@ -367,7 +376,10 @@ impl GqlTranslator {
                 && let Some(limit_expr) = &return_clause.limit
                 && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
             {
-                plan = wrap_limit(plan, *n as usize);
+                // reason: SKIP/LIMIT literals are non-negative in practice
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let count = *n as usize;
+                plan = wrap_limit(plan, count);
             }
         }
 
@@ -1013,7 +1025,10 @@ impl GqlTranslator {
         match expr {
             ast::Expression::Literal(ast::Literal::Integer(i)) => {
                 // Clamp negative values to 0 (LIMIT -1 returns empty, not an error)
-                Ok(CountExpr::Literal((*i).max(0) as usize))
+                // reason: clamped to >= 0 by .max(0)
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let n = (*i).max(0) as usize;
+                Ok(CountExpr::Literal(n))
             }
             ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
             _ => Err(Error::Query(QueryError::new(

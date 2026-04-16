@@ -85,8 +85,13 @@ pub fn value_to_js(value: &Value) -> JsValue {
             wrapper.into()
         }
         Value::OnCounter { pos, neg } => {
-            let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-            let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
+            let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+            let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+            let net = if pos_sum >= neg_sum {
+                (pos_sum - neg_sum) as f64
+            } else {
+                -((neg_sum - pos_sum) as f64)
+            };
             let wrapper = Object::new();
             let _ = Reflect::set(
                 &wrapper,
@@ -96,7 +101,7 @@ pub fn value_to_js(value: &Value) -> JsValue {
             let _ = Reflect::set(
                 &wrapper,
                 &JsValue::from_str("$value"),
-                &JsValue::from_f64((pos_sum - neg_sum) as f64),
+                &JsValue::from_f64(net),
             );
             wrapper.into()
         }

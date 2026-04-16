@@ -144,6 +144,18 @@ impl NodeTable {
         self.columns.keys().cloned().collect()
     }
 
+    /// Returns all columns (for serialization).
+    #[must_use]
+    pub fn columns(&self) -> &FxHashMap<PropertyKey, ColumnCodec> {
+        &self.columns
+    }
+
+    /// Returns all zone maps (for serialization).
+    #[must_use]
+    pub fn zone_maps(&self) -> &FxHashMap<PropertyKey, ZoneMap> {
+        &self.zone_maps
+    }
+
     /// Returns an estimate of heap memory used by all columns in bytes.
     #[must_use]
     pub fn memory_bytes(&self) -> usize {

@@ -12,6 +12,7 @@ use thiserror::Error;
 use super::CompactStore;
 use super::column::ColumnCodec;
 use super::csr::CsrAdjacency;
+use super::id::MAX_TABLE_ID;
 use super::node_table::NodeTable;
 use super::rel_table::RelTable;
 use super::schema::{ColumnDef, ColumnType, EdgeSchema, TableSchema};
@@ -56,6 +57,16 @@ pub enum CompactStoreError {
         value: u64,
         /// Maximum allowed value.
         max: u64,
+    },
+    /// The number of tables exceeds the compact ID encoding limit (15-bit table ID).
+    #[error("table count {count} exceeds compact ID limit of {max} ({kind} tables)")]
+    TableCountOverflow {
+        /// Kind of table ("node" or "relationship").
+        kind: &'static str,
+        /// Actual table count.
+        count: usize,
+        /// Maximum allowed table count.
+        max: u16,
     },
 }
 
@@ -348,12 +359,35 @@ impl CompactStoreBuilder {
             }
         }
 
+        // Step 2c: Validate table counts fit within the 15-bit compact ID encoding.
+        let max_tables = usize::from(MAX_TABLE_ID) + 1; // 32768
+        if self.node_table_builders.len() > max_tables {
+            return Err(CompactStoreError::TableCountOverflow {
+                kind: "node",
+                count: self.node_table_builders.len(),
+                max: MAX_TABLE_ID,
+            });
+        }
+        if self.rel_table_builders.len() > max_tables {
+            return Err(CompactStoreError::TableCountOverflow {
+                kind: "relationship",
+                count: self.rel_table_builders.len(),
+                max: MAX_TABLE_ID,
+            });
+        }
+
         // Step 3: Assign sequential table IDs.
         let mut label_to_table_id: FxHashMap<ArcStr, u16> = FxHashMap::default();
         let mut table_id_to_label: Vec<ArcStr> = Vec::new();
 
         for (idx, ntb) in self.node_table_builders.iter().enumerate() {
-            let table_id = idx as u16;
+            // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
+            let table_id =
+                u16::try_from(idx).map_err(|_| CompactStoreError::TableCountOverflow {
+                    kind: "node",
+                    count: idx,
+                    max: MAX_TABLE_ID,
+                })?;
             label_to_table_id.insert(ntb.label.clone(), table_id);
             table_id_to_label.push(ntb.label.clone());
         }
@@ -363,7 +397,13 @@ impl CompactStoreBuilder {
             Vec::with_capacity(self.node_table_builders.len());
 
         for (idx, ntb) in self.node_table_builders.into_iter().enumerate() {
-            let table_id = idx as u16;
+            // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
+            let table_id =
+                u16::try_from(idx).map_err(|_| CompactStoreError::TableCountOverflow {
+                    kind: "node",
+                    count: idx,
+                    max: MAX_TABLE_ID,
+                })?;
             let row_count = ntb.len.unwrap_or(0);
 
             // Build column definitions for the schema.
@@ -392,7 +432,13 @@ impl CompactStoreBuilder {
         let mut rel_table_id_to_type: Vec<ArcStr> = Vec::new();
 
         for (idx, rtb) in self.rel_table_builders.into_iter().enumerate() {
-            let rel_table_id = idx as u16;
+            // Validated in Step 2c: count <= MAX_TABLE_ID + 1, so idx fits u16.
+            let rel_table_id =
+                u16::try_from(idx).map_err(|_| CompactStoreError::TableCountOverflow {
+                    kind: "relationship",
+                    count: idx,
+                    max: MAX_TABLE_ID,
+                })?;
             rel_table_id_to_type.push(rtb.edge_type.clone());
 
             // Resolve labels to table IDs.
@@ -438,6 +484,8 @@ impl CompactStoreBuilder {
                                 ))
                             },
                         )?;
+                        // reason: local index within CSR neighbors fits u32
+                        #[allow(clippy::cast_possible_truncation)]
                         mapping.push(fwd_start + local_idx as u32);
                     }
                     bwd_csr.set_edge_data(mapping);
@@ -551,6 +599,8 @@ fn compute_zone_map_u64(values: &[u64]) -> ZoneMap {
             ..ZoneMap::default()
         };
     }
+    // reason: max <= i64::MAX checked above, min <= max
+    #[allow(clippy::cast_possible_wrap)]
     ZoneMap {
         min: Some(Value::Int64(min as i64)),
         max: Some(Value::Int64(max as i64)),
@@ -684,6 +734,8 @@ pub fn from_graph_store(
             };
 
             let (_, ref mut node_ids_vec, ref mut props_map) = label_data[entry_idx];
+            // reason: node offset within a table fits u32
+            #[allow(clippy::cast_possible_truncation)]
             let offset = node_ids_vec.len() as u32;
             node_ids_vec.push(nid);
             id_map.insert(nid, (label_key, offset));
@@ -725,6 +777,8 @@ pub fn from_graph_store(
                         let u64_values: Vec<u64> = values
                             .iter()
                             .map(|v| match v {
+                                // reason: ID encoding: i64 <-> u64 for bit-packed storage
+                                #[allow(clippy::cast_sign_loss)]
                                 Value::Int64(n) => *n as u64,
                                 _ => 0,
                             })
@@ -846,6 +900,8 @@ pub fn from_graph_store(
                                 let u64_values: Vec<u64> = values
                                     .iter()
                                     .map(|v| match v {
+                                        // reason: ID encoding: i64 <-> u64 for bit-packed storage
+                                        #[allow(clippy::cast_sign_loss)]
                                         Value::Int64(n) => *n as u64,
                                         _ => 0,
                                     })
@@ -887,6 +943,155 @@ pub fn from_graph_store(
     }
 
     builder.build()
+}
+
+/// Builds a [`CompactStore`] from any [`GraphStore`](crate::graph::GraphStore) with original ID preservation.
+///
+/// Same columnar conversion as [`from_graph_store`], but the resulting store
+/// keeps a bidirectional mapping between the original `NodeId`/`EdgeId` values
+/// and the internal compact positions. This enables layered storage where an
+/// overlay store shares the same ID namespace.
+///
+/// # Errors
+///
+/// Same as [`from_graph_store`].
+pub fn from_graph_store_preserving_ids(
+    store: &dyn crate::graph::traits::GraphStore,
+) -> Result<CompactStore, CompactStoreError> {
+    let mut compact = from_graph_store(store)?;
+
+    // ── Build node ID maps (replicate the label grouping logic) ────
+
+    let labels = store.all_labels();
+    if labels.is_empty() {
+        compact.set_id_maps(
+            FxHashMap::default(),
+            FxHashMap::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        return Ok(compact);
+    }
+
+    let mut node_id_map: FxHashMap<grafeo_common::types::NodeId, (u16, u64)> = FxHashMap::default();
+    let num_tables = compact.node_tables_by_id.len();
+    let mut node_offset_to_id: Vec<Vec<grafeo_common::types::NodeId>> =
+        vec![Vec::new(); num_tables];
+
+    // Track per-label-key offset counters (same order as from_graph_store step 1).
+    let mut seen: FxHashSet<grafeo_common::types::NodeId> = FxHashSet::default();
+    let mut label_key_offsets: FxHashMap<ArcStr, u32> = FxHashMap::default();
+
+    for label in &labels {
+        let node_ids = store.nodes_by_label(label);
+        for &nid in &node_ids {
+            if !seen.insert(nid) {
+                continue;
+            }
+            let Some(node) = store.get_node(nid) else {
+                continue;
+            };
+
+            let label_key: ArcStr = if node.labels.len() <= 1 {
+                ArcStr::from(label.as_str())
+            } else {
+                let mut sorted: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+                sorted.sort_unstable();
+                ArcStr::from(sorted.join("|"))
+            };
+
+            let offset = label_key_offsets.entry(label_key.clone()).or_insert(0);
+            let current_offset = *offset;
+            *offset += 1;
+
+            if let Some(&table_id) = compact.label_to_table_id.get(&label_key) {
+                node_id_map.insert(nid, (table_id, u64::from(current_offset)));
+                if let Some(rev) = node_offset_to_id.get_mut(table_id as usize) {
+                    // Extend if needed (offsets should be sequential).
+                    while rev.len() <= current_offset as usize {
+                        rev.push(grafeo_common::types::NodeId::INVALID);
+                    }
+                    rev[current_offset as usize] = nid;
+                }
+            }
+        }
+    }
+
+    // ── Build edge ID maps ─────────────────────────────────────────
+
+    // Build (edge_type, src_table_id, dst_table_id) -> rel_table_id lookup.
+    type RelKey = (ArcStr, u16, u16);
+    let mut rel_key_to_id: FxHashMap<RelKey, u16> = FxHashMap::default();
+    for (idx, rt) in compact.rel_tables_by_id.iter().enumerate() {
+        let key = (rt.edge_type().clone(), rt.src_table_id(), rt.dst_table_id());
+        let Ok(rel_id) = u16::try_from(idx) else {
+            continue;
+        };
+        rel_key_to_id.insert(key, rel_id);
+    }
+
+    // Collect all edges grouped by (edge_type, src_table, dst_table), tracking
+    // original EdgeId and (src_offset, dst_offset) for each.
+    type EdgeGroupEntry = (grafeo_common::types::EdgeId, u32, u32); // (original_eid, src_off, dst_off)
+    let mut edge_groups: FxHashMap<RelKey, Vec<EdgeGroupEntry>> = FxHashMap::default();
+
+    let mut seen_edges: FxHashSet<grafeo_common::types::EdgeId> = FxHashSet::default();
+    for &nid in node_id_map.keys() {
+        let outgoing = store.edges_from(nid, crate::graph::Direction::Outgoing);
+        for (_target_nid, edge_id) in outgoing {
+            if !seen_edges.insert(edge_id) {
+                continue;
+            }
+            let Some(edge) = store.get_edge(edge_id) else {
+                continue;
+            };
+            let Some(&(src_tid, src_off)) = node_id_map.get(&edge.src) else {
+                continue;
+            };
+            let Some(&(dst_tid, dst_off)) = node_id_map.get(&edge.dst) else {
+                continue;
+            };
+
+            let key: RelKey = (edge.edge_type.clone(), src_tid, dst_tid);
+            edge_groups.entry(key).or_default().push((
+                edge_id,
+                u32::try_from(src_off).unwrap_or(0),
+                u32::try_from(dst_off).unwrap_or(0),
+            ));
+        }
+    }
+
+    // Sort each group by (src_offset, dst_offset) to match CSR construction order,
+    // then build the edge_id_map from the resulting positions.
+    let num_rel_tables = compact.rel_tables_by_id.len();
+    let mut edge_id_map: FxHashMap<grafeo_common::types::EdgeId, (u16, u64)> = FxHashMap::default();
+    let mut edge_offset_to_id: Vec<Vec<grafeo_common::types::EdgeId>> =
+        vec![Vec::new(); num_rel_tables];
+
+    for (key, mut entries) in edge_groups {
+        let Some(&rel_table_id) = rel_key_to_id.get(&key) else {
+            continue;
+        };
+        // Sort by (src_offset, dst_offset) to match CSR order.
+        entries.sort_by_key(|&(_, src, dst)| (src, dst));
+
+        let rev = &mut edge_offset_to_id[rel_table_id as usize];
+        for (csr_pos, (original_eid, _src, _dst)) in entries.iter().enumerate() {
+            edge_id_map.insert(*original_eid, (rel_table_id, csr_pos as u64));
+            while rev.len() <= csr_pos {
+                rev.push(grafeo_common::types::EdgeId::INVALID);
+            }
+            rev[csr_pos] = *original_eid;
+        }
+    }
+
+    compact.set_id_maps(
+        node_id_map,
+        edge_id_map,
+        node_offset_to_id,
+        edge_offset_to_id,
+    );
+    Ok(compact)
 }
 
 /// Infers the columnar encoding type from a slice of [`Value`]s.
@@ -1507,5 +1712,173 @@ mod tests {
             (unknown - 0.0).abs() < f64::EPSILON,
             "Unknown edge type should return 0.0 avg degree"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Zone map helper tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_zone_map_u64_values_exceeding_i64_max() {
+        // Values that exceed i64::MAX should produce a zone map without
+        // min/max bounds (conservative, no pruning).
+        let values = vec![0u64, i64::MAX as u64 + 1, u64::MAX];
+        let zm = compute_zone_map_u64(&values);
+        assert!(
+            zm.min.is_none(),
+            "min should be None when values overflow i64"
+        );
+        assert!(
+            zm.max.is_none(),
+            "max should be None when values overflow i64"
+        );
+        assert_eq!(zm.row_count, 3);
+    }
+
+    #[test]
+    fn test_zone_map_u64_within_i64_range() {
+        let values = vec![10u64, 20, 30];
+        let zm = compute_zone_map_u64(&values);
+        assert_eq!(zm.min, Some(Value::Int64(10)));
+        assert_eq!(zm.max, Some(Value::Int64(30)));
+        assert_eq!(zm.null_count, 0);
+        assert_eq!(zm.row_count, 3);
+    }
+
+    #[test]
+    fn test_zone_map_u64_empty_slice() {
+        let zm = compute_zone_map_u64(&[]);
+        assert!(zm.min.is_none());
+        assert!(zm.max.is_none());
+        assert_eq!(zm.row_count, 0);
+    }
+
+    #[test]
+    fn test_zone_map_strings_empty_slice() {
+        let zm = compute_zone_map_strings(&[]);
+        assert!(zm.min.is_none());
+        assert!(zm.max.is_none());
+        assert_eq!(zm.row_count, 0);
+    }
+
+    #[test]
+    fn test_zone_map_strings_sorted() {
+        let values = &["Paris", "Amsterdam", "Berlin"];
+        let zm = compute_zone_map_strings(values);
+        assert_eq!(zm.min, Some(Value::from("Amsterdam")));
+        assert_eq!(zm.max, Some(Value::from("Paris")));
+        assert_eq!(zm.row_count, 3);
+    }
+
+    #[test]
+    fn test_zone_map_bool_all_true() {
+        let values = &[true, true, true];
+        let zm = compute_zone_map_bool(values);
+        // All true: min = true, max = true.
+        assert_eq!(zm.min, Some(Value::Bool(true)));
+        assert_eq!(zm.max, Some(Value::Bool(true)));
+        assert_eq!(zm.row_count, 3);
+    }
+
+    #[test]
+    fn test_zone_map_bool_all_false() {
+        let values = &[false, false];
+        let zm = compute_zone_map_bool(values);
+        // All false: min = false, max = false.
+        assert_eq!(zm.min, Some(Value::Bool(false)));
+        assert_eq!(zm.max, Some(Value::Bool(false)));
+        assert_eq!(zm.row_count, 2);
+    }
+
+    #[test]
+    fn test_zone_map_bool_mixed() {
+        let values = &[false, true, false];
+        let zm = compute_zone_map_bool(values);
+        assert_eq!(zm.min, Some(Value::Bool(false)));
+        assert_eq!(zm.max, Some(Value::Bool(true)));
+        assert_eq!(zm.row_count, 3);
+    }
+
+    #[test]
+    fn test_zone_map_bool_empty() {
+        let zm = compute_zone_map_bool(&[]);
+        assert!(zm.min.is_none());
+        assert!(zm.max.is_none());
+        assert_eq!(zm.row_count, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Type inference edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_type_string_values() {
+        assert_eq!(
+            infer_type_from_values(&[Value::from("Alix"), Value::from("Gus")]),
+            InferredType::Dict
+        );
+    }
+
+    #[test]
+    fn test_infer_type_int_and_null() {
+        // Nulls are skipped, so pure Int64 with nulls remains BitPacked.
+        assert_eq!(
+            infer_type_from_values(&[Value::Int64(0), Value::Null, Value::Int64(5)]),
+            InferredType::BitPacked
+        );
+    }
+
+    #[test]
+    fn test_infer_type_bool_and_null() {
+        // Nulls are skipped, so pure Bool with nulls remains Bitmap.
+        assert_eq!(
+            infer_type_from_values(&[Value::Bool(true), Value::Null]),
+            InferredType::Bitmap
+        );
+    }
+
+    #[test]
+    fn test_infer_type_empty_values() {
+        // Empty slice: no non-null values seen, defaults to Dict.
+        assert_eq!(infer_type_from_values(&[]), InferredType::Dict);
+    }
+
+    // -------------------------------------------------------------------
+    // from_graph_store: null properties and multi-label nodes
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_from_graph_store_nodes_with_no_properties() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+
+        // Nodes with no properties at all.
+        store.create_node(&["Marker"]);
+        store.create_node(&["Marker"]);
+
+        let compact = from_graph_store(&store).unwrap();
+        let ids = compact.nodes_by_label("Marker");
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_from_graph_store_multi_label_sorted_key() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+
+        // Labels "Zebra" and "Alpha" should be sorted to "Alpha|Zebra".
+        let a = store.create_node(&["Zebra", "Alpha"]);
+        store.set_node_property(a, "name", Value::from("Butch"));
+
+        let compact = from_graph_store(&store).unwrap();
+        let ids = compact.nodes_by_label("Alpha|Zebra");
+        assert_eq!(ids.len(), 1);
+
+        let val = compact
+            .get_node_property(ids[0], &PropertyKey::new("name"))
+            .unwrap();
+        assert_eq!(val, Value::String(ArcStr::from("Butch")));
     }
 }

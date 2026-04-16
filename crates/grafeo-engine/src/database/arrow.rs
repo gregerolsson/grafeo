@@ -129,6 +129,8 @@ fn build_array(column: &[&Value], target_type: &DataType) -> Result<ArrayRef, Ar
             for value in column {
                 match value {
                     Value::Int64(i) => builder.append_value(*i),
+                    // reason: intentional lossy f64-to-i64 coercion for Arrow column
+                    #[allow(clippy::cast_possible_truncation)]
                     Value::Float64(f) => builder.append_value(*f as i64),
                     Value::Null => builder.append_null(),
                     _ => builder.append_null(),
@@ -208,6 +210,8 @@ fn build_array(column: &[&Value], target_type: &DataType) -> Result<ArrayRef, Ar
             let mut builder = Int64Builder::with_capacity(len);
             for value in column {
                 match value {
+                    // reason: time-of-day nanos < 86_400e9, well within i64 range
+                    #[allow(clippy::cast_possible_wrap)]
                     Value::Time(t) => builder.append_value(t.as_nanos() as i64),
                     Value::Null => builder.append_null(),
                     _ => builder.append_null(),
@@ -222,6 +226,8 @@ fn build_array(column: &[&Value], target_type: &DataType) -> Result<ArrayRef, Ar
             Ok(Arc::new(arrow_array::Time64NanosecondArray::from(data)) as ArrayRef)
         }
         DataType::FixedSizeList(_, dim) => {
+            // reason: Arrow FixedSizeList dimension is always non-negative
+            #[allow(clippy::cast_sign_loss)]
             let dim_usize = *dim as usize;
             let mut float_builder = Float32Builder::with_capacity(len * dim_usize);
             let mut null_mask = Vec::with_capacity(len);

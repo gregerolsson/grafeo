@@ -295,7 +295,11 @@ impl ScalarQuantizer {
             .enumerate()
             .map(|(i, &v)| {
                 let normalized = (v - self.min[i]) * self.scale[i];
-                normalized.clamp(0.0, 255.0) as u8
+                // reason: clamped to [0, 255] by clamp(), safe to cast to u8
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    normalized.clamp(0.0, 255.0) as u8
+                }
             })
             .collect()
     }
@@ -799,7 +803,11 @@ impl ProductQuantizer {
 
                 if dist < best_dist {
                     best_dist = dist;
-                    best_k = k as u8;
+                    // reason: k < num_centroids which is typically <= 256
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        best_k = k as u8;
+                    }
                 }
             }
 
@@ -937,7 +945,8 @@ pub fn hamming_distance_simd(a: &[u64], b: &[u64]) -> u32 {
             let xor = x ^ y;
             // Safety: popcnt is available on virtually all x86_64 CPUs since Nehalem (2008).
             // This is a well-understood CPU intrinsic with no memory safety implications.
-            #[allow(unsafe_code)]
+            // reason: bit-level reinterpretation for popcount, and popcount result fits u32
+            #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
             unsafe {
                 std::arch::x86_64::_popcnt64(xor as i64) as u32
             }

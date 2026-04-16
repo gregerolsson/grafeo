@@ -220,8 +220,13 @@ impl WaveletTree {
             }
         }
 
-        // Map code back to original symbol
-        self.symbols.get(code as usize).copied().unwrap_or(0)
+        // Map code back to original symbol.
+        // code is bounded by sigma (alphabet size); use checked conversion.
+        let code_idx = usize::try_from(code).ok();
+        code_idx
+            .and_then(|idx| self.symbols.get(idx))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Returns the number of occurrences of symbol in [0, i).
@@ -391,7 +396,13 @@ impl WaveletTree {
             ));
         }
 
-        if self.symbols.len() != self.sigma as usize {
+        let sigma_usize = usize::try_from(self.sigma).map_err(|_| {
+            format!(
+                "sigma {} exceeds usize::MAX, cannot validate on this platform",
+                self.sigma
+            )
+        })?;
+        if self.symbols.len() != sigma_usize {
             return Err(format!(
                 "symbols count {} != sigma {}",
                 self.symbols.len(),
@@ -512,6 +523,8 @@ mod tests {
     }
 
     #[test]
+    // reason: i % 10 is non-negative for positive range
+    #[allow(clippy::cast_sign_loss)]
     fn test_rank_select_consistency() {
         let seq: Vec<u64> = (0..1000).map(|i| (i % 10) as u64).collect();
         let wt = WaveletTree::new(&seq);

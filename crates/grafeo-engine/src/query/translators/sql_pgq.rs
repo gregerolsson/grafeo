@@ -198,12 +198,18 @@ impl SqlPgqTranslator {
 
         // 4. Translate OFFSET → Skip (below Return, after Sort)
         if let Some(offset) = select.offset {
-            plan = wrap_skip(plan, offset as usize);
+            // reason: SQL/PGQ u64 offset fits usize on 64-bit targets
+            #[allow(clippy::cast_possible_truncation)]
+            let skip_n = offset as usize;
+            plan = wrap_skip(plan, skip_n);
         }
 
         // 5. Translate LIMIT → Limit (below Return, after Skip)
         if let Some(limit) = select.limit {
-            plan = wrap_limit(plan, limit as usize);
+            // reason: SQL/PGQ u64 limit fits usize on 64-bit targets
+            #[allow(clippy::cast_possible_truncation)]
+            let limit_n = limit as usize;
+            plan = wrap_limit(plan, limit_n);
         }
 
         // 6-7. Translate COLUMNS + outer SELECT list into a single projection.
@@ -488,14 +494,20 @@ impl SqlPgqTranslator {
             if let Some(skip_expr) = &return_clause.skip
                 && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
             {
-                plan = wrap_skip(plan, *n as usize);
+                // reason: SKIP/LIMIT literals are non-negative in practice
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let count = *n as usize;
+                plan = wrap_skip(plan, count);
             }
 
             // Apply LIMIT
             if let Some(limit_expr) = &return_clause.limit
                 && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
             {
-                plan = wrap_limit(plan, *n as usize);
+                // reason: SKIP/LIMIT literals are non-negative in practice
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let count = *n as usize;
+                plan = wrap_limit(plan, count);
             }
 
             // Apply RETURN projection (only when explicit items are present)

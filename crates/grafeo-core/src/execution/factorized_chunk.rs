@@ -506,6 +506,8 @@ impl FactorizedChunk {
                 }
             }
 
+            // reason: column lengths in factorized chunks are bounded by chunk size, fit u32
+            #[allow(clippy::cast_possible_truncation)]
             new_offsets.push(new_columns[0].len() as u32);
         }
 
@@ -611,6 +613,8 @@ impl FactorizedChunk {
                 }
             }
 
+            // reason: column lengths in factorized chunks are bounded by chunk size, fit u32
+            #[allow(clippy::cast_possible_truncation)]
             new_offsets.push(new_columns[0].len() as u32);
         }
 

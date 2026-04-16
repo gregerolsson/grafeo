@@ -325,11 +325,15 @@ impl MmapStorage {
             ));
         }
 
+        // reason: deserialized dimensions and count are bounded by available data
+        #[allow(clippy::cast_possible_truncation)]
         let dimensions = u64::from_le_bytes(
             header[8..16]
                 .try_into()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         ) as usize;
+        // reason: vector count from on-disk header fits usize on 64-bit platforms
+        #[allow(clippy::cast_possible_truncation)]
         let count = u64::from_le_bytes(
             header[16..24]
                 .try_into()
@@ -762,6 +766,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test indices 0..10 and 0..100 are non-negative
+    #[allow(clippy::cast_sign_loss)]
     fn test_ram_storage_concurrent_access() {
         use std::sync::Arc;
         use std::thread;

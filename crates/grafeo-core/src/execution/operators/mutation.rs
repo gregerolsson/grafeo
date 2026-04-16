@@ -364,6 +364,10 @@ impl Operator for CreateNodeOperator {
 
                     // Add the new node ID
                     if let Some(dst) = builder.column_mut(self.output_column) {
+                        // reason: entity IDs stored as i64, standard encoding
+                        #[allow(clippy::cast_possible_wrap)]
+                        // reason: entity IDs stored as i64, standard encoding
+                        #[allow(clippy::cast_possible_wrap)]
                         dst.push_value(Value::Int64(node_id.0 as i64));
                     }
 
@@ -408,6 +412,8 @@ impl Operator for CreateNodeOperator {
             // Build output chunk with just the node ID
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
             if let Some(dst) = builder.column_mut(self.output_column) {
+                // reason: entity IDs stored as i64, standard encoding
+                #[allow(clippy::cast_possible_wrap)]
                 dst.push_value(Value::Int64(node_id.0 as i64));
             }
             builder.advance_row();
@@ -557,6 +563,8 @@ impl Operator for CreateEdgeOperator {
 
                 // Extract node IDs
                 let from_node_id = match from_id {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => NodeId(id as u64),
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -567,6 +575,8 @@ impl Operator for CreateEdgeOperator {
                 };
 
                 let to_node_id = match to_id {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => NodeId(id as u64),
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -660,6 +670,8 @@ impl Operator for CreateEdgeOperator {
                 if let Some(out_col) = self.output_column
                     && let Some(dst) = builder.column_mut(out_col)
                 {
+                    // reason: entity IDs stored as i64, standard encoding
+                    #[allow(clippy::cast_possible_wrap)]
                     dst.push_value(Value::Int64(edge_id.0 as i64));
                 }
 
@@ -764,6 +776,8 @@ impl Operator for DeleteNodeOperator {
                     })?;
 
                 let node_id = match node_val {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => NodeId(id as u64),
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -919,6 +933,8 @@ impl Operator for DeleteEdgeOperator {
                     })?;
 
                 let edge_id = match edge_val {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => EdgeId(id as u64),
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -1047,6 +1063,8 @@ impl Operator for AddLabelOperator {
                     })?;
 
                 let node_id = match node_val {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => NodeId(id as u64),
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -1190,6 +1208,8 @@ impl Operator for RemoveLabelOperator {
                     })?;
 
                 let node_id = match node_val {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => NodeId(id as u64),
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -1402,6 +1422,8 @@ impl Operator for SetPropertyOperator {
                     })?;
 
                 let entity_id = match entity_val {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(id) => id as u64,
                     _ => {
                         return Err(OperatorError::TypeMismatch {
@@ -1664,6 +1686,8 @@ mod tests {
         }
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn node_id_chunk(ids: &[NodeId]) -> DataChunk {
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         for id in ids {
@@ -1673,6 +1697,8 @@ mod tests {
         builder.finish()
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn edge_id_chunk(ids: &[EdgeId]) -> DataChunk {
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         for id in ids {
@@ -1710,6 +1736,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_create_edge() {
         let store = create_test_store();
 
@@ -1985,6 +2013,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_set_node_property_from_column() {
         let store = create_test_store();
 
@@ -2168,6 +2198,8 @@ mod tests {
     // ── CreateEdgeOperator with properties and output column ────
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     fn test_create_edge_with_properties_and_output_column() {
         let store = create_test_store();
 
@@ -2299,6 +2331,8 @@ mod tests {
     // ── PropertySource::PropertyAccess ──────────────────────────
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_property_source_property_access() {
         let store = create_test_store();
 

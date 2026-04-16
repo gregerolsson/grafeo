@@ -77,3 +77,69 @@ tests:
     expect:
       rows:
         - [30, Berlin, admin]
+
+  # ---------------------------------------------------------------------------
+  # Extended SET tests (M19)
+  # ---------------------------------------------------------------------------
+
+  - name: set_edge_property
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})"
+    statements:
+      - "MATCH ()-[r:KNOWS]->() SET r.since = 2024"
+      - "MATCH ()-[r:KNOWS]->() RETURN r.since"
+    expect:
+      rows:
+        - [2024]
+
+  - name: set_property_to_null
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    statements:
+      - "MATCH (n:Person {name: 'Alix'}) SET n.age = null"
+      - "MATCH (n:Person {name: 'Alix'}) RETURN n.age"
+    expect:
+      rows:
+        - [null]
+
+  - name: set_property_type_change
+    setup:
+      - "INSERT (:Person {name: 'Alix', value: 42})"
+    statements:
+      - "MATCH (n:Person {name: 'Alix'}) SET n.value = 'forty-two'"
+      - "MATCH (n:Person {name: 'Alix'}) RETURN n.value"
+    expect:
+      rows:
+        - [forty-two]
+
+  - name: set_on_filtered_match
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+      - "INSERT (:Person {name: 'Gus', age: 25})"
+    statements:
+      - "MATCH (n:Person) WHERE n.age > 28 SET n.senior = true"
+      - "MATCH (n:Person {name: 'Alix'}) RETURN n.senior"
+    expect:
+      rows:
+        - [true]
+
+  - name: set_on_filtered_match_does_not_affect_others
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+      - "INSERT (:Person {name: 'Gus', age: 25})"
+    statements:
+      - "MATCH (n:Person) WHERE n.age > 28 SET n.senior = true"
+      - "MATCH (n:Person {name: 'Gus'}) RETURN n.senior"
+    expect:
+      rows:
+        - [null]
+
+  - name: set_with_expression
+    setup:
+      - "INSERT (:Counter {name: 'c1', value: 10})"
+    statements:
+      - "MATCH (n:Counter {name: 'c1'}) SET n.value = n.value + 5"
+      - "MATCH (n:Counter {name: 'c1'}) RETURN n.value"
+    expect:
+      rows:
+        - [15]

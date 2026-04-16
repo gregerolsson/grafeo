@@ -100,6 +100,8 @@ impl Default for BufferManagerConfig {
     fn default() -> Self {
         let system_memory = Self::detect_system_memory();
         Self {
+            // reason: memory fraction (0.0..1.0) of a positive usize is always a valid positive usize
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             budget: (system_memory as f64 * DEFAULT_MEMORY_FRACTION) as usize,
             soft_limit_fraction: 0.70,
             evict_limit_fraction: 0.85,
@@ -137,8 +139,14 @@ impl BufferManager {
     /// Creates a new buffer manager with the given configuration.
     #[must_use]
     pub fn new(config: BufferManagerConfig) -> Arc<Self> {
+        // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let soft_limit = (config.budget as f64 * config.soft_limit_fraction) as usize;
+        // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let evict_limit = (config.budget as f64 * config.evict_limit_fraction) as usize;
+        // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let hard_limit = (config.budget as f64 * config.hard_limit_fraction) as usize;
 
         Arc::new(Self {

@@ -354,6 +354,9 @@ impl<'a> Lexer<'a> {
         Token {
             kind,
             text: self.source[self.start..self.pos].to_string(),
+            // Source files never exceed 4 billion lines or columns
+            // reason: value is bounded by format constraints
+            #[allow(clippy::cast_possible_truncation)]
             span: SourceSpan::new(
                 self.start,
                 self.pos - self.start,

@@ -428,10 +428,10 @@ impl Operator for ProjectOperator {
 /// all node properties at the top level.
 fn node_to_map(node: &Node) -> Value {
     let mut map = BTreeMap::new();
-    map.insert(
-        PropertyKey::new("_id"),
-        Value::Int64(node.id.as_u64() as i64),
-    );
+    // reason: entity IDs stored as i64, standard encoding
+    #[allow(clippy::cast_possible_wrap)]
+    let node_id_i64 = node.id.as_u64() as i64;
+    map.insert(PropertyKey::new("_id"), Value::Int64(node_id_i64));
     let labels: Vec<Value> = node
         .labels
         .iter()
@@ -450,22 +450,22 @@ fn node_to_map(node: &Node) -> Value {
 /// properties at the top level.
 fn edge_to_map(edge: &Edge) -> Value {
     let mut map = BTreeMap::new();
-    map.insert(
-        PropertyKey::new("_id"),
-        Value::Int64(edge.id.as_u64() as i64),
-    );
+    // reason: entity IDs stored as i64, standard encoding
+    #[allow(clippy::cast_possible_wrap)]
+    let edge_id_i64 = edge.id.as_u64() as i64;
+    // reason: entity IDs stored as i64, standard encoding
+    #[allow(clippy::cast_possible_wrap)]
+    let src_id_i64 = edge.src.as_u64() as i64;
+    // reason: entity IDs stored as i64, standard encoding
+    #[allow(clippy::cast_possible_wrap)]
+    let dst_id_i64 = edge.dst.as_u64() as i64;
+    map.insert(PropertyKey::new("_id"), Value::Int64(edge_id_i64));
     map.insert(
         PropertyKey::new("_type"),
         Value::String(edge.edge_type.clone()),
     );
-    map.insert(
-        PropertyKey::new("_source"),
-        Value::Int64(edge.src.as_u64() as i64),
-    );
-    map.insert(
-        PropertyKey::new("_target"),
-        Value::Int64(edge.dst.as_u64() as i64),
-    );
+    map.insert(PropertyKey::new("_source"), Value::Int64(src_id_i64));
+    map.insert(PropertyKey::new("_target"), Value::Int64(dst_id_i64));
     for (key, value) in &edge.properties {
         map.insert(key.clone(), value.clone());
     }
@@ -685,6 +685,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_project_node_resolve() {
         // Create a store with a test node
         let store = LpgStore::new().unwrap();
@@ -731,6 +733,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn test_project_edge_resolve() {
         let store = LpgStore::new().unwrap();
         let src = store.create_node(&["Person"]);

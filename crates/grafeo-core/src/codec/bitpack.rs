@@ -37,6 +37,19 @@ pub struct BitPackedInts {
 }
 
 impl BitPackedInts {
+    /// Reconstructs from pre-packed raw parts.
+    ///
+    /// Used by section deserialization. The caller is responsible for ensuring
+    /// the data is consistent (correct word count for the given bits and count).
+    #[must_use]
+    pub fn from_raw_parts(data: Vec<u64>, bits_per_value: u8, count: usize) -> Self {
+        Self {
+            data,
+            bits_per_value,
+            count,
+        }
+    }
+
     /// Packs a slice of u64 values using the minimum bits needed.
     #[must_use]
     pub fn pack(values: &[u64]) -> Self {
@@ -206,24 +219,46 @@ impl BitPackedInts {
     }
 
     /// Returns the number of bits needed to represent a value.
+    ///
+    /// The result is always in `1..=64`.
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic: the result of `64 - leading_zeros()` is always in
+    /// `1..=64`, which fits `u8`.
     #[must_use]
     pub fn bits_needed(value: u64) -> u8 {
         if value == 0 {
             1 // Need at least 1 bit to represent 0
         } else {
-            64 - value.leading_zeros() as u8
+            // leading_zeros() returns u32 in [0, 63] for non-zero u64;
+            // (64 - n) is in [1, 64], which always fits u8.
+            u8::try_from(64u32 - value.leading_zeros()).expect("bits_needed result is in 1..=64")
         }
     }
 
     /// Serializes to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the value count exceeds `u32::MAX`.
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let count_u32 = u32::try_from(self.count).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "BitPackedInts count {} exceeds u32::MAX, cannot serialize",
+                    self.count
+                ),
+            )
+        })?;
         let mut buf = Vec::with_capacity(1 + 4 + self.data.len() * 8);
         buf.push(self.bits_per_value);
-        buf.extend_from_slice(&(self.count as u32).to_le_bytes());
+        buf.extend_from_slice(&count_u32.to_le_bytes());
         for &word in &self.data {
             buf.extend_from_slice(&word.to_le_bytes());
         }
-        buf
+        Ok(buf)
     }
 
     /// Deserializes from bytes.
@@ -383,12 +418,16 @@ impl DeltaBitPacked {
     }
 
     /// Serializes to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let delta_bytes = self.deltas.to_bytes();
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the delta count exceeds `u32::MAX`.
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let delta_bytes = self.deltas.to_bytes()?;
         let mut buf = Vec::with_capacity(8 + delta_bytes.len());
         buf.extend_from_slice(&self.base.to_le_bytes());
         buf.extend_from_slice(&delta_bytes);
-        buf
+        Ok(buf)
     }
 
     /// Deserializes from bytes.
@@ -492,7 +531,7 @@ mod tests {
     fn test_bitpack_serialization() {
         let values = vec![1u64, 3, 7, 15, 31];
         let packed = BitPackedInts::pack(&values);
-        let bytes = packed.to_bytes();
+        let bytes = packed.to_bytes().unwrap();
         let restored = BitPackedInts::from_bytes(&bytes).unwrap();
         assert_eq!(packed.unpack(), restored.unpack());
     }
@@ -538,7 +577,7 @@ mod tests {
     fn test_delta_bitpacked_serialization() {
         let values = vec![100u64, 105, 107, 110, 115];
         let encoded = DeltaBitPacked::encode(&values);
-        let bytes = encoded.to_bytes();
+        let bytes = encoded.to_bytes().unwrap();
         let restored = DeltaBitPacked::from_bytes(&bytes).unwrap();
         assert_eq!(encoded.decode(), restored.decode());
     }

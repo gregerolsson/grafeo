@@ -19,41 +19,51 @@ fn social_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-        ],
-    );
-    let dave = session.create_node_with_props(
-        &["Person", "Engineer"],
-        [
-            ("name", Value::String("Dave".into())),
-            ("age", Value::Int64(28)),
-        ],
-    );
-    let techcorp = session.create_node_with_props(
-        &["Company"],
-        [
-            ("name", Value::String("TechCorp".into())),
-            ("founded", Value::Int64(2010)),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+            ],
+        )
+        .unwrap();
+    let dave = session
+        .create_node_with_props(
+            &["Person", "Engineer"],
+            [
+                ("name", Value::String("Dave".into())),
+                ("age", Value::Int64(28)),
+            ],
+        )
+        .unwrap();
+    let techcorp = session
+        .create_node_with_props(
+            &["Company"],
+            [
+                ("name", Value::String("TechCorp".into())),
+                ("founded", Value::Int64(2010)),
+            ],
+        )
+        .unwrap();
 
     let e1 = session.create_edge(alix, gus, "KNOWS");
     db.set_edge_property(e1, "since", Value::Int64(2020));

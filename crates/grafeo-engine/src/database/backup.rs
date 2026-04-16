@@ -280,6 +280,8 @@ pub fn read_backup_header(data: &[u8]) -> Result<(EpochId, EpochId, u64)> {
 }
 
 /// Returns the timestamp in milliseconds since UNIX epoch.
+// reason: millis since UNIX epoch fits u64 for centuries
+#[allow(clippy::cast_possible_truncation)]
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

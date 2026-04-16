@@ -119,6 +119,14 @@ fn validate_bitvec(len: usize, data: &[u64]) -> Result<BitVector, String> {
 }
 
 impl BitVector {
+    /// Reconstructs from pre-packed raw parts.
+    ///
+    /// Used by section deserialization. The caller ensures data consistency.
+    #[must_use]
+    pub fn from_raw_parts(data: Vec<u64>, len: usize) -> Self {
+        Self { data, len }
+    }
+
     /// Creates an empty bit vector.
     #[must_use]
     pub fn new() -> Self {
@@ -397,13 +405,26 @@ impl BitVector {
     }
 
     /// Serializes to bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the bit-vector length exceeds `u32::MAX`.
+    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let len_u32 = u32::try_from(self.len).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "BitVector length {} exceeds u32::MAX, cannot serialize",
+                    self.len
+                ),
+            )
+        })?;
         let mut buf = Vec::with_capacity(4 + self.data.len() * 8);
-        buf.extend_from_slice(&(self.len as u32).to_le_bytes());
+        buf.extend_from_slice(&len_u32.to_le_bytes());
         for &word in &self.data {
             buf.extend_from_slice(&word.to_le_bytes());
         }
-        buf
+        Ok(buf)
     }
 
     /// Deserializes from bytes.
@@ -596,7 +617,7 @@ mod tests {
     fn test_bitvec_serialization() {
         let bools = vec![true, false, true, true, false, false, true, false];
         let bitvec = BitVector::from_bools(&bools);
-        let bytes = bitvec.to_bytes();
+        let bytes = bitvec.to_bytes().unwrap();
         let restored = BitVector::from_bytes(&bytes).unwrap();
         assert_eq!(bitvec, restored);
     }

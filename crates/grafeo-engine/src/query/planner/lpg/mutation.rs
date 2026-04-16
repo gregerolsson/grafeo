@@ -1254,6 +1254,8 @@ impl super::Planner {
                         let val = Self::try_fold_expression(&args[0])?;
                         match val {
                             Value::List(items) => {
+                                // reason: intentional lossy f64/i64 to f32 for vector elements
+                                #[allow(clippy::cast_possible_truncation)]
                                 let floats: Vec<f32> = items
                                     .iter()
                                     .filter_map(|v| match v {

@@ -33,6 +33,7 @@ use grafeo_core::graph::{GraphStore, GraphStoreMut};
 use crate::catalog::{Catalog, CatalogConstraintValidator};
 use crate::config::{AdaptiveConfig, GraphModel};
 use crate::database::QueryResult;
+use crate::query::Executor;
 use crate::query::cache::QueryCache;
 use crate::transaction::TransactionManager;
 
@@ -83,6 +84,9 @@ pub(crate) struct SessionConfig {
     pub factorized_execution: bool,
     pub graph_model: GraphModel,
     pub query_timeout: Option<Duration>,
+    pub max_property_size: Option<usize>,
+    /// Buffer manager for memory-aware query execution.
+    pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
     /// When true, the session permanently blocks all mutations.
@@ -142,6 +146,10 @@ pub struct Session {
     graph_model: GraphModel,
     /// Maximum time a query may run before being cancelled.
     query_timeout: Option<Duration>,
+    /// Maximum size in bytes for a single property value.
+    max_property_size: Option<usize>,
+    /// Buffer manager for memory-aware execution (spill decisions).
+    buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
     /// GC every N commits (0 = disabled).
@@ -249,6 +257,8 @@ impl Session {
             factorized_execution: cfg.factorized_execution,
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
+            max_property_size: cfg.max_property_size,
+            buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),
@@ -275,6 +285,20 @@ impl Session {
             tx_start_time: parking_lot::Mutex::new(None),
             projections: cfg.projections,
         }
+    }
+
+    /// Overrides the graph store and write store used by the query engine.
+    ///
+    /// Used by the layered store integration: the session's `store` field is
+    /// the overlay `LpgStore` (for MVCC), but reads and writes should route
+    /// through the `LayeredStore` (which merges base + overlay).
+    pub(crate) fn override_stores(
+        &mut self,
+        read_store: Arc<dyn GraphStore>,
+        write_store: Option<Arc<dyn GraphStoreMut>>,
+    ) {
+        self.graph_store = read_store;
+        self.graph_store_mut = write_store;
     }
 
     /// Sets the WAL for this session (shared with the database).
@@ -358,6 +382,8 @@ impl Session {
             factorized_execution: cfg.factorized_execution,
             graph_model: cfg.graph_model,
             query_timeout: cfg.query_timeout,
+            max_property_size: cfg.max_property_size,
+            buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             transaction_start_node_count: AtomicUsize::new(0),
@@ -964,7 +990,10 @@ impl Session {
                 if key.eq_ignore_ascii_case("viewing_epoch") {
                     match Self::eval_integer_literal(&expr) {
                         Some(n) if n >= 0 => {
-                            self.set_viewing_epoch(EpochId::new(n as u64));
+                            // reason: guard ensures n >= 0
+                            #[allow(clippy::cast_sign_loss)]
+                            let epoch = n as u64;
+                            self.set_viewing_epoch(EpochId::new(epoch));
                             Ok(QueryResult::status(format!("Set viewing_epoch to {n}")))
                         }
                         _ => Err(Error::Query(QueryError::new(
@@ -2509,8 +2538,8 @@ impl Session {
         self.require_lpg("GQL")?;
 
         use crate::query::{
-            Executor, binder::Binder, cache::CacheKey, optimizer::Optimizer,
-            processor::QueryLanguage, translators::gql,
+            binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
+            translators::gql,
         };
 
         let _span = grafeo_info_span!(
@@ -2610,8 +2639,7 @@ impl Session {
                 );
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
-                let executor = Executor::with_columns(physical_plan.columns.clone())
-                    .with_deadline(self.query_deadline());
+                let executor = self.make_executor(physical_plan.columns.clone());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
                 let total_time_ms;
@@ -2656,12 +2684,23 @@ impl Session {
             let physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan via push-based pipeline when possible
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
-            let (mut source, push_ops) =
-                grafeo_core::execution::pipeline_convert::convert_to_pipeline(
-                    physical_plan.into_operator(),
-                );
+            let executor = self.make_executor(physical_plan.columns.clone());
+            let (mut source, push_ops) = {
+                #[cfg(feature = "spill")]
+                {
+                    let memory_ctx = self.make_operator_memory_context();
+                    grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
+                        physical_plan.into_operator(),
+                        memory_ctx,
+                    )
+                }
+                #[cfg(not(feature = "spill"))]
+                {
+                    grafeo_core::execution::pipeline_convert::convert_to_pipeline(
+                        physical_plan.into_operator(),
+                    )
+                }
+            };
             let mut result = if push_ops.is_empty() {
                 // Pure source query: use traditional pull-based execution
                 executor.execute(source.as_mut())?
@@ -2829,8 +2868,8 @@ impl Session {
     #[cfg(feature = "cypher")]
     pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{
-            Executor, binder::Binder, cache::CacheKey, optimizer::Optimizer,
-            processor::QueryLanguage, translators::cypher,
+            binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
+            translators::cypher,
         };
 
         // Handle schema DDL and SHOW commands before the normal query path
@@ -2926,8 +2965,7 @@ impl Session {
                 );
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
-                let executor = Executor::with_columns(physical_plan.columns.clone())
-                    .with_deadline(self.query_deadline());
+                let executor = self.make_executor(physical_plan.columns.clone());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
                 let total_time_ms;
@@ -2963,8 +3001,7 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
+            let executor = self.make_executor(physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3005,7 +3042,7 @@ impl Session {
     /// ```
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
-        use crate::query::{Executor, binder::Binder, optimizer::Optimizer, translators::gremlin};
+        use crate::query::{binder::Binder, optimizer::Optimizer, translators::gremlin};
 
         #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
         let start_time = Instant::now();
@@ -3037,8 +3074,7 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
+            let executor = self.make_executor(physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3066,7 +3102,7 @@ impl Session {
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            Executor, binder::Binder, optimizer::Optimizer, processor::substitute_params,
+            binder::Binder, optimizer::Optimizer, processor::substitute_params,
             translators::gremlin,
         };
 
@@ -3098,8 +3134,7 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
+            let executor = self.make_executor(physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3141,7 +3176,7 @@ impl Session {
     #[cfg(feature = "graphql")]
     pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{
-            Executor, binder::Binder, optimizer::Optimizer, processor::substitute_params,
+            binder::Binder, optimizer::Optimizer, processor::substitute_params,
             translators::graphql,
         };
 
@@ -3172,8 +3207,7 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
+            let executor = self.make_executor(physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3201,7 +3235,7 @@ impl Session {
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            Executor, binder::Binder, optimizer::Optimizer, processor::substitute_params,
+            binder::Binder, optimizer::Optimizer, processor::substitute_params,
             translators::graphql,
         };
 
@@ -3239,8 +3273,7 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
+            let executor = self.make_executor(physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3283,7 +3316,7 @@ impl Session {
     #[cfg(feature = "sql-pgq")]
     pub fn execute_sql(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{
-            Executor, binder::Binder, cache::CacheKey, optimizer::Optimizer, plan::LogicalOperator,
+            binder::Binder, cache::CacheKey, optimizer::Optimizer, plan::LogicalOperator,
             processor::QueryLanguage, translators::sql_pgq,
         };
 
@@ -3337,8 +3370,7 @@ impl Session {
             let planner =
                 self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id);
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = Executor::with_columns(physical_plan.columns.clone())
-                .with_deadline(self.query_deadline());
+            let executor = self.make_executor(physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -3687,7 +3719,12 @@ impl Session {
 
         // Validate the transaction first (conflict detection) before committing data.
         // If this fails, we rollback the data changes instead of making them permanent.
-        let touched = self.touched_graphs.lock().clone();
+        //
+        // Take ownership of the touched graphs in one lock acquisition. Since
+        // current_transaction was .take()'d above, no concurrent thread can call
+        // track_graph_touch() for this transaction (it checks current_transaction
+        // first), so this is safe.
+        let touched = std::mem::take(&mut *self.touched_graphs.lock());
         let commit_epoch = match self.transaction_manager.commit(transaction_id) {
             Ok(epoch) => epoch,
             Err(e) => {
@@ -3776,10 +3813,10 @@ impl Session {
             store.sync_epoch(current_epoch);
         }
 
-        // Reset read-only flag, clear savepoints and touched graphs
+        // Reset read-only flag and clear savepoints.
+        // touched_graphs was already emptied by mem::take above.
         *self.read_only_tx.lock() = self.db_read_only;
         self.savepoints.lock().clear();
-        self.touched_graphs.lock().clear();
 
         // Auto-GC: periodically prune old MVCC versions
         if self.gc_interval > 0 {
@@ -4246,6 +4283,63 @@ impl Session {
         }
     }
 
+    /// Creates an executor with deadline and timeout duration configured.
+    fn make_executor(&self, columns: Vec<String>) -> Executor {
+        Executor::with_columns(columns)
+            .with_deadline(self.query_deadline())
+            .with_timeout_duration(self.query_timeout)
+    }
+
+    /// Creates a per-query `OperatorMemoryContext` for memory-aware spilling.
+    ///
+    /// Returns `None` if the buffer manager is not configured or has no spill path,
+    /// in which case operators will use row-count fallback thresholds.
+    #[cfg(feature = "spill")]
+    fn make_operator_memory_context(
+        &self,
+    ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
+        let bm = self.buffer_manager.as_ref()?;
+        let spill_path = bm.config().spill_path.as_ref()?;
+        // Per-query isolation: create a unique subdirectory
+        let query_id = self
+            .commit_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let query_dir = spill_path.join(format!("query_{query_id}"));
+        let sm = std::sync::Arc::new(grafeo_core::execution::SpillManager::new(&query_dir).ok()?);
+        Some(grafeo_core::execution::OperatorMemoryContext::new(
+            std::sync::Arc::clone(bm),
+            sm,
+        ))
+    }
+
+    /// Checks that a property value does not exceed the configured size limit.
+    fn check_property_size(&self, key: &str, value: &Value) -> Result<()> {
+        if let Some(limit) = self.max_property_size {
+            let size = value.estimated_size_bytes();
+            if size > limit {
+                let limit_display = if limit >= 1024 * 1024 && limit % (1024 * 1024) == 0 {
+                    format!("{} MiB", limit / (1024 * 1024))
+                } else if limit >= 1024 && limit % 1024 == 0 {
+                    format!("{} KiB", limit / 1024)
+                } else {
+                    format!("{limit} bytes")
+                };
+                return Err(grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::QueryError::new(
+                        grafeo_common::utils::error::QueryErrorKind::Execution,
+                        format!(
+                            "Property '{key}' value exceeds maximum size of {limit_display} ({size} bytes)"
+                        ),
+                    )
+                    .with_hint(
+                        "Increase with Config::with_max_property_size() or disable with Config::without_max_property_size()".to_string(),
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Records query metrics for any language.
     ///
     /// Called after query execution to update counters, latency histogram,
@@ -4369,9 +4463,10 @@ impl Session {
         .with_session_context(session_context)
         .with_read_only(read_only);
 
-        // Attach the constraint validator for schema enforcement
-        let validator =
-            CatalogConstraintValidator::new(Arc::clone(&self.catalog)).with_store(store);
+        // Attach the constraint validator for schema enforcement and property size limits
+        let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
+            .with_store(store)
+            .with_max_property_size(self.max_property_size);
         planner = planner.with_validator(Arc::new(validator));
 
         planner
@@ -4384,14 +4479,14 @@ impl Session {
 
         let mut map = BTreeMap::new();
         map.insert(PropertyKey::from("mode"), Value::String("lpg".into()));
-        map.insert(
-            PropertyKey::from("node_count"),
-            Value::Int64(store.node_count() as i64),
-        );
-        map.insert(
-            PropertyKey::from("edge_count"),
-            Value::Int64(store.edge_count() as i64),
-        );
+        // reason: node/edge counts will not exceed i64::MAX
+        #[allow(clippy::cast_possible_wrap)]
+        let node_count = store.node_count() as i64;
+        // reason: value is a small counter, well within i64::MAX
+        #[allow(clippy::cast_possible_wrap)]
+        let edge_count = store.edge_count() as i64;
+        map.insert(PropertyKey::from("node_count"), Value::Int64(node_count));
+        map.insert(PropertyKey::from("edge_count"), Value::Int64(edge_count));
         map.insert(
             PropertyKey::from("version"),
             Value::String(env!("CARGO_PKG_VERSION").into()),
@@ -4450,19 +4545,27 @@ impl Session {
     /// Creates a node with properties.
     ///
     /// If a transaction is active, the node will be versioned with the transaction ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any property value exceeds the configured `max_property_size`.
     #[cfg(feature = "lpg")]
     pub fn create_node_with_props<'a>(
         &self,
         labels: &[&str],
         properties: impl IntoIterator<Item = (&'a str, Value)>,
-    ) -> NodeId {
+    ) -> Result<NodeId> {
+        let props: Vec<(&str, Value)> = properties.into_iter().collect();
+        for (key, value) in &props {
+            self.check_property_size(key, value)?;
+        }
         let (epoch, transaction_id) = self.get_transaction_context();
-        self.active_lpg_store().create_node_with_props_versioned(
+        Ok(self.active_lpg_store().create_node_with_props_versioned(
             labels,
-            properties,
+            props,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
-        )
+        ))
     }
 
     /// Creates an edge between two nodes.
@@ -4487,6 +4590,10 @@ impl Session {
     }
 
     /// Creates an edge with properties within the active transaction context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any property value exceeds the configured `max_property_size`.
     #[cfg(feature = "lpg")]
     pub fn create_edge_with_props<'a>(
         &self,
@@ -4494,20 +4601,29 @@ impl Session {
         dst: NodeId,
         edge_type: &str,
         properties: impl IntoIterator<Item = (&'a str, Value)>,
-    ) -> grafeo_common::types::EdgeId {
+    ) -> Result<grafeo_common::types::EdgeId> {
+        let props: Vec<(&str, Value)> = properties.into_iter().collect();
+        for (key, value) in &props {
+            self.check_property_size(key, value)?;
+        }
         let (epoch, transaction_id) = self.get_transaction_context();
         let tid = transaction_id.unwrap_or(TransactionId::SYSTEM);
         let store = self.active_lpg_store();
         let eid = store.create_edge_versioned(src, dst, edge_type, epoch, tid);
-        for (key, value) in properties {
+        for (key, value) in props {
             store.set_edge_property_versioned(eid, key, value, tid);
         }
-        eid
+        Ok(eid)
     }
 
     /// Sets a node property within the active transaction context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value exceeds the configured `max_property_size`.
     #[cfg(feature = "lpg")]
-    pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
+    pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
+        self.check_property_size(key, &value)?;
         let (_, transaction_id) = self.get_transaction_context();
         if let Some(tid) = transaction_id {
             self.active_lpg_store()
@@ -4515,11 +4631,22 @@ impl Session {
         } else {
             self.active_lpg_store().set_node_property(id, key, value);
         }
+        Ok(())
     }
 
     /// Sets an edge property within the active transaction context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value exceeds the configured `max_property_size`.
     #[cfg(feature = "lpg")]
-    pub fn set_edge_property(&self, id: grafeo_common::types::EdgeId, key: &str, value: Value) {
+    pub fn set_edge_property(
+        &self,
+        id: grafeo_common::types::EdgeId,
+        key: &str,
+        value: Value,
+    ) -> Result<()> {
+        self.check_property_size(key, &value)?;
         let (_, transaction_id) = self.get_transaction_context();
         if let Some(tid) = transaction_id {
             self.active_lpg_store()
@@ -4527,6 +4654,7 @@ impl Session {
         } else {
             self.active_lpg_store().set_edge_property(id, key, value);
         }
+        Ok(())
     }
 
     /// Deletes a node within the active transaction context.
@@ -4608,7 +4736,7 @@ impl Session {
     /// # use grafeo_common::types::Value;
     /// # let db = GrafeoDB::new_in_memory();
     /// let session = db.session();
-    /// let id = session.create_node_with_props(&["Person"], [("name", "Alix".into())]);
+    /// let id = session.create_node_with_props(&["Person"], [("name", "Alix".into())]).unwrap();
     ///
     /// // Direct property access - O(1)
     /// let name = session.get_node_property(id, "name");
@@ -4771,12 +4899,13 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns `Result` for forward compatibility.
+    /// Returns an authorization error if the session lacks read permission.
     #[cfg(feature = "cdc")]
     pub fn history(
         &self,
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        self.require_permission(crate::auth::StatementKind::Read)?;
         Ok(self.cdc_log.history(entity_id.into()))
     }
 
@@ -4784,13 +4913,14 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns `Result` for forward compatibility.
+    /// Returns an authorization error if the session lacks read permission.
     #[cfg(feature = "cdc")]
     pub fn history_since(
         &self,
         entity_id: impl Into<crate::cdc::EntityId>,
         since_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        self.require_permission(crate::auth::StatementKind::Read)?;
         Ok(self.cdc_log.history_since(entity_id.into(), since_epoch))
     }
 
@@ -4798,13 +4928,14 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns `Result` for forward compatibility.
+    /// Returns an authorization error if the session lacks read permission.
     #[cfg(feature = "cdc")]
     pub fn changes_between(
         &self,
         start_epoch: EpochId,
         end_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        self.require_permission(crate::auth::StatementKind::Read)?;
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
     }
 }
@@ -5076,8 +5207,9 @@ mod tests {
         session.begin_transaction().unwrap();
         let transaction_id = session.current_transaction.lock().unwrap();
 
-        let node_in_tx =
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+        let node_in_tx = session
+            .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+            .unwrap();
         assert!(node_in_tx.is_valid());
 
         // Uncommitted nodes use EpochId::PENDING, so they are invisible to
@@ -5226,9 +5358,15 @@ mod tests {
             let session = db.session();
 
             // Create people with ages
-            session.create_node_with_props(&["Person"], [("age", Value::Int64(25))]);
-            session.create_node_with_props(&["Person"], [("age", Value::Int64(35))]);
-            session.create_node_with_props(&["Person"], [("age", Value::Int64(45))]);
+            session
+                .create_node_with_props(&["Person"], [("age", Value::Int64(25))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("age", Value::Int64(35))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("age", Value::Int64(45))])
+                .unwrap();
 
             // Query with WHERE clause: age > 30
             let result = session
@@ -5247,9 +5385,15 @@ mod tests {
             let session = db.session();
 
             // Create people with names
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-            session.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))])
+                .unwrap();
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
 
             // Query with WHERE clause: name = "Alix"
             let result = session
@@ -5268,20 +5412,24 @@ mod tests {
             let session = db.session();
 
             // Create people with names and ages
-            session.create_node_with_props(
-                &["Person"],
-                [
-                    ("name", Value::String("Alix".into())),
-                    ("age", Value::Int64(30)),
-                ],
-            );
-            session.create_node_with_props(
-                &["Person"],
-                [
-                    ("name", Value::String("Gus".into())),
-                    ("age", Value::Int64(25)),
-                ],
-            );
+            session
+                .create_node_with_props(
+                    &["Person"],
+                    [
+                        ("name", Value::String("Alix".into())),
+                        ("age", Value::Int64(30)),
+                    ],
+                )
+                .unwrap();
+            session
+                .create_node_with_props(
+                    &["Person"],
+                    [
+                        ("name", Value::String("Gus".into())),
+                        ("age", Value::Int64(25)),
+                    ],
+                )
+                .unwrap();
 
             // Query returning properties
             let result = session
@@ -5308,7 +5456,9 @@ mod tests {
             let session = db.session();
 
             // Create a person
-            session.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+            session
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
 
             // Query returning both node and property
             let result = session
@@ -5408,7 +5558,8 @@ mod tests {
             let session = db.session();
 
             let id = session
-                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+                .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+                .unwrap();
 
             let name = session.get_node_property(id, "name");
             assert_eq!(name, Some(Value::String("Alix".into())));
@@ -5713,11 +5864,22 @@ mod tests {
     }
 
     #[test]
-    fn test_no_query_timeout_returns_no_deadline() {
+    fn test_default_query_timeout_returns_deadline() {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
 
-        // Default config has no timeout
+        // Default config has 30s timeout
+        assert!(session.query_deadline().is_some());
+    }
+
+    #[test]
+    fn test_no_query_timeout_returns_no_deadline() {
+        use crate::config::Config;
+
+        let config = Config::in_memory().without_query_timeout();
+        let db = GrafeoDB::with_config(config).unwrap();
+        let session = db.session();
+
         assert!(session.query_deadline().is_none());
     }
 
@@ -5729,6 +5891,49 @@ mod tests {
         let session = db.session();
 
         assert_eq!(session.graph_model(), GraphModel::Lpg);
+    }
+
+    #[test]
+    fn test_reject_oversized_property() {
+        use crate::config::Config;
+
+        let config = Config::in_memory().with_max_property_size(100);
+        let db = GrafeoDB::with_config(config).unwrap();
+        let session = db.session();
+
+        let node = session.create_node(&["Test"]);
+
+        // Small property should succeed
+        session
+            .set_node_property(node, "small", Value::from("hello"))
+            .unwrap();
+
+        // Large property should be rejected
+        let big = "x".repeat(200);
+        let result = session.set_node_property(node, "big", Value::from(big.as_str()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum size"),
+            "Expected size error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_no_property_size_limit() {
+        use crate::config::Config;
+
+        let config = Config::in_memory().without_max_property_size();
+        let db = GrafeoDB::with_config(config).unwrap();
+        let session = db.session();
+
+        let node = session.create_node(&["Test"]);
+
+        // Even large properties should succeed with no limit
+        let big = "x".repeat(10_000);
+        session
+            .set_node_property(node, "big", Value::from(big.as_str()))
+            .unwrap();
     }
 
     #[cfg(feature = "gql")]

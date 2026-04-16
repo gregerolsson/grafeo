@@ -90,3 +90,61 @@ tests:
     expect:
       rows:
         - [1]
+
+  # ---------------------------------------------------------------------------
+  # Extended INSERT tests (M19)
+  # ---------------------------------------------------------------------------
+
+  - name: insert_with_null_property
+    statements:
+      - "INSERT (:Person {name: 'Alix', email: null})"
+      - "MATCH (n:Person {name: 'Alix'}) RETURN n.email"
+    expect:
+      rows:
+        - [null]
+
+  - name: insert_with_list_property
+    statements:
+      - "INSERT (:Person {name: 'Alix', tags: ['dev', 'admin']})"
+      - "MATCH (n:Person {name: 'Alix'}) RETURN n.tags"
+    expect:
+      rows:
+        - ["[dev, admin]"]
+
+  - name: insert_from_match
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    statements:
+      - "MATCH (p:Person {name: 'Alix'}) INSERT (:Clone {source: p.name})"
+      - "MATCH (c:Clone) RETURN c.source"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: insert_multiple_edges_between_same_nodes
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Gus'})"
+    statements:
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
+      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:FOLLOWS]->(b)"
+      - "MATCH (a:Person {name: 'Alix'})-[r]->(b:Person {name: 'Gus'}) RETURN count(r) AS cnt"
+    expect:
+      rows:
+        - [2]
+
+  - name: insert_self_edge
+    statements:
+      - "INSERT (n:Person {name: 'Alix'})-[:SELF_REF]->(n)"
+      - "MATCH (a)-[r:SELF_REF]->(b) RETURN a.name, b.name"
+    expect:
+      rows:
+        - [Alix, Alix]
+
+  - name: insert_edge_with_properties
+    statements:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020, weight: 0.9}]->(:Person {name: 'Gus'})"
+      - "MATCH ()-[r:KNOWS]->() RETURN r.since, r.weight"
+    expect:
+      rows:
+        - [2020, 0.9]

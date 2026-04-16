@@ -251,9 +251,10 @@ impl fmt::Debug for HlcClock {
 
 /// Reads the current wall-clock time in milliseconds since Unix epoch.
 fn wall_clock_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH);
+    // reason: wall-clock millis since epoch fits u64 for thousands of years
+    #[allow(clippy::cast_possible_truncation)]
+    duration.map_or(0, |d| d.as_millis() as u64)
 }
 
 #[cfg(test)]

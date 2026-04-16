@@ -206,6 +206,24 @@ impl RelTable {
         self.bwd.as_ref().map(|b| b.degree(dst_offset))
     }
 
+    /// Returns the forward CSR (for serialization).
+    #[must_use]
+    pub fn fwd(&self) -> &CsrAdjacency {
+        &self.fwd
+    }
+
+    /// Returns the backward CSR, if present (for serialization).
+    #[must_use]
+    pub fn bwd(&self) -> Option<&CsrAdjacency> {
+        self.bwd.as_ref()
+    }
+
+    /// Returns edge property columns (for serialization).
+    #[must_use]
+    pub fn properties(&self) -> &FxHashMap<PropertyKey, ColumnCodec> {
+        &self.properties
+    }
+
     /// Returns an estimate of heap memory used by the CSR structures and
     /// edge property columns in bytes.
     #[must_use]
@@ -244,6 +262,9 @@ mod tests {
         for &(dst, src) in &bwd_edges {
             let fwd_start = fwd.offset_of(src);
             let local_idx = fwd.neighbors(src).iter().position(|&t| t == dst).unwrap();
+            // CSR uses u32 offsets, so position within a neighbor list fits u32
+            // reason: CSR uses u32 offsets, neighbor position fits u32
+            #[allow(clippy::cast_possible_truncation)]
             mapping.push(fwd_start + local_idx as u32);
         }
         bwd.set_edge_data(mapping);

@@ -409,6 +409,8 @@ mod tests {
     use crate::execution::ValueVector;
     use grafeo_common::types::Value;
 
+    // reason: test sizes are small, fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn make_test_chunk(size: usize) -> DataChunk {
         let values: Vec<Value> = (0..size).map(|i| Value::from(i as i64)).collect();
         let column = ValueVector::from_values(&values);

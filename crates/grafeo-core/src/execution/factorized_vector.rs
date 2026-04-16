@@ -93,8 +93,11 @@ impl FactorizedVector {
             parent_count + 1,
             "offsets must have length parent_count + 1"
         );
+        // reason: data length in factorized vectors is bounded by chunk size, fits u32
+        #[allow(clippy::cast_possible_truncation)]
+        let data_len_u32 = data.len() as u32;
         debug_assert!(
-            offsets.last().copied() == Some(data.len() as u32),
+            offsets.last().copied() == Some(data_len_u32),
             "last offset must equal data length"
         );
 

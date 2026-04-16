@@ -355,11 +355,15 @@ fn parse_constraints(
     parse_node_kind_constraints(graph, shape_id, &mut constraints)?;
 
     // Cardinality
-    if let Some(n) = parse_integer_property(graph, shape_id, SH::MIN_COUNT) {
-        constraints.push(Constraint::MinCount(n as usize));
+    if let Some(n) = parse_integer_property(graph, shape_id, SH::MIN_COUNT)
+        && let Ok(count) = usize::try_from(n)
+    {
+        constraints.push(Constraint::MinCount(count));
     }
-    if let Some(n) = parse_integer_property(graph, shape_id, SH::MAX_COUNT) {
-        constraints.push(Constraint::MaxCount(n as usize));
+    if let Some(n) = parse_integer_property(graph, shape_id, SH::MAX_COUNT)
+        && let Ok(count) = usize::try_from(n)
+    {
+        constraints.push(Constraint::MaxCount(count));
     }
 
     // Value range
@@ -393,11 +397,15 @@ fn parse_constraints(
     );
 
     // String constraints
-    if let Some(n) = parse_integer_property(graph, shape_id, SH::MIN_LENGTH) {
-        constraints.push(Constraint::MinLength(n as usize));
+    if let Some(n) = parse_integer_property(graph, shape_id, SH::MIN_LENGTH)
+        && let Ok(len) = usize::try_from(n)
+    {
+        constraints.push(Constraint::MinLength(len));
     }
-    if let Some(n) = parse_integer_property(graph, shape_id, SH::MAX_LENGTH) {
-        constraints.push(Constraint::MaxLength(n as usize));
+    if let Some(n) = parse_integer_property(graph, shape_id, SH::MAX_LENGTH)
+        && let Ok(len) = usize::try_from(n)
+    {
+        constraints.push(Constraint::MaxLength(len));
     }
     parse_pattern_constraint(graph, shape_id, &mut constraints);
     parse_language_in_constraint(graph, shape_id, &mut constraints);
@@ -605,10 +613,10 @@ fn parse_qualified_value_shape(
     let qvs_pred = Term::iri(SH::QUALIFIED_VALUE_SHAPE);
     for triple in graph.find(&pat(Some(shape_id), Some(&qvs_pred), None)) {
         let inner = parse_inline_shape(graph, triple.object(), all_shape_ids, visiting)?;
-        let min_count =
-            parse_integer_property(graph, shape_id, SH::QUALIFIED_MIN_COUNT).map(|n| n as usize);
-        let max_count =
-            parse_integer_property(graph, shape_id, SH::QUALIFIED_MAX_COUNT).map(|n| n as usize);
+        let min_count = parse_integer_property(graph, shape_id, SH::QUALIFIED_MIN_COUNT)
+            .and_then(|n| usize::try_from(n).ok());
+        let max_count = parse_integer_property(graph, shape_id, SH::QUALIFIED_MAX_COUNT)
+            .and_then(|n| usize::try_from(n).ok());
         let disjoint = parse_boolean_property(graph, shape_id, SH::QUALIFIED_VALUE_SHAPES_DISJOINT);
 
         constraints.push(Constraint::QualifiedValueShape {

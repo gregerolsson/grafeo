@@ -725,9 +725,12 @@ impl CostModel {
         // Full materialization: fanout^hops
         // Factorized: sum(fanout^i for i in 1..=hops) ≈ fanout^(hops+1) / (fanout - 1)
 
-        let full_size = avg_fanout.powi(num_hops as i32);
+        // reason: hop count is always small (< 100)
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let hops_i32 = num_hops as i32;
+        let full_size = avg_fanout.powi(hops_i32);
         let factorized_size = if avg_fanout > 1.0 {
-            (avg_fanout.powi(num_hops as i32 + 1) - 1.0) / (avg_fanout - 1.0)
+            (avg_fanout.powi(hops_i32 + 1) - 1.0) / (avg_fanout - 1.0)
         } else {
             num_hops as f64
         };

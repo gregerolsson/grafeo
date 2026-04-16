@@ -256,6 +256,8 @@ impl WalManager {
                 let encrypted = enc
                     .encrypt(data, &nonce, aad)
                     .map_err(|e| Error::Internal(format!("WAL encryption failed: {e}")))?;
+                // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
+                #[allow(clippy::cast_possible_truncation)]
                 let len = encrypted.len() as u32;
                 log_file.writer.write_all(&len.to_le_bytes())?;
                 log_file.writer.write_all(&encrypted)?;
@@ -267,6 +269,8 @@ impl WalManager {
 
             #[cfg(feature = "encryption")]
             if !frame_data {
+                // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
+                #[allow(clippy::cast_possible_truncation)]
                 let len = data.len() as u32;
                 log_file.writer.write_all(&len.to_le_bytes())?;
                 log_file.writer.write_all(data)?;
@@ -277,6 +281,8 @@ impl WalManager {
             #[cfg(not(feature = "encryption"))]
             {
                 // Write length prefix
+                // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
+                #[allow(clippy::cast_possible_truncation)]
                 let len = data.len() as u32;
                 log_file.writer.write_all(&len.to_le_bytes())?;
 
@@ -402,7 +408,13 @@ impl WalManager {
         // Get current timestamp
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
+            // reason: millis since UNIX epoch fits in u64 for ~585 million years
+            .map(|d| {
+                // reason: value is bounded by format constraints
+                #[allow(clippy::cast_possible_truncation)]
+                let ms = d.as_millis() as u64;
+                ms
+            })
             .unwrap_or(0);
 
         // Create checkpoint metadata
@@ -608,14 +620,20 @@ impl WalManager {
         if let Ok(files) = self.log_files() {
             for file in files {
                 if let Ok(metadata) = fs::metadata(&file) {
-                    total += metadata.len() as usize;
+                    // reason: WAL files are capped at max_log_size (default 64 MiB), fits in usize on all targets
+                    #[allow(clippy::cast_possible_truncation)]
+                    let file_len = metadata.len() as usize;
+                    total += file_len;
                 }
             }
         }
         // Also include checkpoint metadata file
         let metadata_path = self.dir.join(CHECKPOINT_METADATA_FILE);
         if let Ok(metadata) = fs::metadata(&metadata_path) {
-            total += metadata.len() as usize;
+            // reason: checkpoint metadata file is a small fixed-size struct, fits in usize
+            #[allow(clippy::cast_possible_truncation)]
+            let meta_len = metadata.len() as usize;
+            total += meta_len;
         }
         total
     }

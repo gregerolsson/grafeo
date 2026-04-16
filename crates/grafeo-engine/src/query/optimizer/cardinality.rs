@@ -828,7 +828,10 @@ impl CardinalityEstimator {
                     1.0 // Cross join
                 } else {
                     // Estimate based on number of conditions
-                    0.1_f64.powi(join.conditions.len() as i32)
+                    // reason: join condition count is always small (< 100)
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let exp = join.conditions.len() as i32;
+                    0.1_f64.powi(exp)
                 };
                 (left_card * right_card * selectivity).max(1.0)
             }
@@ -889,7 +892,10 @@ impl CardinalityEstimator {
         // cross-side condition: each equality reduces match probability.
         let condition_selectivity = if let Some(cond) = &lj.condition {
             let n = count_and_conjuncts(cond);
-            self.default_selectivity.powi(n as i32)
+            // reason: conjunct count is always small (< 100)
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let exp = n as i32;
+            self.default_selectivity.powi(exp)
         } else {
             self.default_selectivity
         };
@@ -909,7 +915,10 @@ impl CardinalityEstimator {
         } else {
             // Group by - estimate distinct groups
             // Assume each group key reduces cardinality by 10
-            let group_reduction = 10.0_f64.powi(agg.group_by.len() as i32);
+            // reason: group-by key count is always small (< 100)
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let exp = agg.group_by.len() as i32;
+            let group_reduction = 10.0_f64.powi(exp);
             (input_cardinality / group_reduction).max(1.0)
         }
     }

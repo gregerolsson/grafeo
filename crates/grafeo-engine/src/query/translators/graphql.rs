@@ -658,14 +658,24 @@ impl GraphQLTranslator {
         for arg in args {
             match arg.name.as_str() {
                 "first" | "limit" => match &arg.value {
-                    ast::InputValue::Int(n) => first = Some(CountExpr::Literal(*n as usize)),
+                    ast::InputValue::Int(n) => {
+                        // reason: GraphQL first/limit values are non-negative in practice
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let count = *n as usize;
+                        first = Some(CountExpr::Literal(count));
+                    }
                     ast::InputValue::Variable(name) => {
                         first = Some(CountExpr::Parameter(name.clone()));
                     }
                     _ => {}
                 },
                 "skip" | "offset" => match &arg.value {
-                    ast::InputValue::Int(n) => skip = Some(CountExpr::Literal(*n as usize)),
+                    ast::InputValue::Int(n) => {
+                        // reason: GraphQL skip/offset values are non-negative in practice
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let count = *n as usize;
+                        skip = Some(CountExpr::Literal(count));
+                    }
                     ast::InputValue::Variable(name) => {
                         skip = Some(CountExpr::Parameter(name.clone()));
                     }

@@ -15,26 +15,30 @@ fn create_test_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let mut session = db.session();
 
-    session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            (
-                "birthday",
-                Value::Date(grafeo_common::types::Date::from_ymd(1990, 6, 15).unwrap()),
-            ),
-        ],
-    );
-    session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            (
-                "birthday",
-                Value::Date(grafeo_common::types::Date::from_ymd(2000, 1, 1).unwrap()),
-            ),
-        ],
-    );
+    session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                (
+                    "birthday",
+                    Value::Date(grafeo_common::types::Date::from_ymd(1990, 6, 15).unwrap()),
+                ),
+            ],
+        )
+        .unwrap();
+    session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                (
+                    "birthday",
+                    Value::Date(grafeo_common::types::Date::from_ymd(2000, 1, 1).unwrap()),
+                ),
+            ],
+        )
+        .unwrap();
     let _ = session.commit();
     db
 }

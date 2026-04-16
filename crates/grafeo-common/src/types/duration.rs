@@ -235,6 +235,8 @@ impl Duration {
                         let frac_str = &text[dot_pos + 1..];
                         let frac_len = frac_str.len().min(9);
                         let frac: i64 = frac_str[..frac_len].parse().ok()?;
+                        // reason: frac_len is clamped to .min(9) above, so 9 - frac_len fits u32
+                        #[allow(clippy::cast_possible_truncation)]
                         let scale = 10i64.pow(9 - frac_len as u32);
                         nanos += int_part * NANOS_PER_SECOND + frac * scale;
                     } else {

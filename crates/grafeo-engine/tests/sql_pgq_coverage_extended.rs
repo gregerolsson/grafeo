@@ -24,46 +24,56 @@ fn create_rich_network() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
 
-    let alix = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Alix".into())),
-            ("age", Value::Int64(30)),
-            ("city", Value::String("Amsterdam".into())),
-        ],
-    );
-    let gus = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Gus".into())),
-            ("age", Value::Int64(25)),
-            ("city", Value::String("Berlin".into())),
-        ],
-    );
-    let harm = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Harm".into())),
-            ("age", Value::Int64(35)),
-            ("city", Value::String("Amsterdam".into())),
-        ],
-    );
-    let vincent = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Vincent".into())),
-            ("age", Value::Int64(28)),
-            ("city", Value::String("Paris".into())),
-        ],
-    );
-    let mia = session.create_node_with_props(
-        &["Person"],
-        [
-            ("name", Value::String("Mia".into())),
-            ("age", Value::Int64(32)),
-            ("city", Value::String("Berlin".into())),
-        ],
-    );
+    let alix = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Alix".into())),
+                ("age", Value::Int64(30)),
+                ("city", Value::String("Amsterdam".into())),
+            ],
+        )
+        .unwrap();
+    let gus = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Gus".into())),
+                ("age", Value::Int64(25)),
+                ("city", Value::String("Berlin".into())),
+            ],
+        )
+        .unwrap();
+    let harm = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Harm".into())),
+                ("age", Value::Int64(35)),
+                ("city", Value::String("Amsterdam".into())),
+            ],
+        )
+        .unwrap();
+    let vincent = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Vincent".into())),
+                ("age", Value::Int64(28)),
+                ("city", Value::String("Paris".into())),
+            ],
+        )
+        .unwrap();
+    let mia = session
+        .create_node_with_props(
+            &["Person"],
+            [
+                ("name", Value::String("Mia".into())),
+                ("age", Value::Int64(32)),
+                ("city", Value::String("Berlin".into())),
+            ],
+        )
+        .unwrap();
 
     let e1 = session.create_edge(alix, gus, "KNOWS");
     db.set_edge_property(e1, "since", Value::Int64(2020));
@@ -359,7 +369,9 @@ fn test_tx_isolation_uncommitted_not_visible() {
     let db = GrafeoDB::new_in_memory();
 
     let setup = db.session();
-    setup.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
+    setup
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
+        .unwrap();
 
     let mut session1 = db.session();
     session1.begin_transaction().unwrap();

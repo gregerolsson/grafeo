@@ -858,6 +858,12 @@ impl GremlinTranslator {
                 Ok((plan, None))
             }
             ast::Step::Range(start, end) => {
+                if end < start {
+                    return Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("range() end ({end}) must be >= start ({start})"),
+                    )));
+                }
                 let plan = wrap_skip(input, *start);
                 let plan = wrap_limit(plan, end - start);
                 Ok((plan, None))
@@ -1828,12 +1834,15 @@ impl GremlinTranslator {
 
                 let (min_hops, max_hops) = match &repeat_step.termination {
                     Some(ast::RepeatTermination::Times(n)) => {
+                        // reason: repeat count is always small, fits u32
+                        #[allow(clippy::cast_possible_truncation)]
+                        let hops = *n as u32;
                         if repeat_step.emit {
                             // emit() with times(n): return results at every depth 1..n
-                            (1, Some(*n as u32))
+                            (1, Some(hops))
                         } else {
                             // times(n): return results at exactly depth n
-                            (*n as u32, Some(*n as u32))
+                            (hops, Some(hops))
                         }
                     }
                     Some(ast::RepeatTermination::Until(_)) | None => {

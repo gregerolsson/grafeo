@@ -24,6 +24,8 @@ pub fn write_file_header(file: &mut File, header: &FileHeader) -> Result<()> {
     let encoded = bincode::serde::encode_to_vec(header, bincode::config::standard())
         .map_err(|e| Error::Serialization(e.to_string()))?;
 
+    // reason: FILE_HEADER_SIZE is 4096, a constant that fits in usize on all targets
+    #[allow(clippy::cast_possible_truncation)]
     let mut buf = vec![0u8; FILE_HEADER_SIZE as usize];
     if encoded.len() > buf.len() {
         return Err(Error::Internal(
@@ -43,6 +45,8 @@ pub fn write_file_header(file: &mut File, header: &FileHeader) -> Result<()> {
 ///
 /// Returns an error if the I/O read or deserialization fails.
 pub fn read_file_header(file: &mut File) -> Result<FileHeader> {
+    // reason: FILE_HEADER_SIZE is 4096, a constant that fits in usize on all targets
+    #[allow(clippy::cast_possible_truncation)]
     let mut buf = vec![0u8; FILE_HEADER_SIZE as usize];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut buf)?;
@@ -96,6 +100,8 @@ pub fn write_db_header(file: &mut File, slot: u8, header: &DbHeader) -> Result<(
     let encoded = bincode::serde::encode_to_vec(header, bincode::config::standard())
         .map_err(|e| Error::Serialization(e.to_string()))?;
 
+    // reason: DB_HEADER_SIZE is 4096, a constant that fits in usize on all targets
+    #[allow(clippy::cast_possible_truncation)]
     let mut buf = vec![0u8; DB_HEADER_SIZE as usize];
     if encoded.len() > buf.len() {
         return Err(Error::Internal(
@@ -113,6 +119,8 @@ pub fn write_db_header(file: &mut File, slot: u8, header: &DbHeader) -> Result<(
 fn read_db_header(file: &mut File, slot: u8) -> Result<DbHeader> {
     debug_assert!(slot < 2, "db header slot must be 0 or 1");
 
+    // reason: DB_HEADER_SIZE is 4096, a constant that fits in usize on all targets
+    #[allow(clippy::cast_possible_truncation)]
     let mut buf = vec![0u8; DB_HEADER_SIZE as usize];
     file.seek(SeekFrom::Start(db_header_offset(slot)))?;
     file.read_exact(&mut buf)?;

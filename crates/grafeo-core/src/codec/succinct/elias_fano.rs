@@ -118,12 +118,16 @@ impl EliasFano {
         // Build upper bits in unary: for each value, we have (high - prev_high) zeros followed by a 1
         // Total length: n (ones) + max_high (zeros) = n + (max_value >> lower_bits)
         let max_high = values[n - 1] >> lower_bits;
+        // reason: on 64-bit targets usize == u64; on 32-bit this is a theoretical concern only
+        #[allow(clippy::cast_possible_truncation)]
         let upper_len = n + max_high as usize;
 
         let mut upper_bits = BitVector::zeros(upper_len);
         for (i, &val) in values.iter().enumerate() {
             let high = val >> lower_bits;
             // Position = high + i (gap encoding)
+            // reason: high values are bounded by max_high which fits in upper_len
+            #[allow(clippy::cast_possible_truncation)]
             let pos = high as usize + i;
             if pos < upper_len {
                 upper_bits.set(pos, true);

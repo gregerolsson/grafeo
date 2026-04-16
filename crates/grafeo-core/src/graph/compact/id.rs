@@ -10,10 +10,10 @@ use grafeo_common::types::{EdgeId, NodeId};
 const OFFSET_MASK: u64 = (1 << 48) - 1;
 
 /// Maximum table_id value (15 bits).
-const MAX_TABLE_ID: u16 = (1 << 15) - 1;
+pub const MAX_TABLE_ID: u16 = (1 << 15) - 1;
 
 /// Maximum offset value (48 bits).
-const MAX_OFFSET: u64 = OFFSET_MASK;
+pub const MAX_OFFSET: u64 = OFFSET_MASK;
 
 /// Encodes a table ID and offset into a [`NodeId`].
 ///
@@ -93,6 +93,9 @@ pub fn is_compact_id(id: NodeId) -> bool {
 }
 
 #[cfg(test)]
+// Compact IDs have bit 63 = 0, so u64<->i64 casts are lossless
+// reason: compact IDs have bit 63 = 0, so u64 to i64 casts are lossless
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 mod tests {
     use super::*;
 

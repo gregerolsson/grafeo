@@ -36,6 +36,8 @@ impl RowKey {
                         Value::Null => KeyPart::Null,
                         Value::Bool(b) => KeyPart::Bool(b),
                         Value::Int64(i) => KeyPart::Int64(i),
+                        // reason: intentional bit-level reinterpretation for equality comparison
+                        #[allow(clippy::cast_possible_wrap)]
                         Value::Float64(f) => KeyPart::Int64(f.to_bits() as i64),
                         Value::String(s) => KeyPart::String(s.to_string()),
                         _ => KeyPart::String(format!("{v:?}")),

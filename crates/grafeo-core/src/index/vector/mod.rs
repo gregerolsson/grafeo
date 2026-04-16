@@ -770,6 +770,8 @@ mod tests {
         }
 
         #[test]
+        // reason: test indices 0..10 are non-negative
+        #[allow(clippy::cast_sign_loss)]
         fn quantized_kind_snapshot_restore() {
             let kind = build_quantized_kind(10);
             let (entry, level, nodes) = kind.snapshot_topology();

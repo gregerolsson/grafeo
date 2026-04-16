@@ -112,7 +112,15 @@ impl RunLengthEncoding {
     /// Creates a run-length encoding from pre-built runs.
     #[must_use]
     pub fn from_runs(runs: Vec<Run<u64>>) -> Self {
-        let total_count = runs.iter().map(|r| r.length as usize).sum();
+        let total_count = runs
+            .iter()
+            .map(|r| {
+                // reason: run lengths are bounded by practical data sizes
+                #[allow(clippy::cast_possible_truncation)]
+                let len = r.length as usize;
+                len
+            })
+            .sum();
         Self { runs, total_count }
     }
 
@@ -217,6 +225,8 @@ impl RunLengthEncoding {
         // Read run count
         let mut buf = [0u8; 8];
         cursor.read_exact(&mut buf)?;
+        // reason: run count is bounded by practical data sizes
+        #[allow(clippy::cast_possible_truncation)]
         let run_count = u64::from_le_bytes(buf) as usize;
 
         // Read runs
@@ -245,6 +255,8 @@ impl RunLengthEncoding {
 
         let mut offset = 0usize;
         for run in &self.runs {
+            // reason: run length is bounded by total_count which is usize
+            #[allow(clippy::cast_possible_truncation)]
             let run_end = offset + run.length as usize;
             if index < run_end {
                 return Some(run.value);
@@ -294,6 +306,8 @@ impl Iterator for RunLengthIterator<'_> {
             .map(|r| r.length)
             .sum::<u64>()
             - self.within_run;
+        // reason: remaining count is bounded by total data length
+        #[allow(clippy::cast_possible_truncation)]
         (remaining as usize, Some(remaining as usize))
     }
 }
@@ -356,6 +370,8 @@ impl SignedRunLengthEncoding {
 /// Zigzag encodes a signed integer to unsigned.
 #[inline]
 #[must_use]
+// reason: zig-zag encoding intentionally reinterprets bits, no data loss
+#[allow(clippy::cast_sign_loss)]
 pub fn zigzag_encode(n: i64) -> u64 {
     ((n << 1) ^ (n >> 63)) as u64
 }
@@ -363,6 +379,8 @@ pub fn zigzag_encode(n: i64) -> u64 {
 /// Zigzag decodes an unsigned integer to signed.
 #[inline]
 #[must_use]
+// reason: zig-zag decoding intentionally reinterprets bits, inverse of encode
+#[allow(clippy::cast_possible_wrap)]
 pub fn zigzag_decode(n: u64) -> i64 {
     ((n >> 1) as i64) ^ -((n & 1) as i64)
 }

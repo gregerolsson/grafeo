@@ -78,6 +78,8 @@ impl HorizontalAggregateOperator {
         match self.entity_kind {
             EntityKind::Edge => {
                 let id = match entity_value {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(i) => EdgeId(*i as u64),
                     _ => return None,
                 };
@@ -85,6 +87,8 @@ impl HorizontalAggregateOperator {
             }
             EntityKind::Node => {
                 let id = match entity_value {
+                    // reason: ID encoding: i64 <-> u64 round-trip
+                    #[allow(clippy::cast_sign_loss)]
                     Value::Int64(i) => NodeId(*i as u64),
                     _ => return None,
                 };
@@ -200,6 +204,8 @@ mod tests {
         }
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn setup_store_with_edges() -> (Arc<dyn GraphStore>, Vec<Value>) {
         let store = LpgStore::new().unwrap();
         let n1 = store.create_node(&[]);
@@ -221,6 +227,8 @@ mod tests {
         (Arc::new(store), edge_ids)
     }
 
+    // reason: test IDs are small sequential counters
+    #[allow(clippy::cast_possible_wrap)]
     fn setup_store_with_nodes() -> (Arc<dyn GraphStore>, Vec<Value>) {
         let store = LpgStore::new().unwrap();
         // Use Float64 properties since the result column is Float64-typed

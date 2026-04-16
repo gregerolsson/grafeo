@@ -18,8 +18,8 @@ import grafeo
 db = grafeo.GrafeoDB()
 
 # Basic counts via database methods
-print(f"Nodes: {db.node_count()}")
-print(f"Edges: {db.edge_count()}")
+print(f"Nodes: {db.node_count}")
+print(f"Edges: {db.edge_count}")
 
 # Additional metrics via algorithms
 algs = db.algorithms()

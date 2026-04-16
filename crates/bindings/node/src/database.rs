@@ -43,6 +43,8 @@ fn validate_node_id(id: f64) -> Result<NodeId> {
     if !(0.0..=9_007_199_254_740_991.0).contains(&id) {
         return Err(NodeGrafeoError::InvalidArgument(format!("Invalid node ID: {id}")).into());
     }
+    // reason: Range check above guarantees the value is in [0, 2^53-1], safe for u64
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(NodeId(id as u64))
 }
 
@@ -51,6 +53,8 @@ fn validate_edge_id(id: f64) -> Result<EdgeId> {
     if !(0.0..=9_007_199_254_740_991.0).contains(&id) {
         return Err(NodeGrafeoError::InvalidArgument(format!("Invalid edge ID: {id}")).into());
     }
+    // reason: Range check above guarantees the value is in [0, 2^53-1], safe for u64
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(EdgeId(id as u64))
 }
 
@@ -62,6 +66,8 @@ fn validate_epoch(epoch: f64) -> Result<grafeo_common::types::EpochId> {
     if !(0.0..=9_007_199_254_740_991.0).contains(&epoch) {
         return Err(NodeGrafeoError::InvalidArgument(format!("Invalid epoch: {epoch}")).into());
     }
+    // reason: Range check above guarantees the value is in [0, 2^53-1], safe for u64
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     Ok(grafeo_common::types::EpochId::new(epoch as u64))
 }
 
@@ -293,13 +299,19 @@ impl JsGrafeoDB {
     /// Get the number of nodes.
     #[napi(js_name = "nodeCount")]
     pub fn node_count(&self) -> u32 {
-        self.inner.read().node_count() as u32
+        // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B nodes are unrealistic
+        #[allow(clippy::cast_possible_truncation)]
+        let count = self.inner.read().node_count() as u32;
+        count
     }
 
     /// Get the number of edges.
     #[napi(js_name = "edgeCount")]
     pub fn edge_count(&self) -> u32 {
-        self.inner.read().edge_count() as u32
+        // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B edges are unrealistic
+        #[allow(clippy::cast_possible_truncation)]
+        let count = self.inner.read().edge_count() as u32;
+        count
     }
 
     /// Begin a transaction with an optional isolation level.
@@ -348,6 +360,8 @@ impl JsGrafeoDB {
     /// ascending (lower = more similar). The distance scale depends on
     /// the metric configured at index creation.
     #[napi(js_name = "vectorSearch")]
+    // reason: f64->f32 is intentional: HNSW index uses f32 vectors
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn vector_search(
         &self,
         label: String,
@@ -385,6 +399,8 @@ impl JsGrafeoDB {
 
     /// Bulk-insert nodes with vector properties.
     #[napi(js_name = "batchCreateNodes")]
+    // reason: f64->f32 is intentional: HNSW index uses f32 vectors
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn batch_create_nodes(
         &self,
         label: String,
@@ -653,6 +669,8 @@ impl JsGrafeoDB {
     }
 
     /// Batch search for nearest neighbors of multiple query vectors.
+    // reason: f64->f32 is intentional: HNSW index uses f32 vectors
+    #[allow(clippy::cast_possible_truncation)]
     #[napi(js_name = "batchVectorSearch")]
     pub async fn batch_vector_search(
         &self,
@@ -703,6 +721,8 @@ impl JsGrafeoDB {
     /// (lower = more similar). The ordering reflects relevance-diversity
     /// balance, not distance sorting.
     #[napi(js_name = "mmrSearch")]
+    // reason: f64->f32 is intentional: HNSW index uses f32 vectors
+    #[allow(clippy::cast_possible_truncation)]
     #[allow(clippy::too_many_arguments)]
     pub async fn mmr_search(
         &self,
@@ -839,6 +859,8 @@ impl JsGrafeoDB {
     /// NOT distances.
     #[napi(js_name = "hybridSearch")]
     #[allow(clippy::too_many_arguments)]
+    // reason: f64->f32 is intentional: HNSW index uses f32 vectors
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn hybrid_search(
         &self,
         label: String,
@@ -929,10 +951,10 @@ impl JsGrafeoDB {
     /// Returns the full change history for a node.
     #[napi(js_name = "nodeHistory")]
     pub async fn node_history(&self, node_id: f64) -> Result<Vec<serde_json::Value>> {
+        let id = validate_node_id(node_id)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            let id = grafeo_common::types::NodeId::new(node_id as u64);
             let events = db
                 .history(id)
                 .map_err(NodeGrafeoError::from)
@@ -946,10 +968,10 @@ impl JsGrafeoDB {
     /// Returns the full change history for an edge.
     #[napi(js_name = "edgeHistory")]
     pub async fn edge_history(&self, edge_id: f64) -> Result<Vec<serde_json::Value>> {
+        let id = validate_edge_id(edge_id)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            let id = grafeo_common::types::EdgeId::new(edge_id as u64);
             let events = db
                 .history(id)
                 .map_err(NodeGrafeoError::from)
@@ -967,11 +989,11 @@ impl JsGrafeoDB {
         node_id: f64,
         since_epoch: f64,
     ) -> Result<Vec<serde_json::Value>> {
+        let id = validate_node_id(node_id)?;
         let epoch = validate_epoch(since_epoch)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let db = db.read();
-            let id = grafeo_common::types::NodeId::new(node_id as u64);
             let events = db
                 .history_since(id, epoch)
                 .map_err(NodeGrafeoError::from)

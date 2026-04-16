@@ -696,8 +696,11 @@ impl LpgStore {
         }
 
         // Update live counters
+        // reason: edge batch size fits i64 for practical sizes
+        #[allow(clippy::cast_possible_wrap)]
+        let edge_count_i64 = edges.len() as i64;
         self.live_edge_count
-            .fetch_add(edges.len() as i64, Ordering::Relaxed);
+            .fetch_add(edge_count_i64, Ordering::Relaxed);
         {
             let mut counts = self.edge_type_live_counts.write();
             for (type_id, increment) in type_increments {
@@ -771,8 +774,11 @@ impl LpgStore {
         }
 
         // Update live counters
+        // reason: edge batch size fits i64 for practical sizes
+        #[allow(clippy::cast_possible_wrap)]
+        let edge_count_i64 = edges.len() as i64;
         self.live_edge_count
-            .fetch_add(edges.len() as i64, Ordering::Relaxed);
+            .fetch_add(edge_count_i64, Ordering::Relaxed);
         {
             let mut counts = self.edge_type_live_counts.write();
             for (type_id, increment) in type_increments {

@@ -129,6 +129,8 @@ impl AsyncWalManager {
             .ok_or_else(|| Error::Internal("WAL writer not available".to_string()))?;
 
         // Write length prefix
+        // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
+        #[allow(clippy::cast_possible_truncation)]
         let len = data.len() as u32;
         log_file.writer.write_all(&len.to_le_bytes()).await?;
 

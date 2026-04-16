@@ -167,6 +167,8 @@ impl UnwindOperator {
         let mut next_col = element_col_idx + 1;
         if self.emit_ordinality {
             if let Some(out_col) = builder.column_mut(next_col) {
+                // reason: list index fits i64 for practical sizes
+                #[allow(clippy::cast_possible_wrap)]
                 out_col.push_value(Value::Int64((self.current_list_idx + 1) as i64));
             }
             next_col += 1;
@@ -176,6 +178,8 @@ impl UnwindOperator {
         if self.emit_offset
             && let Some(out_col) = builder.column_mut(next_col)
         {
+            // reason: list index fits i64 for practical sizes
+            #[allow(clippy::cast_possible_wrap)]
             out_col.push_value(Value::Int64(self.current_list_idx as i64));
         }
 

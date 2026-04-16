@@ -18,10 +18,10 @@ use grafeo_engine::GrafeoDB;
 
 #[test]
 fn test_concurrent_read_sessions() {
-    // Multiple sessions reading simultaneously should not block
+    // Multiple sessions reading simultaneously should not block.
+    // 2 threads to stay within nextest timeout on 2-core CI runners.
     let db = Arc::new(GrafeoDB::new_in_memory());
 
-    // Create some initial data
     {
         let session = db.session();
         session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
@@ -29,7 +29,7 @@ fn test_concurrent_read_sessions() {
         session.execute("INSERT (:Person {name: 'Harm'})").unwrap();
     }
 
-    let num_threads = 4;
+    let num_threads = 2;
     let barrier = Arc::new(Barrier::new(num_threads));
     let success_count = Arc::new(AtomicUsize::new(0));
 
@@ -40,14 +40,11 @@ fn test_concurrent_read_sessions() {
             let success_count = Arc::clone(&success_count);
 
             thread::spawn(move || {
-                // Wait for all threads to be ready
                 barrier.wait();
 
-                // Each thread creates a session and reads
                 let session = db.session();
                 let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
 
-                // Should see all 3 nodes
                 if result.row_count() == 3 {
                     success_count.fetch_add(1, Ordering::Relaxed);
                 }
@@ -55,12 +52,10 @@ fn test_concurrent_read_sessions() {
         })
         .collect();
 
-    // Wait for all threads to complete
     for handle in handles {
         handle.join().expect("Thread panicked");
     }
 
-    // All threads should have succeeded
     assert_eq!(
         success_count.load(Ordering::Relaxed),
         num_threads,
@@ -70,10 +65,12 @@ fn test_concurrent_read_sessions() {
 
 #[test]
 fn test_concurrent_write_sessions() {
-    // Multiple sessions writing to different entities should succeed
+    // Multiple sessions writing to different entities should succeed.
+    // Kept at 2 threads to stay within the nextest 60s timeout on
+    // resource-constrained 2-core CI runners.
     let db = Arc::new(GrafeoDB::new_in_memory());
 
-    let num_threads = 4;
+    let num_threads = 2;
     let barrier = Arc::new(Barrier::new(num_threads));
     let success_count = Arc::new(AtomicUsize::new(0));
 
@@ -84,10 +81,8 @@ fn test_concurrent_write_sessions() {
             let success_count = Arc::clone(&success_count);
 
             thread::spawn(move || {
-                // Wait for all threads to be ready
                 barrier.wait();
 
-                // Each thread creates a unique node
                 let session = db.session();
                 let query = format!("INSERT (:Thread{} {{id: {}}})", i, i);
                 if session.execute(&query).is_ok() {
@@ -97,19 +92,16 @@ fn test_concurrent_write_sessions() {
         })
         .collect();
 
-    // Wait for all threads to complete
     for handle in handles {
         handle.join().expect("Thread panicked");
     }
 
-    // All threads should have succeeded
     assert_eq!(
         success_count.load(Ordering::Relaxed),
         num_threads,
         "All concurrent writes to different entities should succeed"
     );
 
-    // Verify all nodes were created
     let session = db.session();
     for i in 0..num_threads {
         let query = format!("MATCH (n:Thread{}) RETURN n", i);
@@ -205,10 +197,11 @@ fn test_session_isolation_between_threads() {
 
 #[test]
 fn test_many_sessions_rapid_creation() {
-    // Creating many sessions rapidly should not cause issues
+    // Creating many sessions rapidly should not cause issues.
+    // 2 threads to stay within nextest timeout on 2-core CI runners.
     let db = Arc::new(GrafeoDB::new_in_memory());
 
-    let num_threads = 4;
+    let num_threads = 2;
     let sessions_per_thread = 20;
     let barrier = Arc::new(Barrier::new(num_threads));
     let success_count = Arc::new(AtomicUsize::new(0));

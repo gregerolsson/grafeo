@@ -1,0 +1,117 @@
+# SPARQL Error Cases
+#
+# Covers: syntax errors, malformed queries, unknown prefixes,
+# invalid expressions, type errors, malformed IRIs.
+
+meta:
+  language: sparql
+  model: rdf
+  section: errors
+  title: Error Cases
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Syntax errors
+  # ---------------------------------------------------------------------------
+
+  - name: missing_where_clause
+    query: "SELECT ?s { ?s ?p ?o"
+    expect:
+      error: ""
+
+  - name: unclosed_brace
+    query: "SELECT ?s WHERE { ?s ?p ?o"
+    expect:
+      error: ""
+
+  - name: missing_select_variables
+    query: "SELECT WHERE { ?s ?p ?o }"
+    expect:
+      error: ""
+
+  - name: empty_query
+    query: ""
+    expect:
+      error: ""
+
+  - name: nonsense_query
+    query: "FROBNICATE DATA { <a> <b> <c> }"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Malformed IRIs and literals
+  # ---------------------------------------------------------------------------
+
+  - name: malformed_typed_literal
+    query: "SELECT ?v WHERE { ?s ?p \"abc\"^^<invalid iri> }"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Unknown prefix
+  # ---------------------------------------------------------------------------
+
+  - name: undefined_prefix
+    skip: "Parser expands prefixes lazily, unresolved prefix is not caught at parse time"
+    query: "SELECT ?s WHERE { ?s foaf:name ?o }"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Invalid expressions
+  # ---------------------------------------------------------------------------
+
+  - name: division_by_zero
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/val> 10 .
+        }
+    query: "SELECT ((?v / 0) AS ?r) WHERE { <http://ex.org/a> <http://ex.org/val> ?v }"
+    expect:
+      rows:
+        - [null]
+
+  - name: invalid_aggregation_no_group
+    skip: "SPARQL allows bare aggregates without GROUP BY (aggregates over all solutions)"
+    query: "SELECT ?s (COUNT(?o) AS ?c) WHERE { ?s ?p ?o }"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Type errors
+  # ---------------------------------------------------------------------------
+
+  - name: str_plus_integer
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/val> "hello" .
+        }
+    query: "SELECT (?v + 1 AS ?r) WHERE { <http://ex.org/a> <http://ex.org/val> ?v }"
+    expect:
+      rows:
+        - [null]
+
+  # ---------------------------------------------------------------------------
+  # Empty result edge cases
+  # ---------------------------------------------------------------------------
+
+  - name: query_empty_store
+    query: "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"
+    expect:
+      count: 0
+
+  - name: filter_no_match
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/val> 10 .
+        }
+    query: "SELECT ?v WHERE { ?s <http://ex.org/val> ?v FILTER(?v > 100) }"
+    expect:
+      count: 0

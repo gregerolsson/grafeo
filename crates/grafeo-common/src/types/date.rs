@@ -124,8 +124,16 @@ impl Date {
         // Add months
         if dur.months() != 0 {
             let total_months = y as i64 * 12 + (m as i64 - 1) + dur.months();
-            y = (total_months.div_euclid(12)) as i32;
-            m = (total_months.rem_euclid(12) + 1) as u32;
+            y = i32::try_from(total_months.div_euclid(12)).unwrap_or(if total_months < 0 {
+                i32::MIN
+            } else {
+                i32::MAX
+            });
+            // reason: rem_euclid(12) + 1 is in [1, 12], always fits u32
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                m = (total_months.rem_euclid(12) + 1) as u32;
+            }
             // Clamp day to max for new month
             let max_d = days_in_month(y, m);
             if d > max_d {
@@ -135,7 +143,7 @@ impl Date {
 
         // Add days
         let days = days_from_civil(y, m, d) as i64 + dur.days();
-        Self(days as i32)
+        Self(i32::try_from(days).unwrap_or(if days < 0 { i32::MIN } else { i32::MAX }))
     }
 
     /// Subtracts a duration from this date.
@@ -187,17 +195,22 @@ impl fmt::Display for Date {
 pub(crate) fn days_from_civil(year: i32, month: u32, day: u32) -> i32 {
     let y = if month <= 2 { year - 1 } else { year } as i64;
     let era = y.div_euclid(400);
+    // reason: rem_euclid(400) is in [0, 399], always fits u32
+    #[allow(clippy::cast_possible_truncation)]
     let yoe = y.rem_euclid(400) as u32; // year of era [0, 399]
     let m = month;
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1; // day of year [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // day of era [0, 146096]
-    (era * 146097 + doe as i64 - 719468) as i32
+    let days = era * 146097 + doe as i64 - 719468;
+    i32::try_from(days).unwrap_or(if days < 0 { i32::MIN } else { i32::MAX })
 }
 
 /// Converts days since Unix epoch to (year, month, day).
 pub(crate) fn civil_from_days(days: i32) -> (i32, u32, u32) {
     let z = days as i64 + 719468;
     let era = z.div_euclid(146097);
+    // reason: rem_euclid(146097) is in [0, 146096], always fits u32
+    #[allow(clippy::cast_possible_truncation)]
     let doe = z.rem_euclid(146097) as u32; // day of era [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
     let y = yoe as i64 + era * 400;
@@ -206,7 +219,10 @@ pub(crate) fn civil_from_days(days: i32) -> (i32, u32, u32) {
     let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m, d)
+    // reason: year range from i32 input days is bounded within i32
+    #[allow(clippy::cast_possible_truncation)]
+    let year = y as i32;
+    (year, m, d)
 }
 
 /// Returns the number of days in a given month.

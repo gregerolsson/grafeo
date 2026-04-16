@@ -208,6 +208,7 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::Semantic => GqlStatus::SYNTAX_INVALID_REFERENCE,
                 QueryErrorKind::Optimization => GqlStatus::SYNTAX_ERROR,
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
+                QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
             },
             Error::Transaction(t) => match t {
                 TransactionError::ReadOnly => GqlStatus::INVALID_TX_READ_ONLY,

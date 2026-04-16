@@ -30,7 +30,7 @@ impl LpgStore {
         // Update props_count in record
         #[cfg(not(feature = "temporal"))]
         {
-            let count = self.node_properties.get_all(id).len() as u16;
+            let count = u16::try_from(self.node_properties.get_all(id).len()).unwrap_or(u16::MAX);
             if let Some(chain) = self.nodes.write().get_mut(&id)
                 && let Some(record) = chain.latest_mut()
             {
@@ -143,7 +143,7 @@ impl LpgStore {
         // Update props_count in record
         #[cfg(not(feature = "temporal"))]
         {
-            let count = self.node_properties.get_all(id).len() as u16;
+            let count = u16::try_from(self.node_properties.get_all(id).len()).unwrap_or(u16::MAX);
             if let Some(chain) = self.nodes.write().get_mut(&id)
                 && let Some(record) = chain.latest_mut()
             {

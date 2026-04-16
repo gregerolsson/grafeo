@@ -495,6 +495,8 @@ impl AggregateState {
                     let mut sorted = values.clone();
                     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     // Index calculation per SQL standard: floor(p * (n - 1))
+                    // reason: percentile index is bounded by sorted.len(), fits usize
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let index = (percentile * (sorted.len() - 1) as f64).floor() as usize;
                     Value::Float64(sorted[index])
                 }
@@ -508,7 +510,11 @@ impl AggregateState {
                     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     // Linear interpolation per SQL standard
                     let rank = percentile * (sorted.len() - 1) as f64;
+                    // reason: rank is bounded by sorted.len() - 1, fits usize
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let lower_idx = rank.floor() as usize;
+                    // reason: rank is a non-negative f64 from percentile calculation, fits usize
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let upper_idx = rank.ceil() as usize;
                     if lower_idx == upper_idx {
                         Value::Float64(sorted[lower_idx])
@@ -666,6 +672,8 @@ impl GroupKeyPart {
             Value::Null => Self::Null,
             Value::Bool(b) => Self::Bool(b),
             Value::Int64(i) => Self::Int64(i),
+            // reason: intentional bit-level reinterpretation for grouping equality
+            #[allow(clippy::cast_possible_wrap)]
             Value::Float64(f) => Self::Int64(f.to_bits() as i64),
             Value::String(s) => Self::String(s.clone()),
             Value::Bytes(b) => Self::Bytes(b),

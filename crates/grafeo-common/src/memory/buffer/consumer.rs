@@ -81,6 +81,9 @@ pub mod priorities {
     /// Cached query results - relatively cheap to recompute.
     pub const QUERY_CACHE: u8 = 30;
 
+    /// Execution operator buffers (sort, aggregate): can be spilled to disk.
+    pub const EXECUTION_BUFFERS: u8 = 40;
+
     /// Index buffers - can be rebuilt from primary data.
     pub const INDEX_BUFFERS: u8 = 50;
 

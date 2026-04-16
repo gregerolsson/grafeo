@@ -36,6 +36,8 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
             let n: f64 = val.coerce_to_number()?.get_double()?;
             // If the number is an integer within safe range, store as Int64
             if n.fract() == 0.0 && n.abs() < (1i64 << 53) as f64 {
+                // reason: Value is a whole number in (-2^53, 2^53), fits in i64
+                #[allow(clippy::cast_possible_truncation)]
                 Ok(Value::Int64(n as i64))
             } else {
                 Ok(Value::Float64(n))
@@ -48,15 +50,32 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
         ValueType::BigInt => {
             // SAFETY: type was checked as BigInt by the match arm, so cast is valid
             let bigint: BigInt = unsafe { val.cast()? };
+            if bigint.words.len() > 1 {
+                return Err(napi::Error::new(
+                    napi::Status::InvalidArg,
+                    "BigInt value too large for i64",
+                ));
+            }
             let word = if bigint.words.is_empty() {
                 0u64
             } else {
                 bigint.words[0]
             };
             let signed = if bigint.sign_bit {
-                -(word as i64)
+                if word == i64::MIN.unsigned_abs() {
+                    i64::MIN
+                } else if let Ok(v) = i64::try_from(word) {
+                    -v
+                } else {
+                    return Err(napi::Error::new(
+                        napi::Status::InvalidArg,
+                        "BigInt value too large for i64",
+                    ));
+                }
             } else {
-                word as i64
+                i64::try_from(word).map_err(|_| {
+                    napi::Error::new(napi::Status::InvalidArg, "BigInt value too large for i64")
+                })?
             };
             Ok(Value::Int64(signed))
         }
@@ -96,6 +115,8 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         // SAFETY: obj.is_date() returned true, and env/obj are valid in this scope
         let date: JsDate = unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
         let ms = date.value_of()?;
+        // reason: JS Date.valueOf() returns ms since epoch; *1000 gives microseconds, fits in i64
+        #[allow(clippy::cast_possible_truncation)]
         let micros = (ms * 1000.0) as i64;
         return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
     }
@@ -179,6 +200,8 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             for (i, item) in items.iter().enumerate() {
                 let val = value_to_napi(env, item)?;
                 // SAFETY: env, arr, and val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements, so index fits u32
+                #[allow(clippy::cast_possible_truncation)]
                 check_napi(unsafe { sys::napi_set_element(env, arr, i as u32, val) })?;
             }
             Ok(arr)
@@ -245,6 +268,8 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             for (i, node) in nodes.iter().enumerate() {
                 let val = value_to_napi(env, node)?;
                 // SAFETY: env, nodes_arr, and val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements
+                #[allow(clippy::cast_possible_truncation)]
                 check_napi(unsafe { sys::napi_set_element(env, nodes_arr, i as u32, val) })?;
             }
 
@@ -257,6 +282,8 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             for (i, edge) in edges.iter().enumerate() {
                 let val = value_to_napi(env, edge)?;
                 // SAFETY: env, edges_arr, and val are valid napi values
+                // reason: JS arrays are limited to 2^32-1 elements
+                #[allow(clippy::cast_possible_truncation)]
                 check_napi(unsafe { sys::napi_set_element(env, edges_arr, i as u32, val) })?;
             }
 
@@ -312,8 +339,13 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             let mut obj = std::ptr::null_mut();
             // SAFETY: env is valid; napi_create_object writes to our out-pointer
             check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
-            let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-            let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
+            let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+            let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+            let net = if pos_sum >= neg_sum {
+                (pos_sum - neg_sum) as f64
+            } else {
+                -((neg_sum - pos_sum) as f64)
+            };
             let pncounter_key =
                 CString::new("$pncounter").expect("static string has no null bytes");
             let mut true_val = std::ptr::null_mut();
@@ -325,9 +357,7 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             })?;
             let mut net_val = std::ptr::null_mut();
             // SAFETY: env is valid; napi_create_double writes to our out-pointer
-            check_napi(unsafe {
-                sys::napi_create_double(env, (pos_sum - neg_sum) as f64, &raw mut net_val)
-            })?;
+            check_napi(unsafe { sys::napi_create_double(env, net, &raw mut net_val) })?;
             let value_key = CString::new("$value").expect("static string has no null bytes");
             // SAFETY: env, obj, and net_val are valid
             check_napi(unsafe {

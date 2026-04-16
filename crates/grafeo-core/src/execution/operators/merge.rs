@@ -210,7 +210,7 @@ impl MergeOperator {
         if let Some(existing_id) = self.find_matching_node(&resolved_match) {
             let resolved_on_match =
                 Self::resolve_properties(&self.config.on_match_properties, chunk, row, store_ref);
-            self.apply_on_match(existing_id, &resolved_on_match);
+            self.apply_on_match(existing_id, &resolved_on_match)?;
             Ok(existing_id)
         } else {
             let resolved_on_create =
@@ -220,8 +220,15 @@ impl MergeOperator {
     }
 
     /// Applies ON MATCH properties to an existing node.
-    fn apply_on_match(&self, node_id: NodeId, resolved_on_match: &[(String, Value)]) {
+    fn apply_on_match(
+        &self,
+        node_id: NodeId,
+        resolved_on_match: &[(String, Value)],
+    ) -> Result<(), super::OperatorError> {
         for (key, value) in resolved_on_match {
+            if let Some(ref validator) = self.validator {
+                validator.validate_node_property(&self.config.labels, key, value)?;
+            }
             if let Some(tid) = self.transaction_id {
                 self.store
                     .set_node_property_versioned(node_id, key.as_str(), value.clone(), tid);
@@ -230,6 +237,7 @@ impl MergeOperator {
                     .set_node_property(node_id, key.as_str(), value.clone());
             }
         }
+        Ok(())
     }
 }
 
@@ -472,8 +480,15 @@ impl MergeRelationshipOperator {
     }
 
     /// Applies ON MATCH properties to an existing edge.
-    fn apply_on_match_edge(&self, edge_id: EdgeId, resolved_on_match: &[(String, Value)]) {
+    fn apply_on_match_edge(
+        &self,
+        edge_id: EdgeId,
+        resolved_on_match: &[(String, Value)],
+    ) -> Result<(), super::OperatorError> {
         for (key, value) in resolved_on_match {
+            if let Some(ref validator) = self.validator {
+                validator.validate_edge_property(&self.config.edge_type, key, value)?;
+            }
             if let Some(tid) = self.transaction_id {
                 self.store
                     .set_edge_property_versioned(edge_id, key.as_str(), value.clone(), tid);
@@ -482,6 +497,7 @@ impl MergeRelationshipOperator {
                     .set_edge_property(edge_id, key.as_str(), value.clone());
             }
         }
+        Ok(())
     }
 }
 
@@ -533,7 +549,7 @@ impl Operator for MergeRelationshipOperator {
                         row,
                         store_ref,
                     );
-                    self.apply_on_match_edge(existing, &resolved_on_match);
+                    self.apply_on_match_edge(existing, &resolved_on_match)?;
                     existing
                 } else {
                     let resolved_on_create = MergeOperator::resolve_properties(

@@ -463,7 +463,8 @@ impl_algorithm! {
     params: pagerank_params,
     execute(store, params) {
         let damping = params.get_float("damping").unwrap_or(0.85);
-        let max_iter = params.get_int("max_iterations").unwrap_or(100) as usize;
+        // Clamp to non-negative: negative iterations treated as 0
+        let max_iter = usize::try_from(params.get_int("max_iterations").unwrap_or(100)).unwrap_or(0);
         let tolerance = params.get_float("tolerance").unwrap_or(1e-6);
 
         let scores = pagerank(store, damping, max_iter, tolerance);
@@ -609,6 +610,8 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
                 let in_d = *result.in_degree.get(&node).unwrap_or(&0);
                 let out_d = *result.out_degree.get(&node).unwrap_or(&0);
 
+                // reason: Node IDs and degree counts are well within i64::MAX
+                #[allow(clippy::cast_possible_wrap)]
                 output.add_row(vec![
                     Value::Int64(node.0 as i64),
                     Value::Int64(in_d as i64),

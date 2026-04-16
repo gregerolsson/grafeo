@@ -237,8 +237,8 @@ For atomic operations, use transactions:
     // Begin a transaction
     session.begin_transaction()?;
 
-    session.execute("INSERT (:Person {name: 'Dave'})")?;
-    session.execute("INSERT (:Person {name: 'Eve'})")?;
+    session.execute("INSERT (:Person {name: 'Vincent'})")?;
+    session.execute("INSERT (:Person {name: 'Jules'})")?;
 
     session.commit()?;  // Both inserts committed atomically
     ```

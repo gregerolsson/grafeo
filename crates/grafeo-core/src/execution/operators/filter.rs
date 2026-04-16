@@ -16,18 +16,60 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Extracts a required integer field from a temporal constructor map.
+///
+/// Returns `Some(value)` when the key is present and holds a valid integer
+/// (or a finite float that can be truncated to i64). Returns `None` when
+/// the key is absent. Rejects non-finite floats (NaN, Infinity) by
+/// returning `Some(None)` through `map_int_checked`, which lets callers
+/// distinguish "missing" from "invalid".
 fn map_int(m: &BTreeMap<PropertyKey, Value>, key: &str) -> Option<i64> {
-    match m.get(&PropertyKey::from(key))? {
-        Value::Int64(v) => Some(*v),
-        Value::Float64(f) => Some(*f as i64),
-        _ => None,
+    match map_int_checked(m, key) {
+        MapIntResult::Absent => None,
+        MapIntResult::Valid(v) => Some(v),
+        // Invalid floats (NaN, Infinity): treat as missing so callers
+        // that use map_int for required fields will fail with None.
+        MapIntResult::Invalid => None,
+    }
+}
+
+/// Result of extracting an integer field, distinguishing absent from invalid.
+enum MapIntResult {
+    /// Key was not present in the map.
+    Absent,
+    /// Key was present with a valid integer value.
+    Valid(i64),
+    /// Key was present but the value is not convertible (NaN, Infinity, wrong type).
+    Invalid,
+}
+
+/// Extracts an integer field with three-way result: absent, valid, or invalid.
+fn map_int_checked(m: &BTreeMap<PropertyKey, Value>, key: &str) -> MapIntResult {
+    match m.get(&PropertyKey::from(key)) {
+        None => MapIntResult::Absent,
+        Some(Value::Int64(v)) => MapIntResult::Valid(*v),
+        Some(Value::Float64(f)) => {
+            let f = *f;
+            if f.is_nan() || f.is_infinite() || f > i64::MAX as f64 || f < i64::MIN as f64 {
+                MapIntResult::Invalid
+            } else {
+                // reason: intentional truncation of finite float to integer for temporal field extraction
+                #[allow(clippy::cast_possible_truncation)]
+                MapIntResult::Valid(f as i64)
+            }
+        }
+        Some(_) => MapIntResult::Invalid,
     }
 }
 
 /// Extracts an optional integer field from a temporal constructor map,
-/// returning a default value when the key is absent.
-fn map_int_or(m: &BTreeMap<PropertyKey, Value>, key: &str, default: i64) -> i64 {
-    map_int(m, key).unwrap_or(default)
+/// returning a default value when the key is absent. Returns `None` when
+/// the key is present but holds an invalid value (NaN, Infinity).
+fn map_int_or(m: &BTreeMap<PropertyKey, Value>, key: &str, default: i64) -> Option<i64> {
+    match map_int_checked(m, key) {
+        MapIntResult::Absent => Some(default),
+        MapIntResult::Valid(v) => Some(v),
+        MapIntResult::Invalid => None,
+    }
 }
 
 /// A predicate for filtering rows.
@@ -649,6 +691,12 @@ impl ExpressionPredicate {
                 let index_val = self.eval_expr(index, chunk, row)?;
                 match (&base_val, &index_val) {
                     (Value::List(items), Value::Int64(i)) => {
+                        // reason: list/string lengths fit i64; index values are user-provided
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_possible_wrap,
+                            clippy::cast_sign_loss
+                        )]
                         let idx = if *i < 0 {
                             // Negative indexing from end
                             let len = items.len() as i64;
@@ -659,6 +707,12 @@ impl ExpressionPredicate {
                         items.get(idx).cloned()
                     }
                     (Value::String(s), Value::Int64(i)) => {
+                        // reason: list/string lengths fit i64; index values are user-provided
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_possible_wrap,
+                            clippy::cast_sign_loss
+                        )]
                         let idx = if *i < 0 {
                             let len = s.len() as i64;
                             (len + i) as usize
@@ -703,6 +757,8 @@ impl ExpressionPredicate {
                     .and_then(|s| self.eval_expr(s, chunk, row))
                     .and_then(|v| {
                         if let Value::Int64(i) = v {
+                            // reason: slice index from user query, non-negative for valid slices
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                             Some(i as usize)
                         } else {
                             None
@@ -717,6 +773,11 @@ impl ExpressionPredicate {
                             .and_then(|e| self.eval_expr(e, chunk, row))
                             .and_then(|v| {
                                 if let Value::Int64(i) = v {
+                                    // reason: slice end index from user query
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_sign_loss
+                                    )]
                                     Some(i as usize)
                                 } else {
                                     None
@@ -736,6 +797,11 @@ impl ExpressionPredicate {
                             .and_then(|e| self.eval_expr(e, chunk, row))
                             .and_then(|v| {
                                 if let Value::Int64(i) = v {
+                                    // reason: slice end index from user query
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_sign_loss
+                                    )]
                                     Some(i as usize)
                                 } else {
                                     None
@@ -768,10 +834,18 @@ impl ExpressionPredicate {
                 let col = chunk.column(col_idx)?;
                 // Try as node first, then as edge
                 if let Some(node_id) = col.get_node_id(row) {
+                    // reason: entity IDs stored as i64 values, standard encoding
+                    #[allow(clippy::cast_possible_wrap)]
                     Some(Value::Int64(node_id.0 as i64))
                 } else {
                     col.get_edge_id(row)
-                        .map(|edge_id| Value::Int64(edge_id.0 as i64))
+                        // reason: entity IDs stored as i64 values, standard encoding
+                        .map(|edge_id| {
+                            // reason: entity IDs are sequential counters, well within i64::MAX
+                            #[allow(clippy::cast_possible_wrap)]
+                            let val = Value::Int64(edge_id.0 as i64);
+                            val
+                        })
                 }
             }
             FilterExpression::Labels(variable) => {
@@ -874,6 +948,8 @@ impl ExpressionPredicate {
                 }
 
                 let result = match kind {
+                    // reason: list length is bounded by practical sizes, fits u32
+                    #[allow(clippy::cast_possible_truncation)]
                     ListPredicateKind::All => match_count == items.len() as u32,
                     ListPredicateKind::Any => match_count > 0,
                     ListPredicateKind::None => match_count == 0,
@@ -926,6 +1002,8 @@ impl ExpressionPredicate {
                     })
                     .count();
 
+                // reason: edge count from a single node fits i64
+                #[allow(clippy::cast_possible_wrap)]
                 Some(Value::Int64(count as i64))
             }
             FilterExpression::Reduce {
@@ -1081,6 +1159,12 @@ impl ExpressionPredicate {
                 let index_val = recurse(index)?;
                 match (&base_val, &index_val) {
                     (Value::List(items), Value::Int64(i)) => {
+                        // reason: list/string lengths fit i64; index values are user-provided
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_possible_wrap,
+                            clippy::cast_sign_loss
+                        )]
                         let idx = if *i < 0 {
                             let len = items.len() as i64;
                             (len + i) as usize
@@ -1090,6 +1174,12 @@ impl ExpressionPredicate {
                         items.get(idx).cloned()
                     }
                     (Value::String(s), Value::Int64(i)) => {
+                        // reason: list/string lengths fit i64; index values are user-provided
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_possible_wrap,
+                            clippy::cast_sign_loss
+                        )]
                         let idx = if *i < 0 {
                             let len = s.len() as i64;
                             (len + i) as usize
@@ -1344,6 +1434,8 @@ impl ExpressionPredicate {
                     )))
                 }
                 (Value::Time(a), Value::Time(b)) => {
+                    // reason: time-of-day nanos (max ~86.4 trillion) fit i64
+                    #[allow(clippy::cast_possible_wrap)]
                     let nanos = a.as_nanos() as i64 - b.as_nanos() as i64;
                     Some(Value::Duration(grafeo_common::types::Duration::from_nanos(
                         nanos,
@@ -1591,8 +1683,12 @@ impl ExpressionPredicate {
                     let col_idx = *self.variable_columns.get(var)?;
                     let col = chunk.column(col_idx)?;
                     if let Some(node_id) = col.get_node_id(row) {
+                        // reason: entity IDs stored as i64, standard encoding
+                        #[allow(clippy::cast_possible_wrap)]
                         return Some(Value::Int64(node_id.0 as i64));
                     } else if let Some(edge_id) = col.get_edge_id(row) {
+                        // reason: entity IDs stored as i64, standard encoding
+                        #[allow(clippy::cast_possible_wrap)]
                         return Some(Value::Int64(edge_id.0 as i64));
                     }
                 }
@@ -1664,6 +1760,8 @@ impl ExpressionPredicate {
                     let col = chunk.column(col_idx)?;
                     let edge_id = col.get_edge_id(row)?;
                     let edge = self.resolve_edge(edge_id)?;
+                    // reason: entity IDs stored as i64, standard encoding
+                    #[allow(clippy::cast_possible_wrap)]
                     return Some(Value::Int64(edge.src.0 as i64));
                 }
                 None
@@ -1678,6 +1776,8 @@ impl ExpressionPredicate {
                     let col = chunk.column(col_idx)?;
                     let edge_id = col.get_edge_id(row)?;
                     let edge = self.resolve_edge(edge_id)?;
+                    // reason: entity IDs stored as i64, standard encoding
+                    #[allow(clippy::cast_possible_wrap)]
                     return Some(Value::Int64(edge.dst.0 as i64));
                 }
                 None
@@ -1831,6 +1931,8 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
+                    // reason: toInteger() intentionally truncates float to int per GQL spec
+                    #[allow(clippy::cast_possible_truncation)]
                     Value::Float64(f) => Some(Value::Int64(f as i64)),
                     Value::Bool(b) => Some(Value::Int64(i64::from(b))),
                     Value::String(s) => s.parse::<i64>().ok().map(Value::Int64),
@@ -1954,8 +2056,14 @@ impl ExpressionPredicate {
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
+                    // reason: collection lengths fit i64 for practical sizes
+                    #[allow(clippy::cast_possible_wrap)]
                     Value::List(items) => Some(Value::Int64(items.len() as i64)),
+                    // reason: string lengths fit i64 for practical sizes
+                    #[allow(clippy::cast_possible_wrap)]
                     Value::String(s) => Some(Value::Int64(s.len() as i64)),
+                    // reason: path lengths fit i64 for practical sizes
+                    #[allow(clippy::cast_possible_wrap)]
                     Value::Path { edges, .. } => Some(Value::Int64(edges.len() as i64)),
                     _ => None,
                 }
@@ -2128,6 +2236,8 @@ impl ExpressionPredicate {
                         let floats: Vec<f32> = items
                             .iter()
                             .filter_map(|v| match v {
+                                // reason: vector() intentionally converts f64 to f32 for storage
+                                #[allow(clippy::cast_possible_truncation)]
                                 Value::Float64(f) => Some(*f as f32),
                                 Value::Int64(i) => Some(*i as f32),
                                 _ => None,
@@ -2393,12 +2503,16 @@ impl ExpressionPredicate {
                 let Value::Int64(start_idx) = start else {
                     return None;
                 };
+                // reason: clamped to >= 0 by max(0), safe to cast to usize
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let start_idx = start_idx.max(0) as usize;
                 if args.len() == 3 {
                     let length = self.eval_expr(&args[2], chunk, row)?;
                     let Value::Int64(len) = length else {
                         return None;
                     };
+                    // reason: clamped to >= 0 by max(0), safe to cast to usize
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let len = len.max(0) as usize;
                     let chars: String = s.chars().skip(start_idx).take(len).collect();
                     Some(Value::String(chars.into()))
@@ -2450,6 +2564,8 @@ impl ExpressionPredicate {
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
+                    // reason: char count fits i64 for practical string sizes
+                    #[allow(clippy::cast_possible_wrap)]
                     Value::String(s) => Some(Value::Int64(s.chars().count() as i64)),
                     _ => None,
                 }
@@ -2462,6 +2578,8 @@ impl ExpressionPredicate {
                 let len = self.eval_expr(&args[1], chunk, row)?;
                 match (&val, &len) {
                     (Value::String(s), Value::Int64(n)) => {
+                        // reason: clamped to >= 0 by max(0), safe to cast to usize
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let n = (*n).max(0) as usize;
                         let result: String = s.chars().take(n).collect();
                         Some(Value::String(result.into()))
@@ -2477,6 +2595,8 @@ impl ExpressionPredicate {
                 let len = self.eval_expr(&args[1], chunk, row)?;
                 match (&val, &len) {
                     (Value::String(s), Value::Int64(n)) => {
+                        // reason: clamped to >= 0 by max(0), safe to cast to usize
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let n = (*n).max(0) as usize;
                         let char_count = s.chars().count();
                         let skip = char_count.saturating_sub(n);
@@ -2493,6 +2613,8 @@ impl ExpressionPredicate {
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
+                    // reason: string byte length fits i64 for practical sizes
+                    #[allow(clippy::cast_possible_wrap)]
                     Value::String(s) => Some(Value::Int64(s.len() as i64)),
                     Value::Null => Some(Value::Null),
                     _ => None,
@@ -2835,9 +2957,9 @@ impl ExpressionPredicate {
                     Value::Timestamp(ts) => Some(Value::Date(ts.to_date())),
                     Value::Date(_) => Some(val),
                     Value::Map(m) => {
-                        let year = map_int(&m, "year")? as i32;
-                        let month = map_int_or(&m, "month", 1) as u32;
-                        let day = map_int_or(&m, "day", 1) as u32;
+                        let year = i32::try_from(map_int(&m, "year")?).ok()?;
+                        let month = u32::try_from(map_int_or(&m, "month", 1)?).ok()?;
+                        let day = u32::try_from(map_int_or(&m, "day", 1)?).ok()?;
                         grafeo_common::types::Date::from_ymd(year, month, day).map(Value::Date)
                     }
                     _ => None,
@@ -2853,10 +2975,10 @@ impl ExpressionPredicate {
                     Value::Timestamp(ts) => Some(Value::Time(ts.to_time())),
                     Value::Time(_) => Some(val),
                     Value::Map(m) => {
-                        let hour = map_int_or(&m, "hour", 0) as u32;
-                        let minute = map_int_or(&m, "minute", 0) as u32;
-                        let second = map_int_or(&m, "second", 0) as u32;
-                        let nanosecond = map_int_or(&m, "nanosecond", 0) as u32;
+                        let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
+                        let minute = u32::try_from(map_int_or(&m, "minute", 0)?).ok()?;
+                        let second = u32::try_from(map_int_or(&m, "second", 0)?).ok()?;
+                        let nanosecond = u32::try_from(map_int_or(&m, "nanosecond", 0)?).ok()?;
                         grafeo_common::types::Time::from_hms_nano(hour, minute, second, nanosecond)
                             .map(Value::Time)
                     }
@@ -2891,13 +3013,13 @@ impl ExpressionPredicate {
                     }
                     Value::Timestamp(_) => Some(val),
                     Value::Map(m) => {
-                        let year = map_int(&m, "year")? as i32;
-                        let month = map_int_or(&m, "month", 1) as u32;
-                        let day = map_int_or(&m, "day", 1) as u32;
-                        let hour = map_int_or(&m, "hour", 0) as u32;
-                        let minute = map_int_or(&m, "minute", 0) as u32;
-                        let second = map_int_or(&m, "second", 0) as u32;
-                        let nanosecond = map_int_or(&m, "nanosecond", 0) as u32;
+                        let year = i32::try_from(map_int(&m, "year")?).ok()?;
+                        let month = u32::try_from(map_int_or(&m, "month", 1)?).ok()?;
+                        let day = u32::try_from(map_int_or(&m, "day", 1)?).ok()?;
+                        let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
+                        let minute = u32::try_from(map_int_or(&m, "minute", 0)?).ok()?;
+                        let second = u32::try_from(map_int_or(&m, "second", 0)?).ok()?;
+                        let nanosecond = u32::try_from(map_int_or(&m, "nanosecond", 0)?).ok()?;
                         let date = grafeo_common::types::Date::from_ymd(year, month, day)?;
                         let time = grafeo_common::types::Time::from_hms_nano(
                             hour, minute, second, nanosecond,
@@ -2920,14 +3042,14 @@ impl ExpressionPredicate {
                     }
                     Value::Duration(_) => Some(val),
                     Value::Map(m) => {
-                        let years = map_int_or(&m, "years", 0);
-                        let months = map_int_or(&m, "months", 0);
-                        let weeks = map_int_or(&m, "weeks", 0);
-                        let days = map_int_or(&m, "days", 0);
-                        let hours = map_int_or(&m, "hours", 0);
-                        let minutes = map_int_or(&m, "minutes", 0);
-                        let seconds = map_int_or(&m, "seconds", 0);
-                        let nanoseconds = map_int_or(&m, "nanoseconds", 0);
+                        let years = map_int_or(&m, "years", 0)?;
+                        let months = map_int_or(&m, "months", 0)?;
+                        let weeks = map_int_or(&m, "weeks", 0)?;
+                        let days = map_int_or(&m, "days", 0)?;
+                        let hours = map_int_or(&m, "hours", 0)?;
+                        let minutes = map_int_or(&m, "minutes", 0)?;
+                        let seconds = map_int_or(&m, "seconds", 0)?;
+                        let nanoseconds = map_int_or(&m, "nanoseconds", 0)?;
                         let total_months = years * 12 + months;
                         let total_days = weeks * 7 + days;
                         let total_nanos = hours * 3_600_000_000_000
@@ -3136,9 +3258,13 @@ impl ExpressionPredicate {
                             .iter()
                             .map(|n| {
                                 if let Value::Int64(id) = n {
+                                    // reason: ID encoding: i64 <-> u64 round-trip
+                                    #[allow(clippy::cast_sign_loss)]
                                     let node_id = NodeId(*id as u64);
                                     if let Some(node) = self.resolve_node(node_id) {
                                         let mut map = BTreeMap::new();
+                                        // reason: entity IDs stored as i64, standard encoding
+                                        #[allow(clippy::cast_possible_wrap)]
                                         map.insert(
                                             PropertyKey::new("_id"),
                                             Value::Int64(node.id.as_u64() as i64),
@@ -3527,6 +3653,8 @@ impl ExpressionPredicate {
         match type_name.to_uppercase().as_str() {
             "INTEGER" | "INT" | "INT64" => match val {
                 Value::Int64(_) => Some(val),
+                // reason: type coercion intentionally truncates float to int
+                #[allow(clippy::cast_possible_truncation)]
                 Value::Float64(f) => Some(Value::Int64(f as i64)),
                 Value::String(ref s) => s.parse::<i64>().ok().map(Value::Int64),
                 Value::Bool(b) => Some(Value::Int64(i64::from(b))),

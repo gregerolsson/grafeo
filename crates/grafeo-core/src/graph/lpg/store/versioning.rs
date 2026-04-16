@@ -439,6 +439,8 @@ impl LpgStore {
     pub fn create_node_with_id(&self, id: NodeId, labels: &[&str]) -> Result<(), AllocError> {
         let epoch = self.current_epoch();
         let mut record = NodeRecord::new(id, epoch);
+        // reason: label count per node is bounded by practical limits, fits u16
+        #[allow(clippy::cast_possible_truncation)]
         record.set_label_count(labels.len() as u16);
 
         #[cfg(not(feature = "temporal"))]
@@ -477,6 +479,8 @@ impl LpgStore {
     pub fn create_node_with_id(&self, id: NodeId, labels: &[&str]) -> Result<(), AllocError> {
         let epoch = self.current_epoch();
         let mut record = NodeRecord::new(id, epoch);
+        // reason: label count per node is bounded by practical limits, fits u16
+        #[allow(clippy::cast_possible_truncation)]
         record.set_label_count(labels.len() as u16);
 
         #[cfg(not(feature = "temporal"))]

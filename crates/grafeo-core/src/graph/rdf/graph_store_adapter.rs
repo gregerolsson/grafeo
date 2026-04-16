@@ -175,6 +175,8 @@ impl RdfGraphStoreAdapter {
         // Phase 2: Build labels per node.
         let mut node_labels: Vec<SmallVec<[ArcStr; 2]>> = vec![SmallVec::new(); node_count];
         for (node_id, label) in &rdf_type_triples {
+            // reason: node IDs are sequential indices into Vec, fit usize
+            #[allow(clippy::cast_possible_truncation)]
             let idx = node_id.as_u64() as usize;
             if !node_labels[idx].contains(label) {
                 node_labels[idx].push(label.clone());
@@ -185,6 +187,8 @@ impl RdfGraphStoreAdapter {
         let mut node_properties: Vec<FxHashMap<PropertyKey, Value>> =
             vec![FxHashMap::default(); node_count];
         for (node_id, key, value) in literal_triples {
+            // reason: node IDs are sequential indices into Vec, fit usize
+            #[allow(clippy::cast_possible_truncation)]
             let idx = node_id.as_u64() as usize;
             // If multiple triples with same predicate, last wins.
             node_properties[idx].insert(PropertyKey::from(key.as_str()), value);
@@ -198,8 +202,14 @@ impl RdfGraphStoreAdapter {
         for classified in edges {
             let edge_id = EdgeId::new(edge_data.len() as u64);
             edge_data.push((classified.src, classified.dst, classified.predicate_local));
-            outgoing[classified.src.as_u64() as usize].push((classified.dst, edge_id));
-            incoming[classified.dst.as_u64() as usize].push((classified.src, edge_id));
+            // reason: node IDs are sequential indices into Vec, fit usize
+            #[allow(clippy::cast_possible_truncation)]
+            let src_idx = classified.src.as_u64() as usize;
+            // reason: node IDs are sequential indices into Vec, fit usize
+            #[allow(clippy::cast_possible_truncation)]
+            let dst_idx = classified.dst.as_u64() as usize;
+            outgoing[src_idx].push((classified.dst, edge_id));
+            incoming[dst_idx].push((classified.src, edge_id));
         }
 
         // Phase 5: Build statistics.
@@ -238,7 +248,12 @@ impl RdfGraphStoreAdapter {
     /// Returns the RDF term for a given `NodeId`.
     #[must_use]
     pub fn term_for_node_id(&self, id: NodeId) -> Option<&Term> {
-        self.node_to_term.get(id.as_u64() as usize)
+        // reason: node IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
+        // reason: entity IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = id.as_u64() as usize;
+        self.node_to_term.get(idx)
     }
 }
 
@@ -246,6 +261,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     // --- Point lookups ---
 
     fn get_node(&self, id: NodeId) -> Option<Node> {
+        // reason: entity IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = id.as_u64() as usize;
         if idx >= self.node_to_term.len() {
             return None;
@@ -259,6 +276,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
+        // reason: entity IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = id.as_u64() as usize;
         let (src, dst, edge_type) = self.edge_data.get(idx)?;
         Some(Edge {
@@ -299,6 +318,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     // --- Property access ---
 
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
+        // reason: entity IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = id.as_u64() as usize;
         self.node_properties.get(idx)?.get(key).cloned()
     }
@@ -317,6 +338,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
         ids.iter()
             .map(|id| {
+                // reason: entity IDs are sequential indices into Vec, fit usize
+                #[allow(clippy::cast_possible_truncation)]
                 let idx = id.as_u64() as usize;
                 self.node_properties.get(idx).cloned().unwrap_or_default()
             })
@@ -330,6 +353,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     ) -> Vec<FxHashMap<PropertyKey, Value>> {
         ids.iter()
             .map(|id| {
+                // reason: entity IDs are sequential indices into Vec, fit usize
+                #[allow(clippy::cast_possible_truncation)]
                 let idx = id.as_u64() as usize;
                 let mut result = FxHashMap::default();
                 if let Some(props) = self.node_properties.get(idx) {
@@ -355,6 +380,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     // --- Traversal (hot path for algorithms) ---
 
     fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
+        // reason: node IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = node.as_u64() as usize;
         match direction {
             Direction::Outgoing => self
@@ -381,6 +408,8 @@ impl GraphStore for RdfGraphStoreAdapter {
     }
 
     fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+        // reason: node IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = node.as_u64() as usize;
         match direction {
             Direction::Outgoing => self.outgoing.get(idx).cloned().unwrap_or_default(),
@@ -399,11 +428,15 @@ impl GraphStore for RdfGraphStoreAdapter {
     }
 
     fn out_degree(&self, node: NodeId) -> usize {
+        // reason: node IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = node.as_u64() as usize;
         self.outgoing.get(idx).map_or(0, Vec::len)
     }
 
     fn in_degree(&self, node: NodeId) -> usize {
+        // reason: node IDs are sequential indices into Vec, fit usize
+        #[allow(clippy::cast_possible_truncation)]
         let idx = node.as_u64() as usize;
         self.incoming.get(idx).map_or(0, Vec::len)
     }
@@ -442,7 +475,14 @@ impl GraphStore for RdfGraphStoreAdapter {
 
     fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
         self.edge_data
-            .get(id.as_u64() as usize)
+            // reason: edge IDs are sequential indices into Vec, fit usize
+            // reason: edge IDs are sequential indices into Vec, fit usize
+            .get({
+                // reason: edge IDs are sequential indices into Vec, fit usize
+                #[allow(clippy::cast_possible_truncation)]
+                let idx = id.as_u64() as usize;
+                idx
+            })
             .map(|(_, _, t)| t.clone())
     }
 

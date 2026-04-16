@@ -151,7 +151,11 @@ impl ZoneMap {
             max_edge_id,
             min_epoch: epoch.as_u64(),
             max_epoch: epoch.as_u64(),
+            // reason: entity counts per epoch block are bounded well within u32
+            #[allow(clippy::cast_possible_truncation)]
             node_count: nodes.len() as u32,
+            // reason: entity counts per epoch block are bounded well within u32
+            #[allow(clippy::cast_possible_truncation)]
             edge_count: edges.len() as u32,
         }
     }
@@ -255,9 +259,13 @@ impl CompressedEpochBlock {
         let mut node_index = Vec::with_capacity(nodes.len());
 
         for (id, record) in &nodes {
+            // reason: node data offset within a single epoch block fits u32
+            #[allow(clippy::cast_possible_truncation)]
             let offset = node_data.len() as u32;
             let serialized = bincode::serde::encode_to_vec(record, config)
                 .expect("NodeRecord serialization should not fail");
+            // reason: individual serialized record size fits u16
+            #[allow(clippy::cast_possible_truncation)]
             let length = serialized.len() as u16;
 
             node_index.push(IndexEntry {
@@ -273,9 +281,13 @@ impl CompressedEpochBlock {
         let mut edge_index = Vec::with_capacity(edges.len());
 
         for (id, record) in &edges {
+            // reason: edge data offset within a single epoch block fits u32
+            #[allow(clippy::cast_possible_truncation)]
             let offset = edge_data.len() as u32;
             let serialized = bincode::serde::encode_to_vec(record, config)
                 .expect("EdgeRecord serialization should not fail");
+            // reason: individual serialized record size fits u16
+            #[allow(clippy::cast_possible_truncation)]
             let length = serialized.len() as u16;
 
             edge_index.push(IndexEntry {
@@ -287,15 +299,26 @@ impl CompressedEpochBlock {
         }
 
         // Calculate uncompressed sizes (same as compressed for now)
+        // reason: data sizes within a single epoch block fit u32
+        #[allow(clippy::cast_possible_truncation)]
         let node_uncompressed_size = node_data.len() as u32;
+        // reason: data sizes within a single epoch block fit u32
+        #[allow(clippy::cast_possible_truncation)]
         let edge_uncompressed_size = edge_data.len() as u32;
+
+        // reason: data sizes within a single epoch block fit u32
+        #[allow(clippy::cast_possible_truncation)]
+        let node_data_size = node_data.len() as u32;
+        // reason: data sizes within a single epoch block fit u32
+        #[allow(clippy::cast_possible_truncation)]
+        let edge_data_size = edge_data.len() as u32;
 
         let header = EpochBlockHeader {
             epoch: epoch.as_u64(),
             compression_type: CompressionType::None, // Future: add compression
             zone_map,
-            node_data_size: node_data.len() as u32,
-            edge_data_size: edge_data.len() as u32,
+            node_data_size,
+            edge_data_size,
             node_uncompressed_size,
             edge_uncompressed_size,
         };

@@ -272,6 +272,19 @@ impl HnswIndex {
         let mut entry_point = self.entry_point.write();
         let mut max_level = self.max_level.write();
 
+        // Check capacity under the write lock to prevent concurrent over-insertion.
+        // Skip the check when the ID already exists (same-ID update replaces
+        // the entry without growing the map).
+        if let Some(max) = self.config.max_elements
+            && !nodes.contains_key(&id)
+        {
+            let count = nodes.len();
+            assert!(
+                count < max,
+                "HNSW index is full: max_elements={max}, current={count}"
+            );
+        }
+
         // First insertion
         if entry_point.is_none() {
             nodes.insert(id, node);
@@ -478,6 +491,8 @@ impl HnswIndex {
         } else {
             (allowlist.len() as f64 / total as f64).max(0.01)
         };
+        // reason: ef scaled by selectivity is non-negative and bounded by .min(total)
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let ef_scaled = ((self.config.ef as f64 / selectivity).ceil() as usize)
             .min(total)
             .max(k);
@@ -580,7 +595,10 @@ impl HnswIndex {
     fn random_level(&self) -> usize {
         let mut rng = self.rng.write();
         let r: f64 = rng.random();
-        (-r.ln() * self.config.ml).floor() as usize
+        // reason: HNSW level is non-negative (r in [0,1), -ln(r) >= 0), fits usize
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let level = (-r.ln() * self.config.ml).floor() as usize;
+        level
     }
 
     /// Single-element greedy search at a layer.
@@ -1336,6 +1354,38 @@ mod tests {
     }
 
     #[test]
+    fn test_hnsw_max_elements_accepts_within_limit() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_max_elements(3);
+        let index = HnswIndex::new(config);
+        let mut map: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
+        map.insert(NodeId::new(0), Arc::from([1.0f32, 0.0, 0.0].as_slice()));
+        map.insert(NodeId::new(1), Arc::from([0.0f32, 1.0, 0.0].as_slice()));
+        map.insert(NodeId::new(2), Arc::from([0.0f32, 0.0, 1.0].as_slice()));
+        let accessor = make_accessor(&map);
+
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0], &accessor);
+        index.insert(NodeId::new(1), &[0.0, 1.0, 0.0], &accessor);
+        index.insert(NodeId::new(2), &[0.0, 0.0, 1.0], &accessor);
+        assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "HNSW index is full")]
+    fn test_hnsw_rejects_above_max_elements() {
+        let config = HnswConfig::new(3, DistanceMetric::Euclidean).with_max_elements(2);
+        let index = HnswIndex::new(config);
+        let mut map: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
+        map.insert(NodeId::new(0), Arc::from([1.0f32, 0.0, 0.0].as_slice()));
+        map.insert(NodeId::new(1), Arc::from([0.0f32, 1.0, 0.0].as_slice()));
+        map.insert(NodeId::new(2), Arc::from([0.0f32, 0.0, 1.0].as_slice()));
+        let accessor = make_accessor(&map);
+
+        index.insert(NodeId::new(0), &[1.0, 0.0, 0.0], &accessor);
+        index.insert(NodeId::new(1), &[0.0, 1.0, 0.0], &accessor);
+        index.insert(NodeId::new(2), &[0.0, 0.0, 1.0], &accessor); // Should panic
+    }
+
+    #[test]
     #[should_panic(expected = "Query dimensions mismatch")]
     fn test_hnsw_dimension_mismatch_search() {
         let config = HnswConfig::new(4, DistanceMetric::Euclidean);
@@ -2003,6 +2053,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test indices are small known values
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     fn test_filtered_search_ef_scaling() {
         // Verify that auto-scaling ef produces reasonable recall
         let n = 500;

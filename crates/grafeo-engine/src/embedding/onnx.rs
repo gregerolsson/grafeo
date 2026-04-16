@@ -178,7 +178,10 @@ impl OnnxEmbeddingModel {
             .last()
             .ok_or_else(|| Error::Internal("Model output has no dimensions".to_string()))?;
 
-        Ok(dims as usize)
+        // reason: ONNX tensor dimensions are always non-negative and fit usize
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let dim = dims as usize;
+        Ok(dim)
     }
 
     /// Embeds a single batch of texts.
@@ -227,6 +230,8 @@ impl OnnxEmbeddingModel {
             .map_err(|e| Error::Internal(format!("Failed to extract output tensor: {e}")))?;
 
         // Handle different output shapes
+        // reason: ONNX tensor dimensions are always non-negative and fit usize
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let shape_usize: Vec<usize> = shape.iter().map(|&s| s as usize).collect();
 
         let result = if shape_usize.len() == 3 {

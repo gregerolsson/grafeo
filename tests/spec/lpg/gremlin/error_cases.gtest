@@ -1,0 +1,98 @@
+# Gremlin Error Cases
+#
+# Covers: syntax errors, invalid traversal steps, type mismatches,
+# unknown properties, invalid predicates, malformed queries.
+
+meta:
+  language: gremlin
+  model: lpg
+  section: errors
+  title: Error Cases
+  dataset: social_network
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Syntax errors
+  # ---------------------------------------------------------------------------
+
+  - name: empty_traversal
+    query: "g"
+    expect:
+      error: ""
+
+  - name: missing_g_prefix
+    query: "V().values('name')"
+    expect:
+      error: ""
+
+  - name: unclosed_parenthesis
+    query: "g.V(.has('name', 'Alix')"
+    expect:
+      error: ""
+
+  - name: double_dot
+    query: "g..V()"
+    expect:
+      error: ""
+
+  - name: trailing_dot
+    query: "g.V()."
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Unknown steps
+  # ---------------------------------------------------------------------------
+
+  - name: unknown_step
+    query: "g.V().frobnicate()"
+    expect:
+      error: ""
+
+  - name: unknown_source_step
+    query: "g.X()"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Invalid arguments
+  # ---------------------------------------------------------------------------
+
+  - name: has_with_no_args
+    query: "g.V().has()"
+    expect:
+      error: ""
+
+  - name: limit_negative
+    query: "g.V().limit(-1)"
+    expect:
+      error: ""
+
+  - name: range_invalid_bounds
+    query: "g.V().range(5, 2)"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Type mismatches in predicates
+  # ---------------------------------------------------------------------------
+
+  - name: arithmetic_on_string_property
+    query: "g.V().has('name', 'Alix').values('name').math('_ + 1')"
+    expect:
+      error: ""
+
+  # ---------------------------------------------------------------------------
+  # Empty result edge cases (not errors, but boundary behavior)
+  # ---------------------------------------------------------------------------
+
+  - name: filter_no_match
+    query: "g.V().has('name', 'NonExistent').values('name')"
+    expect:
+      count: 0
+
+  - name: edge_traversal_no_edges
+    query: "g.V().has('name', 'Vincent').out('WORKS_AT').values('name')"
+    expect:
+      count: 0

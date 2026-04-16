@@ -7,7 +7,7 @@ pub mod procedure_call;
 #[cfg(all(feature = "algos", feature = "gql"))]
 pub mod user_procedure;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config::AdaptiveConfig;
 use crate::database::QueryResult;
@@ -28,6 +28,8 @@ pub struct Executor {
     column_types: Vec<LogicalType>,
     /// Wall-clock deadline after which execution is aborted.
     deadline: Option<Instant>,
+    /// The configured timeout duration (for error messages).
+    query_timeout: Option<Duration>,
 }
 
 impl Executor {
@@ -38,6 +40,7 @@ impl Executor {
             columns: Vec::new(),
             column_types: Vec::new(),
             deadline: None,
+            query_timeout: None,
         }
     }
 
@@ -49,6 +52,7 @@ impl Executor {
             columns,
             column_types: vec![LogicalType::Any; len],
             deadline: None,
+            query_timeout: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl Executor {
             columns,
             column_types,
             deadline: None,
+            query_timeout: None,
         }
     }
 
@@ -69,13 +74,23 @@ impl Executor {
         self
     }
 
+    /// Sets the original timeout duration (used for error messages).
+    #[must_use]
+    pub fn with_timeout_duration(mut self, timeout: Option<Duration>) -> Self {
+        self.query_timeout = timeout;
+        self
+    }
+
     /// Checks whether the deadline has been exceeded.
     fn check_deadline(&self) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
-            return Err(Error::Query(QueryError::timeout()));
+            return Err(Error::Query(match self.query_timeout {
+                Some(d) => QueryError::timeout_with_limit(d),
+                None => QueryError::timeout(),
+            }));
         }
         Ok(())
     }

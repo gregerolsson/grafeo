@@ -295,6 +295,7 @@ nav:
       - In-Memory Mode: user-guide/persistence/in-memory.md
       - Persistent Storage: user-guide/persistence/persistent.md
       - WAL Recovery: user-guide/persistence/wal.md
+      - Compact Store: user-guide/compact-store.md
     - Extending Grafeo:
       - user-guide/extending/index.md
       - Plugins: user-guide/extending/plugins.md
@@ -313,6 +314,7 @@ nav:
       - Vector Search: tutorials/examples/vector-search.md
       - Fraud Detection: tutorials/examples/fraud-detection-example.md
       - NetworkX Integration: tutorials/examples/networkx-integration.md
+      - DuckDB Integration: tutorials/examples/duckdb-integration.md
 
   - Deployment:
     - deployment/index.md
@@ -332,6 +334,9 @@ nav:
       - Adjacency Lists: architecture/storage/adjacency.md
       - Zone Maps: architecture/storage/zone-maps.md
       - Compression: architecture/storage/compression.md
+      - Container Format: architecture/storage/container-format.md
+      - Ring Index: architecture/storage/ring-index.md
+    - Feature Profiles: architecture/feature-profiles.md
     - Execution Engine:
       - architecture/execution/index.md
     - Query Optimization:
@@ -368,6 +373,7 @@ nav:
       - api/csharp/index.md
     - Dart API:
       - api/dart/index.md
+      - Flutter Integration: user-guide/dart/flutter.md
     - Algorithms:
       - algorithms/index.md
       - Path Finding: algorithms/path-finding.md

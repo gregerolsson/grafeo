@@ -665,6 +665,8 @@ impl_algorithm! {
         let mut result = AlgorithmResult::new(vec!["node_id".to_string()]);
 
         for node in points {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![Value::Int64(node.0 as i64)]);
         }
 
@@ -693,6 +695,8 @@ impl_algorithm! {
         let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 
         for (src, dst) in bridge_list {
+            // reason: Node IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
         }
 
@@ -732,12 +736,23 @@ impl GraphAlgorithm for KCoreAlgorithm {
         kcore_params()
     }
 
+    // reason: node IDs and core numbers are bounded by graph size
+    #[allow(clippy::cast_possible_wrap)]
     fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
         let decomposition = kcore_decomposition(store);
 
         if let Some(k) = params.get_int("k") {
-            // Return nodes in the k-core
-            let k_core_nodes = decomposition.k_core(k as usize);
+            if k < 0 {
+                return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "k-core requires a non-negative k value, got {k}"
+                )));
+            }
+            let k_usize = usize::try_from(k).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "k-core k value {k} exceeds maximum supported size"
+                ))
+            })?;
+            let k_core_nodes = decomposition.k_core(k_usize);
 
             let mut result =
                 AlgorithmResult::new(vec!["node_id".to_string(), "in_k_core".to_string()]);
@@ -801,12 +816,23 @@ impl GraphAlgorithm for KTrussAlgorithm {
         ktruss_params()
     }
 
+    // reason: node IDs and truss numbers are bounded by graph size
+    #[allow(clippy::cast_possible_wrap)]
     fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
         let decomposition = ktruss_decomposition(store);
 
         if let Some(k) = params.get_int("k") {
-            // Return edges in the k-truss
-            let edges = decomposition.k_truss(k as usize);
+            if k < 0 {
+                return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "k-truss requires a non-negative k value, got {k}"
+                )));
+            }
+            let k_usize = usize::try_from(k).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "k-truss k value {k} exceeds maximum supported size"
+                ))
+            })?;
+            let edges = decomposition.k_truss(k_usize);
 
             let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 
@@ -1180,6 +1206,116 @@ mod tests {
         let result = algo.execute(&store, &params).unwrap();
         assert_eq!(result.columns.len(), 2); // source, target
         assert_eq!(result.row_count(), 6);
+    }
+
+    // ---- KCoreAlgorithm wrapper tests ----
+
+    #[test]
+    fn test_kcore_algorithm_wrapper_full_decomposition() {
+        let store = create_complete(4);
+        let algo = KCoreAlgorithm;
+
+        assert_eq!(algo.name(), "kcore");
+
+        // Full decomposition (no k parameter)
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 3); // node_id, core_number, max_core
+        assert_eq!(result.row_count(), 4); // 4 nodes in K_4
+    }
+
+    #[test]
+    fn test_kcore_algorithm_wrapper_with_k() {
+        let store = create_complete(4);
+        let algo = KCoreAlgorithm;
+
+        // Extract k=2 core: with peeling, only some nodes retain core >= 2
+        let mut params = Parameters::new();
+        params.set_int("k", 2);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, in_k_core
+        // At least some nodes should be in the 2-core
+        assert!(result.row_count() > 0);
+        assert!(result.row_count() <= 4);
+    }
+
+    #[test]
+    fn test_kcore_negative_k() {
+        // Negative k should be rejected with a validation error
+        let store = create_complete(4);
+        let algo = KCoreAlgorithm;
+
+        let mut params = Parameters::new();
+        params.set_int("k", -1);
+        let result = algo.execute(&store, &params);
+        assert!(result.is_err(), "negative k should return an error");
+    }
+
+    #[test]
+    fn test_kcore_valid_execution() {
+        // Alix, Gus, and Vincent form a triangle
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+
+        // Bidirectional triangle
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, alix, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(vincent, gus, "KNOWS");
+        store.create_edge(alix, vincent, "KNOWS");
+        store.create_edge(vincent, alix, "KNOWS");
+
+        let algo = KCoreAlgorithm;
+
+        // Full decomposition: returns all 3 nodes with core numbers
+        let params = Parameters::new();
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 3); // node_id, core_number, max_core
+        assert_eq!(result.row_count(), 3); // all 3 nodes decomposed
+
+        // With k=1: at least some nodes should have core >= 1
+        let mut params = Parameters::new();
+        params.set_int("k", 1);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // node_id, in_k_core
+        assert!(result.row_count() > 0);
+    }
+
+    #[test]
+    fn test_ktruss_negative_k() {
+        // Negative k should be rejected with a validation error
+        let store = create_complete(4);
+        let algo = KTrussAlgorithm;
+
+        let mut params = Parameters::new();
+        params.set_int("k", -1);
+        let result = algo.execute(&store, &params);
+        assert!(result.is_err(), "negative k should return an error");
+    }
+
+    #[test]
+    fn test_ktruss_valid_execution() {
+        // Triangle between Alix, Gus, Vincent: 3-truss
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+
+        store.create_edge(alix, gus, "KNOWS");
+        store.create_edge(gus, alix, "KNOWS");
+        store.create_edge(gus, vincent, "KNOWS");
+        store.create_edge(vincent, gus, "KNOWS");
+        store.create_edge(alix, vincent, "KNOWS");
+        store.create_edge(vincent, alix, "KNOWS");
+
+        let algo = KTrussAlgorithm;
+        let mut params = Parameters::new();
+        params.set_int("k", 3);
+        let result = algo.execute(&store, &params).unwrap();
+        assert_eq!(result.columns.len(), 2); // source, target
+        assert_eq!(result.row_count(), 3); // 3 edges in 3-truss
     }
 
     // ---- Cross-model: RDF adapter produces same results as LPG ----

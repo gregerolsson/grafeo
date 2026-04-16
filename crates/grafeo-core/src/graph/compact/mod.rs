@@ -14,18 +14,23 @@ pub mod csr;
 mod graph_store_impl;
 /// Node/edge ID encoding and decoding helpers.
 pub mod id;
+/// Two-layer store: columnar base + mutable LPG overlay.
+#[cfg(feature = "lpg")]
+pub mod layered;
 /// Per-label node tables with columnar property storage.
 pub mod node_table;
 /// Per-type relationship tables backed by forward/backward CSR.
 pub mod rel_table;
 /// Schema definitions for node tables and edge schemas.
 pub mod schema;
+/// Container section serialization for CompactStore.
+pub mod section;
 #[cfg(test)]
 mod tests;
 /// Zone maps for skip-pruning predicate evaluation.
 pub mod zone_map;
 
-pub use builder::{CompactStoreBuilder, from_graph_store};
+pub use builder::{CompactStoreBuilder, from_graph_store, from_graph_store_preserving_ids};
 
 use std::sync::Arc;
 
@@ -63,6 +68,17 @@ pub struct CompactStore {
     dst_rel_table_ids: Vec<Vec<u16>>,
     /// Cached statistics.
     statistics: Arc<Statistics>,
+
+    // ── ID-preserving maps (for layered store integration) ──────────
+    /// Maps original `NodeId` to (table_id, row_offset). Present when the
+    /// store was built with [`from_graph_store_preserving_ids`].
+    node_id_map: Option<FxHashMap<NodeId, (u16, u64)>>,
+    /// Maps original `EdgeId` to (rel_table_id, csr_position).
+    edge_id_map: Option<FxHashMap<EdgeId, (u16, u64)>>,
+    /// Reverse: table_id index -> vec of original `NodeId` per row offset.
+    node_offset_to_id: Option<Vec<Vec<NodeId>>>,
+    /// Reverse: rel_table_id index -> vec of original `EdgeId` per CSR position.
+    edge_offset_to_id: Option<Vec<Vec<EdgeId>>>,
 }
 
 impl std::fmt::Debug for CompactStore {
@@ -97,8 +113,15 @@ impl CompactStore {
         let mut src_rel_table_ids = vec![Vec::new(); node_table_count];
         let mut dst_rel_table_ids = vec![Vec::new(); node_table_count];
 
+        debug_assert!(
+            rel_tables_by_id.len() <= usize::from(id::MAX_TABLE_ID) + 1,
+            "rel table count {} exceeds 15-bit limit; caller must validate",
+            rel_tables_by_id.len()
+        );
         for (rel_idx, rt) in rel_tables_by_id.iter().enumerate() {
-            let rel_id = rel_idx as u16;
+            // Caller (CompactStoreBuilder::build) validates table count fits u16.
+            let rel_id = u16::try_from(rel_idx).expect("caller validated table count");
+
             let src_tid = rt.src_table_id() as usize;
             let dst_tid = rt.dst_table_id() as usize;
             if src_tid < node_table_count {
@@ -119,6 +142,10 @@ impl CompactStore {
             src_rel_table_ids,
             dst_rel_table_ids,
             statistics: Arc::new(statistics),
+            node_id_map: None,
+            edge_id_map: None,
+            node_offset_to_id: None,
+            edge_offset_to_id: None,
         }
     }
 
@@ -178,6 +205,9 @@ impl CompactStore {
     }
 
     /// Collects edges from snapshot RelTables for a given node in a direction.
+    ///
+    /// When ID-preserving, the returned `NodeId`/`EdgeId` values are translated
+    /// back to the original IDs from the source store.
     fn collect_edges(
         &self,
         node_table_id: u16,
@@ -207,6 +237,14 @@ impl CompactStore {
             }
         }
 
+        // Translate compact-encoded IDs to original IDs when preserving.
+        if self.preserves_ids() {
+            for (target_id, edge_id) in &mut results {
+                *target_id = self.to_original_node_id(*target_id);
+                *edge_id = self.to_original_edge_id(*edge_id);
+            }
+        }
+
         results
     }
 
@@ -227,6 +265,100 @@ impl CompactStore {
             .iter()
             .map(|rt| rt.memory_bytes())
             .sum();
-        node_bytes + rel_bytes
+        let id_map_bytes = self.id_map_memory_bytes();
+        node_bytes + rel_bytes + id_map_bytes
+    }
+
+    // ── ID-preserving accessors ────────────────────────────────────
+
+    /// Returns `true` if original IDs are preserved (built via
+    /// [`from_graph_store_preserving_ids`]).
+    #[must_use]
+    pub fn preserves_ids(&self) -> bool {
+        self.node_id_map.is_some()
+    }
+
+    /// Attaches ID maps to an already-built `CompactStore`.
+    pub(crate) fn set_id_maps(
+        &mut self,
+        node_id_map: FxHashMap<NodeId, (u16, u64)>,
+        edge_id_map: FxHashMap<EdgeId, (u16, u64)>,
+        node_offset_to_id: Vec<Vec<NodeId>>,
+        edge_offset_to_id: Vec<Vec<EdgeId>>,
+    ) {
+        self.node_id_map = Some(node_id_map);
+        self.edge_id_map = Some(edge_id_map);
+        self.node_offset_to_id = Some(node_offset_to_id);
+        self.edge_offset_to_id = Some(edge_offset_to_id);
+    }
+
+    /// Resolves an input `NodeId` to (table_id, offset).
+    ///
+    /// When ID-preserving, looks up the original ID in the map.
+    /// Otherwise, decodes the compact-encoded bits.
+    #[inline]
+    pub(crate) fn resolve_node(&self, id: NodeId) -> Option<(u16, u64)> {
+        if let Some(ref map) = self.node_id_map {
+            map.get(&id).copied()
+        } else {
+            Some(id::decode_node_id(id))
+        }
+    }
+
+    /// Resolves an input `EdgeId` to (rel_table_id, csr_position).
+    #[inline]
+    pub(crate) fn resolve_edge(&self, id: EdgeId) -> Option<(u16, u64)> {
+        if let Some(ref map) = self.edge_id_map {
+            map.get(&id).copied()
+        } else {
+            Some(id::decode_edge_id(id))
+        }
+    }
+
+    /// Translates a compact-encoded `NodeId` (from internal CSR/table lookups)
+    /// back to the original preserved ID. No-op when not ID-preserving.
+    #[inline]
+    pub(crate) fn to_original_node_id(&self, compact_id: NodeId) -> NodeId {
+        if let Some(ref offsets) = self.node_offset_to_id {
+            let (table_id, offset) = id::decode_node_id(compact_id);
+            offsets
+                .get(table_id as usize)
+                .and_then(|v| v.get(usize::try_from(offset).ok()?))
+                .copied()
+                .unwrap_or(compact_id)
+        } else {
+            compact_id
+        }
+    }
+
+    /// Translates a compact-encoded `EdgeId` back to the original preserved ID.
+    #[inline]
+    pub(crate) fn to_original_edge_id(&self, compact_id: EdgeId) -> EdgeId {
+        if let Some(ref offsets) = self.edge_offset_to_id {
+            let (rel_table_id, csr_pos) = id::decode_edge_id(compact_id);
+            offsets
+                .get(rel_table_id as usize)
+                .and_then(|v| v.get(usize::try_from(csr_pos).ok()?))
+                .copied()
+                .unwrap_or(compact_id)
+        } else {
+            compact_id
+        }
+    }
+
+    /// Approximate heap cost of the ID maps.
+    fn id_map_memory_bytes(&self) -> usize {
+        // ~24 bytes per entry (key + value) in FxHashMap, plus Vec overhead.
+        let node_map = self.node_id_map.as_ref().map_or(0, |m| m.len() * 24);
+        let edge_map = self.edge_id_map.as_ref().map_or(0, |m| m.len() * 24);
+        let node_rev = self
+            .node_offset_to_id
+            .as_ref()
+            .map_or(0, |v| v.iter().map(|inner| inner.len() * 8).sum());
+        let edge_rev = self
+            .edge_offset_to_id
+            .as_ref()
+            .map_or(0, |v| v.iter().map(|inner| inner.len() * 8).sum());
+        node_map + edge_map + node_rev + edge_rev
     }
 }

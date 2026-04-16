@@ -1138,7 +1138,9 @@ impl<Id: EntityId> PropertyColumn<Id> {
         let int_values: Vec<i64> = values.iter().map(|(_, v)| *v).collect();
 
         // Compress using the optimal codec
-        let compressed = TypeSpecificCompressor::compress_signed_integers(&int_values);
+        let Ok(compressed) = TypeSpecificCompressor::compress_signed_integers(&int_values) else {
+            return;
+        };
 
         // Only use compression if it actually saves space
         if compressed.compression_ratio() > 1.2 {
@@ -1224,7 +1226,9 @@ impl<Id: EntityId> PropertyColumn<Id> {
         let index_to_id: Vec<u64> = id_to_index.clone();
         let bool_values: Vec<bool> = values.iter().map(|(_, v)| *v).collect();
 
-        let compressed = TypeSpecificCompressor::compress_booleans(&bool_values);
+        let Ok(compressed) = TypeSpecificCompressor::compress_booleans(&bool_values) else {
+            return;
+        };
 
         // Booleans always compress well (8x)
         self.compressed = Some(CompressedColumnData::Booleans {

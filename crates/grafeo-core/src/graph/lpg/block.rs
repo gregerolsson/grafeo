@@ -209,6 +209,8 @@ impl StringTableBuilder {
         if let Some(&idx) = self.index.get(s) {
             return idx;
         }
+        // reason: string table size bounded by section limits, fits u32
+        #[allow(clippy::cast_possible_truncation)]
         let idx = self.strings.len() as u32;
         self.strings.push(s.to_owned());
         self.index.insert(s.to_owned(), idx);
@@ -217,13 +219,19 @@ impl StringTableBuilder {
 
     /// Serializes the string table: [count:u32] [offsets:u32*count] [packed strings]
     fn serialize(&self) -> Vec<u8> {
+        // reason: string table counts and offsets within a section fit u32
+        #[allow(clippy::cast_possible_truncation)]
         let count = self.strings.len() as u32;
         // Pre-calculate total size
         let mut packed = Vec::new();
         let mut offsets = Vec::with_capacity(self.strings.len());
         for s in &self.strings {
+            // reason: packed buffer and string lengths bounded by section size, fit u32
+            #[allow(clippy::cast_possible_truncation)]
             offsets.push(packed.len() as u32);
             let bytes = s.as_bytes();
+            // reason: individual string lengths bounded by section size, fit u32
+            #[allow(clippy::cast_possible_truncation)]
             packed.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             packed.extend_from_slice(bytes);
         }
@@ -313,6 +321,8 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Bytes(b) => {
             buf.push(ValueTag::Bytes as u8);
+            // reason: serialized value sizes within a section fit u32
+            #[allow(clippy::cast_possible_truncation)]
             buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
             buf.extend_from_slice(b);
         }
@@ -343,6 +353,8 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::List(items) => {
             buf.push(ValueTag::List as u8);
+            // reason: collection sizes within a section fit u32
+            #[allow(clippy::cast_possible_truncation)]
             buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
             for item in items.iter() {
                 encode_value(item, strings, buf);
@@ -350,6 +362,8 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Map(map) => {
             buf.push(ValueTag::Map as u8);
+            // reason: map sizes within a section fit u32
+            #[allow(clippy::cast_possible_truncation)]
             buf.extend_from_slice(&(map.len() as u32).to_le_bytes());
             for (key, val) in map.iter() {
                 let key_idx = strings.intern(key.as_ref());
@@ -359,6 +373,8 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Vector(v) => {
             buf.push(ValueTag::Vector as u8);
+            // reason: vector dimension within a section fits u32
+            #[allow(clippy::cast_possible_truncation)]
             buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
             for f in v.iter() {
                 buf.extend_from_slice(&f.to_le_bytes());
@@ -366,10 +382,14 @@ fn encode_value(val: &Value, strings: &mut StringTableBuilder, buf: &mut Vec<u8>
         }
         Value::Path { nodes, edges } => {
             buf.push(ValueTag::Path as u8);
+            // reason: path node count within a section fits u32
+            #[allow(clippy::cast_possible_truncation)]
             buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
             for n in nodes.iter() {
                 encode_value(n, strings, buf);
             }
+            // reason: path edge count within a section fits u32
+            #[allow(clippy::cast_possible_truncation)]
             buf.extend_from_slice(&(edges.len() as u32).to_le_bytes());
             for e in edges.iter() {
                 encode_value(e, strings, buf);
@@ -682,8 +702,12 @@ pub(crate) fn write_blocks(
     // Block 3: Label assignments
     // Format: [node_count:u32] for each node [label_count:u16][label_idx:u32*count]
     let mut label_buf = Vec::new();
+    // reason: node and label counts within a section fit u32/u16
+    #[allow(clippy::cast_possible_truncation)]
     label_buf.extend_from_slice(&(nodes.len() as u32).to_le_bytes());
     for node in nodes {
+        // reason: label count per node is bounded, fits u16
+        #[allow(clippy::cast_possible_truncation)]
         label_buf.extend_from_slice(&(node.labels.len() as u16).to_le_bytes());
         for label in &node.labels {
             let idx = strings.intern(label);
@@ -734,7 +758,11 @@ pub(crate) fn write_blocks(
         dir_entries.push(BlockDirEntry {
             block_type: *block_type as u8,
             _reserved: [0; 3],
+            // reason: section offsets and block sizes fit u32
+            #[allow(clippy::cast_possible_truncation)]
             offset: data_offset as u32,
+            // reason: block data offset and length bounded by block capacity (64 KB)
+            #[allow(clippy::cast_possible_truncation)]
             length: block_data.len() as u32,
             checksum,
             key_string_index: *key_idx,
@@ -748,6 +776,8 @@ pub(crate) fn write_blocks(
     let mut output = Vec::with_capacity(total_size);
 
     // Header
+    // reason: section block counts fit u16/u32
+    #[allow(clippy::cast_possible_truncation)]
     let header = SectionHeader {
         magic: LPG_BLOCK_MAGIC,
         version: LPG_BLOCK_VERSION,
@@ -839,9 +869,13 @@ fn write_property_column<'a>(
         }
     }
 
+    // reason: property column entry counts fit u32/u16 within a section
+    #[allow(clippy::cast_possible_truncation)]
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
+        // reason: version count per entity is bounded, fits u16
+        #[allow(clippy::cast_possible_truncation)]
         buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
         for (epoch, value) in *versions {
             buf.extend_from_slice(&epoch.as_u64().to_le_bytes());
@@ -869,9 +903,13 @@ fn write_property_column_edges<'a>(
         }
     }
 
+    // reason: property column entry counts fit u32/u16 within a section
+    #[allow(clippy::cast_possible_truncation)]
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for (entity_id, versions) in &entries {
         buf.extend_from_slice(&entity_id.to_le_bytes());
+        // reason: version count per entity is bounded, fits u16
+        #[allow(clippy::cast_possible_truncation)]
         buf.extend_from_slice(&(versions.len() as u16).to_le_bytes());
         for (epoch, value) in *versions {
             buf.extend_from_slice(&epoch.as_u64().to_le_bytes());
@@ -951,6 +989,8 @@ pub(crate) fn read_blocks(
         .ok_or_else(|| Error::Serialization("invalid string table".to_string()))?;
 
     // Read node data (cap capacity to prevent OOM from untrusted header)
+    // reason: on 64-bit targets u64 == usize; on 32-bit, capacity is capped by .min()
+    #[allow(clippy::cast_possible_truncation)]
     let mut nodes = Vec::with_capacity((header.node_count as usize).min(data.len() / 8));
     if let Some(entry) = dir_entries
         .iter()
@@ -970,6 +1010,8 @@ pub(crate) fn read_blocks(
     }
 
     // Read edge data
+    // reason: on 64-bit targets u64 == usize; on 32-bit, capacity is capped by .min()
+    #[allow(clippy::cast_possible_truncation)]
     let mut edges = Vec::with_capacity((header.edge_count as usize).min(data.len() / 28));
     if let Some(entry) = dir_entries
         .iter()
@@ -1487,6 +1529,8 @@ mod tests {
     }
 
     #[test]
+    // reason: test IDs 1..=1000 fit i64
+    #[allow(clippy::cast_possible_wrap)]
     fn test_large_graph_round_trip() {
         // 1000 nodes, 2000 edges
         let nodes: Vec<BlockNode> = (1..=1000)

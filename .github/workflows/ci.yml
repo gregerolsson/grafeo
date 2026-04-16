@@ -280,7 +280,7 @@ jobs:
   # Rust tests (debug, all platforms)
   rust-test:
     name: Rust Test (${{ matrix.os }})
-    needs: [rust-check]
+    needs: [rust-check, supply-chain]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -982,3 +982,27 @@ jobs:
         with:
           command: check
           arguments: --all-features
+
+  # Verify declared MSRV compiles
+  msrv:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91.1"
+
+      - name: Check compilation with MSRV
+        run: cargo check --workspace --all-features
+
+  # Typo detection
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: crate-ci/typos@v1.33.1

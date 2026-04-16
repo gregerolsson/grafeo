@@ -90,12 +90,18 @@ impl HashKey {
             Value::Int64(i) => HashKey::Int64(*i),
             Value::Float64(f) => {
                 // Convert float to bits for consistent hashing
+                // reason: intentional bit-level reinterpretation for hashing
+                #[allow(clippy::cast_possible_wrap)]
                 HashKey::Int64(f.to_bits() as i64)
             }
             Value::String(s) => HashKey::String(s.clone()),
             Value::Bytes(b) => HashKey::Bytes(b.to_vec()),
             Value::Timestamp(t) => HashKey::Int64(t.as_micros()),
+            // reason: date days and time nanos fit i64
+            #[allow(clippy::cast_possible_wrap)]
             Value::Date(d) => HashKey::Int64(d.as_days() as i64),
+            // reason: date days and time nanos are small, fit i64
+            #[allow(clippy::cast_possible_wrap)]
             Value::Time(t) => HashKey::Int64(t.as_nanos() as i64),
             Value::Duration(d) => HashKey::Composite(vec![
                 HashKey::Int64(d.months()),
@@ -134,10 +140,17 @@ impl HashKey {
             }
             // CRDT counters are opaque keys; hash by total logical value.
             Value::GCounter(counts) => {
+                // reason: CRDT counter values are practically small, wrap is acceptable for hashing
+                #[allow(clippy::cast_possible_wrap)]
                 HashKey::Int64(counts.values().copied().map(|v| v as i64).sum())
             }
             Value::OnCounter { pos, neg } => {
+                // reason: CRDT counter values are practically small, wrap is acceptable for hashing
+                #[allow(clippy::cast_possible_wrap)]
+                // reason: GCounter values are small, sum fits i64
                 let p: i64 = pos.values().copied().map(|v| v as i64).sum();
+                // reason: GCounter values are small, sum fits i64
+                #[allow(clippy::cast_possible_wrap)]
                 let n: i64 = neg.values().copied().map(|v| v as i64).sum();
                 HashKey::Int64(p - n)
             }

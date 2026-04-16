@@ -14,8 +14,8 @@ threshold_pct = 15
 fail_ci = false
 
 [categories.core]
-threshold_pct = 8
-fail_ci = false
+threshold_pct = 30
+fail_ci = true
 benchmarks = [
     "epoch_arena_*",
     "bump_*",
@@ -47,6 +47,15 @@ benchmarks = [
     "regression_2hop_*",
     "regression_3hop_*",
     "regression_fan_out_*",
+]
+
+[categories.wal]
+threshold_pct = 10
+fail_ci = false
+benchmarks = [
+    "wal_write_*",
+    "wal_batch_*",
+    "wal_recovery_*",
 ]
 
 [categories.serialization]

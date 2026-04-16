@@ -381,6 +381,50 @@ impl Value {
         let (value, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())?;
         Ok(value)
     }
+
+    /// Returns an estimate of the heap memory used by this value in bytes.
+    ///
+    /// This is a best-effort approximation used for enforcing property size
+    /// limits. Fixed-size types return 0 (only the enum discriminant, which
+    /// is already accounted for on the stack).
+    #[must_use]
+    pub fn estimated_size_bytes(&self) -> usize {
+        match self {
+            Value::Null
+            | Value::Bool(_)
+            | Value::Int64(_)
+            | Value::Float64(_)
+            | Value::Timestamp(_)
+            | Value::Date(_)
+            | Value::Time(_)
+            | Value::Duration(_)
+            | Value::ZonedDatetime(_) => 0,
+            Value::String(s) => s.len(),
+            Value::Bytes(b) => b.len(),
+            Value::Vector(v) => v.len() * size_of::<f32>(),
+            Value::List(items) => {
+                items.iter().map(Value::estimated_size_bytes).sum::<usize>()
+                    + items.len() * size_of::<Value>()
+            }
+            Value::Map(m) => m
+                .iter()
+                .map(|(k, v)| k.as_ref().len() + v.estimated_size_bytes() + size_of::<Value>())
+                .sum(),
+            Value::Path { nodes, edges } => {
+                let n: usize = nodes.iter().map(Value::estimated_size_bytes).sum::<usize>()
+                    + nodes.len() * size_of::<Value>();
+                let e: usize = edges.iter().map(Value::estimated_size_bytes).sum::<usize>()
+                    + edges.len() * size_of::<Value>();
+                n + e
+            }
+            Value::GCounter(m) => m.keys().map(|k| k.len() + size_of::<u64>()).sum(),
+            Value::OnCounter { pos, neg } => {
+                let p: usize = pos.keys().map(|k| k.len() + size_of::<u64>()).sum();
+                let n: usize = neg.keys().map(|k| k.len() + size_of::<u64>()).sum();
+                p + n
+            }
+        }
+    }
 }
 
 impl fmt::Debug for Value {
@@ -413,9 +457,13 @@ impl fmt::Debug for Value {
                 write!(f, "GCounter(total={total}, replicas={})", counts.len())
             }
             Value::OnCounter { pos, neg } => {
-                let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-                let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
-                write!(f, "OnCounter(net={})", pos_sum - neg_sum)
+                let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+                let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+                if pos_sum >= neg_sum {
+                    write!(f, "OnCounter(net={})", pos_sum - neg_sum)
+                } else {
+                    write!(f, "OnCounter(net=-{})", neg_sum - pos_sum)
+                }
             }
         }
     }
@@ -487,9 +535,13 @@ impl fmt::Display for Value {
                 write!(f, "GCounter({total})")
             }
             Value::OnCounter { pos, neg } => {
-                let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-                let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
-                write!(f, "OnCounter({})", pos_sum - neg_sum)
+                let pos_sum: u128 = pos.values().copied().map(u128::from).sum();
+                let neg_sum: u128 = neg.values().copied().map(u128::from).sum();
+                if pos_sum >= neg_sum {
+                    write!(f, "OnCounter({})", pos_sum - neg_sum)
+                } else {
+                    write!(f, "OnCounter(-{})", neg_sum - pos_sum)
+                }
             }
         }
     }
@@ -1786,5 +1838,163 @@ mod tests {
             neg: Arc::new(neg),
         };
         assert_eq!(format!("{v}"), "OnCounter(0)");
+    }
+
+    #[test]
+    fn test_estimated_size_bytes_fixed_types() {
+        assert_eq!(Value::Null.estimated_size_bytes(), 0);
+        assert_eq!(Value::Bool(true).estimated_size_bytes(), 0);
+        assert_eq!(Value::Int64(42).estimated_size_bytes(), 0);
+        assert_eq!(Value::Float64(3.125).estimated_size_bytes(), 0);
+    }
+
+    #[test]
+    fn test_estimated_size_bytes_string() {
+        let v = Value::from("hello");
+        assert_eq!(v.estimated_size_bytes(), 5);
+    }
+
+    #[test]
+    fn test_estimated_size_bytes_bytes() {
+        let v = Value::Bytes(Arc::from(vec![0u8; 100].as_slice()));
+        assert_eq!(v.estimated_size_bytes(), 100);
+    }
+
+    #[test]
+    fn test_estimated_size_bytes_vector() {
+        let v = Value::Vector(Arc::from(vec![1.0f32; 384].as_slice()));
+        assert_eq!(v.estimated_size_bytes(), 384 * 4);
+    }
+
+    #[test]
+    fn test_estimated_size_bytes_list() {
+        let v = Value::List(Arc::from(vec![Value::from("abc"), Value::Int64(1)]));
+        assert!(v.estimated_size_bytes() >= 3);
+    }
+
+    // --- Accessor tests for temporal and counter types ---
+
+    #[test]
+    fn test_as_date_matching() {
+        let date = Date::from_ymd(2024, 6, 15).unwrap();
+        let v = Value::Date(date);
+        assert_eq!(v.as_date(), Some(date));
+    }
+
+    #[test]
+    fn test_as_date_non_matching() {
+        let v = Value::Int64(42);
+        assert_eq!(v.as_date(), None);
+    }
+
+    #[test]
+    fn test_as_time_matching() {
+        let time = Time::from_hms(14, 30, 0).unwrap();
+        let v = Value::Time(time);
+        assert_eq!(v.as_time(), Some(time));
+    }
+
+    #[test]
+    fn test_as_time_non_matching() {
+        let v = Value::String("x".into());
+        assert_eq!(v.as_time(), None);
+    }
+
+    #[test]
+    fn test_as_duration_matching() {
+        let dur = Duration::new(1, 2, 3_000_000_000);
+        let v = Value::Duration(dur);
+        assert_eq!(v.as_duration(), Some(dur));
+    }
+
+    #[test]
+    fn test_as_duration_non_matching() {
+        let v = Value::Bool(true);
+        assert_eq!(v.as_duration(), None);
+    }
+
+    #[test]
+    fn test_as_zoned_datetime_matching() {
+        let zdt = ZonedDatetime::parse("2024-06-15T10:30:00+01:00").unwrap();
+        let v = Value::ZonedDatetime(zdt);
+        assert_eq!(v.as_zoned_datetime(), Some(zdt));
+    }
+
+    #[test]
+    fn test_as_zoned_datetime_non_matching() {
+        let v = Value::Null;
+        assert_eq!(v.as_zoned_datetime(), None);
+    }
+
+    #[test]
+    fn test_as_zoned_datetime_from_conversion() {
+        let zdt = ZonedDatetime::parse("2025-01-01T00:00:00+02:00").unwrap();
+        let v: Value = zdt.into();
+        assert_eq!(v.as_zoned_datetime(), Some(zdt));
+        assert_eq!(v.type_name(), "ZONED DATETIME");
+    }
+
+    #[test]
+    fn test_as_date_wrong_temporal_type() {
+        // A Time value should not be returned by as_date
+        let time = Time::from_hms(12, 0, 0).unwrap();
+        let v = Value::Time(time);
+        assert_eq!(v.as_date(), None);
+    }
+
+    #[test]
+    fn test_as_time_wrong_temporal_type() {
+        // A Date value should not be returned by as_time
+        let date = Date::from_ymd(2024, 3, 15).unwrap();
+        let v = Value::Date(date);
+        assert_eq!(v.as_time(), None);
+    }
+
+    #[test]
+    fn test_as_duration_wrong_temporal_type() {
+        // A Timestamp should not be returned by as_duration
+        let ts = Timestamp::from_secs(1_000_000);
+        let v = Value::Timestamp(ts);
+        assert_eq!(v.as_duration(), None);
+    }
+
+    #[test]
+    fn test_as_zoned_datetime_wrong_temporal_type() {
+        // A plain Timestamp should not be returned by as_zoned_datetime
+        let ts = Timestamp::from_secs(1_000_000);
+        let v = Value::Timestamp(ts);
+        assert_eq!(v.as_zoned_datetime(), None);
+    }
+
+    #[test]
+    fn test_zoned_datetime_serialization_roundtrip() {
+        let zdt = ZonedDatetime::parse("2024-12-25T18:00:00+05:30").unwrap();
+        let v = Value::ZonedDatetime(zdt);
+        let bytes = v.serialize().unwrap();
+        let decoded = Value::deserialize(&bytes).unwrap();
+        assert_eq!(v, decoded);
+        assert_eq!(decoded.as_zoned_datetime(), Some(zdt));
+    }
+
+    #[test]
+    fn test_zoned_datetime_type_name() {
+        let zdt = ZonedDatetime::parse("2024-06-15T10:30:00+02:00").unwrap();
+        let v = Value::ZonedDatetime(zdt);
+        assert_eq!(v.type_name(), "ZONED DATETIME");
+    }
+
+    #[test]
+    fn test_zoned_datetime_display() {
+        let zdt = ZonedDatetime::parse("2024-06-15T10:30:00+02:00").unwrap();
+        let v = Value::ZonedDatetime(zdt);
+        let displayed = format!("{v}");
+        assert!(
+            displayed.contains("2024-06-15"),
+            "Display should contain the date"
+        );
+        assert!(
+            displayed.contains("10:30:00"),
+            "Display should contain the time"
+        );
     }
 }

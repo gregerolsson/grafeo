@@ -131,10 +131,9 @@ fn create_rejected_on_read_only_store() {
 // ── GrafeoDB::compact() ────────────────────────────────────────
 
 #[test]
-fn compact_converts_lpg_to_compact() {
+fn compact_reads_survive() {
     let mut db = GrafeoDB::new_in_memory();
 
-    // Insert data via GQL.
     db.execute("INSERT (:Person {name: 'Alix', age: 30})")
         .unwrap();
     db.execute("INSERT (:Person {name: 'Gus', age: 25})")
@@ -151,7 +150,6 @@ fn compact_converts_lpg_to_compact() {
     )
     .unwrap();
 
-    // Compact.
     db.compact().unwrap();
 
     // Verify read queries still work.
@@ -169,10 +167,34 @@ fn compact_converts_lpg_to_compact() {
         .execute("MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN p.name, c.name")
         .unwrap();
     assert_eq!(edges.rows().len(), 2);
+}
 
-    // Verify write queries fail.
-    let write_result = session.execute("INSERT (:Person {name: 'Vincent'})");
-    assert!(write_result.is_err(), "writes should fail after compact()");
+#[test]
+fn compact_then_write() {
+    let mut db = GrafeoDB::new_in_memory();
+
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+
+    db.compact().unwrap();
+
+    // Writes should succeed on the layered store.
+    let session = db.session();
+    session
+        .execute("INSERT (:Person {name: 'Vincent'})")
+        .unwrap();
+
+    let result = session
+        .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+        .unwrap();
+    assert_eq!(result.rows().len(), 3);
+
+    let names: Vec<String> = result
+        .rows()
+        .iter()
+        .filter_map(|row| row[0].as_str().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(names, vec!["Alix", "Gus", "Vincent"]);
 }
 
 #[test]
@@ -192,14 +214,12 @@ fn compact_preserves_bool_and_string_properties() {
         .unwrap();
     assert_eq!(result.rows().len(), 2);
 
-    // First row: "alpha", true
     assert_eq!(
         result.rows()[0][0],
         grafeo_common::types::Value::String(arcstr::literal!("alpha"))
     );
     assert_eq!(result.rows()[0][1], grafeo_common::types::Value::Bool(true));
 
-    // Second row: "beta", false
     assert_eq!(
         result.rows()[1][0],
         grafeo_common::types::Value::String(arcstr::literal!("beta"))
@@ -218,4 +238,36 @@ fn compact_empty_database() {
     let session = db.session();
     let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
     assert_eq!(result.rows()[0][0], grafeo_common::types::Value::Int64(0));
+
+    // Write to empty compacted database.
+    session.execute("INSERT (:Node {val: 1})").unwrap();
+    let after = session.execute("MATCH (n) RETURN count(n)").unwrap();
+    assert_eq!(after.rows()[0][0], grafeo_common::types::Value::Int64(1));
+}
+
+#[test]
+fn recompact_merges_overlay() {
+    let mut db = GrafeoDB::new_in_memory();
+
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    db.compact().unwrap();
+
+    // Write to the overlay.
+    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
+
+    // Recompact: merge overlay into base.
+    db.recompact().unwrap();
+
+    // All data should be in the merged base now.
+    let session = db.session();
+    let result = session
+        .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+        .unwrap();
+    assert_eq!(result.rows().len(), 3);
+
+    // Continue writing after recompact.
+    session.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+    let after = session.execute("MATCH (p:Person) RETURN count(p)").unwrap();
+    assert_eq!(after.rows()[0][0], grafeo_common::types::Value::Int64(4));
 }

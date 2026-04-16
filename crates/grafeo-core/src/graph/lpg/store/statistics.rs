@@ -34,8 +34,16 @@ impl LpgStore {
         let mut stats = Statistics::new();
 
         // Read total counts from atomic counters
-        stats.total_nodes = self.live_node_count.load(Ordering::Relaxed).max(0) as u64;
-        stats.total_edges = self.live_edge_count.load(Ordering::Relaxed).max(0) as u64;
+        // reason: clamped to >= 0 by max(0), safe to cast to u64
+        #[allow(clippy::cast_sign_loss)]
+        {
+            stats.total_nodes = self.live_node_count.load(Ordering::Relaxed).max(0) as u64;
+        }
+        // reason: clamped to >= 0 by max(0), safe to cast to u64
+        #[allow(clippy::cast_sign_loss)]
+        {
+            stats.total_edges = self.live_edge_count.load(Ordering::Relaxed).max(0) as u64;
+        }
 
         // Compute per-label statistics from label_index (each is O(1) via .len())
         let registry = self.label_registry.read();
@@ -63,6 +71,8 @@ impl LpgStore {
         let edge_type_counts = self.edge_type_live_counts.read();
 
         for (type_id, type_name) in id_to_edge_type.iter().enumerate() {
+            // reason: clamped to >= 0 by max(0), safe to cast to u64
+            #[allow(clippy::cast_sign_loss)]
             let count = edge_type_counts.get(type_id).copied().unwrap_or(0).max(0) as u64;
 
             if count > 0 {
@@ -113,8 +123,10 @@ impl LpgStore {
         }
 
         // Resync the atomic counters
-        self.live_node_count
-            .store(total_nodes as i64, Ordering::Relaxed);
+        self.live_node_count.store(
+            i64::try_from(total_nodes).unwrap_or(i64::MAX),
+            Ordering::Relaxed,
+        );
         self.live_edge_count.store(total_edges, Ordering::Relaxed);
         *self.edge_type_live_counts.write() = type_counts;
 
@@ -164,8 +176,10 @@ impl LpgStore {
         }
 
         // Resync the atomic counters
-        self.live_node_count
-            .store(total_nodes as i64, Ordering::Relaxed);
+        self.live_node_count.store(
+            i64::try_from(total_nodes).unwrap_or(i64::MAX),
+            Ordering::Relaxed,
+        );
         self.live_edge_count.store(total_edges, Ordering::Relaxed);
         *self.edge_type_live_counts.write() = type_counts;
 

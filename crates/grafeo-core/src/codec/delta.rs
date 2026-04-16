@@ -181,7 +181,11 @@ impl DeltaEncoding {
         if max == 0 {
             1
         } else {
-            64 - max.leading_zeros() as u8
+            // reason: leading_zeros() returns [0, 64], 64 - n fits u8
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                64 - max.leading_zeros() as u8
+            }
         }
     }
 
@@ -204,6 +208,8 @@ impl DeltaEncoding {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(8 + 4 + self.deltas.len() * 8);
         buf.extend_from_slice(&self.base.to_le_bytes());
+        // reason: delta-encoded count is bounded by practical data sizes, fits u32
+        #[allow(clippy::cast_possible_truncation)]
         buf.extend_from_slice(&(self.count as u32).to_le_bytes());
         for &delta in &self.deltas {
             buf.extend_from_slice(&delta.to_le_bytes());
@@ -268,6 +274,8 @@ impl DeltaEncoding {
 /// Maps signed integers to unsigned: 0 -> 0, -1 -> 1, 1 -> 2, -2 -> 3, etc.
 #[inline]
 #[must_use]
+// reason: zig-zag encoding intentionally reinterprets bits, no data loss
+#[allow(clippy::cast_sign_loss)]
 pub fn zigzag_encode(value: i64) -> u64 {
     ((value << 1) ^ (value >> 63)) as u64
 }
@@ -275,6 +283,8 @@ pub fn zigzag_encode(value: i64) -> u64 {
 /// Zig-zag decodes an unsigned integer to signed.
 #[inline]
 #[must_use]
+// reason: zig-zag decoding intentionally reinterprets bits, inverse of encode
+#[allow(clippy::cast_possible_wrap)]
 pub fn zigzag_decode(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }

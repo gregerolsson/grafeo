@@ -32,6 +32,8 @@ pub enum AllocError {
     EpochNotFound(EpochId),
     /// Arena chunk has insufficient space for the allocation.
     InsufficientSpace,
+    /// Alignment must be a non-zero power of two.
+    InvalidAlignment(usize),
 }
 
 impl fmt::Display for AllocError {
@@ -41,6 +43,9 @@ impl fmt::Display for AllocError {
             Self::EpochNotFound(id) => write!(f, "epoch {id} not found in arena allocator"),
             Self::InsufficientSpace => {
                 write!(f, "arena chunk has insufficient space for allocation")
+            }
+            Self::InvalidAlignment(align) => {
+                write!(f, "alignment must be a non-zero power of two, got {align}")
             }
         }
     }
@@ -57,6 +62,9 @@ impl From<AllocError> for crate::Error {
             AllocError::EpochNotFound(id) => {
                 crate::Error::Internal(format!("epoch {id} not found in arena allocator"))
             }
+            AllocError::InvalidAlignment(align) => crate::Error::Internal(format!(
+                "alignment must be a non-zero power of two, got {align}"
+            )),
         }
     }
 }
@@ -78,6 +86,9 @@ impl Chunk {
     ///
     /// Returns `AllocError::OutOfMemory` if the system allocator fails.
     fn new(capacity: usize) -> Result<Self, AllocError> {
+        if capacity > u32::MAX as usize {
+            return Err(AllocError::OutOfMemory);
+        }
         let layout = Layout::from_size_align(capacity, 16).map_err(|_| AllocError::OutOfMemory)?;
         // SAFETY: We're allocating a valid layout
         let ptr = unsafe { alloc(layout) };
@@ -100,12 +111,24 @@ impl Chunk {
     /// Returns (offset, ptr) where offset is the aligned offset within this chunk.
     /// Returns None if there's not enough space.
     fn try_alloc_with_offset(&self, size: usize, align: usize) -> Option<(u32, NonNull<u8>)> {
+        // Alignment must be a power of two; checked_sub handles align == 0 below,
+        // but non-power-of-two values produce invalid bitmasks silently.
+        debug_assert!(
+            align.is_power_of_two(),
+            "alignment must be a power of two, got {align}"
+        );
+        let base_addr = self.ptr.as_ptr() as usize;
         loop {
             let current = self.offset.load(Ordering::Relaxed);
 
-            // Calculate aligned offset
-            let aligned = (current + align - 1) & !(align - 1);
-            let new_offset = aligned + size;
+            // Align the absolute address (base + offset), then convert back to an
+            // offset. This is correct for any requested alignment, even when it
+            // exceeds the chunk's own 16-byte alignment.
+            let align_mask = align.checked_sub(1)?;
+            let current_addr = base_addr.checked_add(current)?;
+            let aligned_addr = current_addr.checked_add(align_mask)? & !align_mask;
+            let aligned = aligned_addr - base_addr;
+            let new_offset = aligned.checked_add(size)?;
 
             if new_offset > self.capacity {
                 return None;
@@ -121,6 +144,8 @@ impl Chunk {
                 Ok(_) => {
                     // SAFETY: We've reserved this range exclusively
                     let ptr = unsafe { self.ptr.as_ptr().add(aligned) };
+                    // reason: aligned <= capacity, and chunk sizes are well under u32::MAX (4 GiB)
+                    #[allow(clippy::cast_possible_truncation)]
                     return Some((aligned as u32, NonNull::new(ptr)?));
                 }
                 Err(_) => continue, // Retry
@@ -202,6 +227,9 @@ impl Arena {
     /// Returns `AllocError::OutOfMemory` if a new chunk is needed and
     /// the system allocator fails.
     pub fn alloc(&self, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> {
+        if align == 0 || !align.is_power_of_two() {
+            return Err(AllocError::InvalidAlignment(align));
+        }
         // First try to allocate from existing chunks
         {
             let chunks = self.chunks.read();
@@ -241,7 +269,9 @@ impl Arena {
             return Ok(&mut []);
         }
 
-        let size = std::mem::size_of::<T>() * values.len();
+        let size = std::mem::size_of::<T>()
+            .checked_mul(values.len())
+            .ok_or(AllocError::OutOfMemory)?;
         let align = std::mem::align_of::<T>();
         let ptr = self.alloc(size, align)?;
 
@@ -374,7 +404,8 @@ impl Arena {
 
     /// Allocates a new chunk and performs the allocation.
     fn alloc_new_chunk(&self, size: usize, align: usize) -> Result<NonNull<u8>, AllocError> {
-        let chunk_size = self.chunk_size.max(size + align);
+        let required = size.checked_add(align).ok_or(AllocError::OutOfMemory)?;
+        let chunk_size = self.chunk_size.max(required);
         let chunk = Chunk::new(chunk_size)?;
 
         self.total_allocated
@@ -724,6 +755,8 @@ mod tiered_storage_tests {
     use super::*;
 
     #[test]
+    // reason: size_of::<u64>() is 8, fits u32
+    #[allow(clippy::cast_possible_truncation)]
     fn test_alloc_value_with_offset_basic() {
         let arena = Arena::with_chunk_size(EpochId::INITIAL, 4096).unwrap();
 

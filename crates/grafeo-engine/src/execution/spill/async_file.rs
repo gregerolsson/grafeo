@@ -223,6 +223,8 @@ impl AsyncSpillFileReader {
     ///
     /// Returns an error if the read fails.
     pub async fn read_bytes(&mut self) -> std::io::Result<Vec<u8>> {
+        // reason: spill buffer lengths fit usize on 64-bit targets
+        #[allow(clippy::cast_possible_truncation)]
         let len = self.read_u64_le().await? as usize;
         let mut buf = vec![0u8; len];
         self.read_exact(&mut buf).await?;

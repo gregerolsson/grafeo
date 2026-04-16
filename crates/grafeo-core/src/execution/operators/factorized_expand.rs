@@ -183,6 +183,8 @@ impl FactorizedExpandOperator {
                 target_ids.push_node_id(target_id);
             }
 
+            // reason: factorized column lengths fit u32
+            #[allow(clippy::cast_possible_truncation)]
             offsets.push(edge_ids.len() as u32);
         }
 
@@ -521,6 +523,8 @@ impl FactorizedExpandChain {
                 target_ids.push_node_id(target_id);
             }
 
+            // reason: factorized column lengths fit u32
+            #[allow(clippy::cast_possible_truncation)]
             offsets.push(edge_ids.len() as u32);
         }
 

@@ -2410,7 +2410,10 @@ impl CypherTranslator {
         match expr {
             ast::Expression::Literal(ast::Literal::Integer(i)) => {
                 // Clamp negative values to 0 (LIMIT -1 returns empty, not an error)
-                Ok(CountExpr::Literal((*i).max(0) as usize))
+                // reason: clamped to >= 0 by .max(0)
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let n = (*i).max(0) as usize;
+                Ok(CountExpr::Literal(n))
             }
             ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
             _ => Err(Error::Query(QueryError::new(

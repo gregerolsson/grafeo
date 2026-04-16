@@ -388,6 +388,8 @@ impl OptionalEpochId {
             epoch.as_u64(),
             u32::MAX as u64 - 1
         );
+        // reason: the assert above guarantees epoch < u32::MAX
+        #[allow(clippy::cast_possible_truncation)]
         Self(epoch.as_u64() as u32)
     }
 
@@ -1237,6 +1239,8 @@ mod tiered_storage_tests {
     }
 
     #[test]
+    // reason: test epoch values are small, fit u32
+    #[allow(clippy::cast_possible_truncation)]
     fn test_version_index_gc() {
         let mut index = VersionIndex::new();
 
@@ -1296,6 +1300,8 @@ mod tiered_storage_tests {
     }
 
     #[test]
+    // reason: test loop index 0..2 fits u32
+    #[allow(clippy::cast_possible_truncation)]
     fn test_version_index_smallvec_no_heap() {
         let mut index = VersionIndex::new();
 

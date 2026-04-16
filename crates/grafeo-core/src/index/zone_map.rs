@@ -505,6 +505,8 @@ impl BloomFilter {
             // Double hashing: h(i) = h1 + i * h2
             let h1 = base_hash;
             let h2 = base_hash.rotate_left(17);
+            // reason: hash value truncated to usize for bit array indexing
+            #[allow(clippy::cast_possible_truncation)]
             hashes.push((h1.wrapping_add((i as u64).wrapping_mul(h2))) as usize);
         }
 
@@ -543,12 +545,18 @@ impl BloomFilterBuilder {
 /// Calculates optimal number of bits for a Bloom filter.
 fn optimal_num_bits(n: usize, p: f64) -> usize {
     let ln2_squared = std::f64::consts::LN_2 * std::f64::consts::LN_2;
-    ((-(n as f64) * p.ln()) / ln2_squared).ceil() as usize
+    // reason: Bloom filter size calculation result is non-negative and bounded
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let result = ((-(n as f64) * p.ln()) / ln2_squared).ceil() as usize;
+    result
 }
 
 /// Calculates optimal number of hash functions for a Bloom filter.
 fn optimal_num_hashes(m: usize, n: usize) -> usize {
-    ((m as f64 / n as f64) * std::f64::consts::LN_2).ceil() as usize
+    // reason: optimal hash count is non-negative and small
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let result = ((m as f64 / n as f64) * std::f64::consts::LN_2).ceil() as usize;
+    result
 }
 
 /// Computes a hash for a value.

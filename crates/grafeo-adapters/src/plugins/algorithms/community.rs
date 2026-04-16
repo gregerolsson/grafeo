@@ -724,7 +724,19 @@ impl_algorithm! {
     description: "Label Propagation community detection",
     params: label_prop_params,
     execute(store, params) {
-        let max_iter = params.get_int("max_iterations").unwrap_or(100) as usize;
+        let max_iter = match params.get_int("max_iterations") {
+            Some(v) if v < 0 => {
+                return Err(grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations must be non-negative, got {v}"),
+                ));
+            }
+            Some(v) => usize::try_from(v).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations value {v} exceeds maximum supported size"),
+                )
+            })?,
+            None => 100,
+        };
 
         let communities = label_propagation(store, max_iter);
 
@@ -772,6 +784,8 @@ impl_algorithm! {
         ]);
 
         for (node, community_id) in result.communities {
+            // reason: Node/community IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Int64(community_id as i64),
@@ -817,8 +831,32 @@ impl_algorithm! {
     description: "Stochastic Block Model community detection (MDL minimization)",
     params: sbp_params,
     execute(store, params) {
-        let num_blocks = params.get_int("num_blocks").map(|v| v as usize);
-        let max_iter = params.get_int("max_iterations").unwrap_or(100) as usize;
+        let num_blocks = match params.get_int("num_blocks") {
+            Some(v) if v < 0 => {
+                return Err(grafeo_common::utils::error::Error::InvalidValue(
+                    format!("num_blocks must be non-negative, got {v}"),
+                ));
+            }
+            Some(v) => Some(usize::try_from(v).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(
+                    format!("num_blocks value {v} exceeds maximum supported size"),
+                )
+            })?),
+            None => None,
+        };
+        let max_iter = match params.get_int("max_iterations") {
+            Some(v) if v < 0 => {
+                return Err(grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations must be non-negative, got {v}"),
+                ));
+            }
+            Some(v) => usize::try_from(v).map_err(|_| {
+                grafeo_common::utils::error::Error::InvalidValue(
+                    format!("max_iterations value {v} exceeds maximum supported size"),
+                )
+            })?,
+            None => 100,
+        };
 
         let result = stochastic_block_partition(store, num_blocks, max_iter);
 
@@ -829,6 +867,8 @@ impl_algorithm! {
         ]);
 
         for (node, block_id) in &result.partition {
+            // reason: Node/block IDs are sequential counters, well within i64::MAX
+            #[allow(clippy::cast_possible_wrap)]
             output.add_row(vec![
                 Value::Int64(node.0 as i64),
                 Value::Int64(*block_id as i64),

@@ -61,8 +61,9 @@ pub struct SuccinctBitVector {
 
     /// Relative rank within superblock for each block.
     /// block_ranks[i] = number of 1-bits from superblock start to block i start.
-    /// Uses u8 since max value is SUPERBLOCK_BITS - BLOCK_BITS = 448.
-    block_ranks: Vec<u8>,
+    /// Uses u16 because the max value is SUPERBLOCK_BITS - BLOCK_BITS = 448,
+    /// which exceeds u8::MAX (255) for dense superblocks.
+    block_ranks: Vec<u16>,
 
     /// Sample positions for select1.
     /// select1_samples[i] = position of (i * SELECT_SAMPLE_RATE)-th 1-bit.
@@ -92,7 +93,7 @@ impl<'de> serde::Deserialize<'de> for SuccinctBitVector {
             #[allow(dead_code)]
             superblock_ranks: Vec<u32>,
             #[allow(dead_code)]
-            block_ranks: Vec<u8>,
+            block_ranks: Vec<u16>,
             #[allow(dead_code)]
             select1_samples: Vec<u32>,
             #[allow(dead_code)]
@@ -117,6 +118,12 @@ impl SuccinctBitVector {
     /// Creates a new succinct bitvector from an existing [`BitVector`].
     ///
     /// This is the preferred constructor when you already have a `BitVector`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a relative rank within a superblock exceeds `u16::MAX` (cannot
+    /// happen with the current 512-bit superblocks, where the maximum relative
+    /// rank is 448).
     #[must_use]
     pub fn from_bitvec(inner: BitVector) -> Self {
         let len = inner.len();
@@ -143,9 +150,13 @@ impl SuccinctBitVector {
                 superblock_start_ones = cumulative_ones;
             }
 
-            // Store relative rank within superblock
+            // Store relative rank within superblock.
+            // Max relative rank is SUPERBLOCK_BITS - BLOCK_BITS = 448, which always fits u16.
             let relative_rank = cumulative_ones - superblock_start_ones;
-            block_ranks.push(relative_rank as u8);
+            // Safety: 448 < u16::MAX (65535), so this never fails for valid superblocks.
+            let relative_rank_u16 =
+                u16::try_from(relative_rank).expect("relative rank within superblock fits u16");
+            block_ranks.push(relative_rank_u16);
 
             // Count bits in this word
             let bits_in_word = if bit_pos + BLOCK_BITS <= len {
@@ -165,13 +176,19 @@ impl SuccinctBitVector {
             // Sample for select1
             let next_ones = cumulative_ones + word_ones;
             while select1_samples.len() * SELECT_SAMPLE_RATE < next_ones as usize {
+                // reason: bit positions in bitvectors are bounded by practical sizes, fit u32
+                #[allow(clippy::cast_possible_truncation)]
                 select1_samples.push(bit_pos as u32);
             }
 
             // Sample for select0
+            // reason: bits_in_word is at most BLOCK_BITS (64), fits u32
+            #[allow(clippy::cast_possible_truncation)]
             let word_zeros = bits_in_word as u32 - word_ones;
             let next_zeros = cumulative_zeros + word_zeros;
             while select0_samples.len() * SELECT_SAMPLE_RATE < next_zeros as usize {
+                // reason: bit positions in bitvectors are bounded by practical sizes, fit u32
+                #[allow(clippy::cast_possible_truncation)]
                 select0_samples.push(bit_pos as u32);
             }
 
@@ -462,7 +479,7 @@ impl SuccinctBitVector {
     #[must_use]
     pub fn auxiliary_size_bytes(&self) -> usize {
         self.superblock_ranks.len() * 4
-            + self.block_ranks.len()
+            + self.block_ranks.len() * 2
             + self.select1_samples.len() * 4
             + self.select0_samples.len() * 4
     }
@@ -638,12 +655,12 @@ mod tests {
         let sbv = SuccinctBitVector::from_bools(&bits);
 
         let overhead = sbv.space_overhead();
-        // Should be less than 25% (theoretical is ~3.5% but we have select samples)
-        // For 1M bits: data = 125KB, auxiliary ≈ superblocks(1.5KB) + blocks(15KB) + select(~500 samples each)
+        // Auxiliary includes superblocks, blocks, and select1/select0 sample tables.
+        // For 1M bits with 50% density: data = 125KB, auxiliary ≈ 40KB (superblocks +
+        // blocks + two select sample arrays at ~500K samples / SAMPLE_RATE each).
         assert!(
-            overhead < 0.25,
-            "Space overhead {} is too high (expected < 25%)",
-            overhead
+            overhead < 0.40,
+            "Space overhead {overhead} is too high (expected < 40%)",
         );
     }
 

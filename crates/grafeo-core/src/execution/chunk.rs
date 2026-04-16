@@ -294,6 +294,8 @@ impl DataChunk {
                         // i64::MIN maps to 0 and i64::MAX maps to u64::MAX,
                         // preserving the natural signed ordering.
                         grafeo_common::types::Value::Int64(n) => {
+                            // reason: intentional bit-level reinterpretation for sort ordering
+                            #[allow(clippy::cast_sign_loss)]
                             Some((0u8, (n as u64) ^ (1u64 << 63)))
                         }
                         _ => None,
@@ -625,6 +627,8 @@ mod tests {
     }
 
     #[test]
+    // reason: loop index 0..5 fits usize
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn test_chunk_flatten() {
         let schema = [LogicalType::Int64, LogicalType::String];
         let mut builder = DataChunkBuilder::with_schema(&schema);

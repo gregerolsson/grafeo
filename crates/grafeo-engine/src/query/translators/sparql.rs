@@ -196,12 +196,18 @@ impl SparqlTranslator {
 
         // Apply OFFSET
         if let Some(offset) = select.solution_modifiers.offset {
-            plan = wrap_skip(plan, offset as usize);
+            // reason: SPARQL u64 offset fits usize on 64-bit targets
+            #[allow(clippy::cast_possible_truncation)]
+            let skip_n = offset as usize;
+            plan = wrap_skip(plan, skip_n);
         }
 
         // Apply LIMIT
         if let Some(limit) = select.solution_modifiers.limit {
-            plan = wrap_limit(plan, limit as usize);
+            // reason: SPARQL u64 limit fits usize on 64-bit targets
+            #[allow(clippy::cast_possible_truncation)]
+            let limit_n = limit as usize;
+            plan = wrap_limit(plan, limit_n);
         }
 
         Ok(LogicalPlan::new(plan))
@@ -235,7 +241,10 @@ impl SparqlTranslator {
 
         // Apply solution modifiers to the WHERE output
         if let Some(limit) = construct.solution_modifiers.limit {
-            plan = wrap_limit(plan, limit as usize);
+            // reason: SPARQL u64 limit fits usize on 64-bit targets
+            #[allow(clippy::cast_possible_truncation)]
+            let limit_n = limit as usize;
+            plan = wrap_limit(plan, limit_n);
         }
 
         // Translate template triples: substitute variable bindings from WHERE.

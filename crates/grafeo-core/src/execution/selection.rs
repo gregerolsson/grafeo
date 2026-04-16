@@ -22,6 +22,8 @@ impl SelectionVector {
     pub fn new_all(count: usize) -> Self {
         assert!(count <= Self::MAX_CAPACITY);
         Self {
+            // reason: count <= MAX_CAPACITY (65535) asserted above, fits u16
+            #[allow(clippy::cast_possible_truncation)]
             indices: (0..count as u16).collect(),
         }
     }
@@ -52,7 +54,13 @@ impl SelectionVector {
     {
         let indices: Vec<u16> = (0..count)
             .filter(|&i| predicate(i))
-            .map(|i| i as u16)
+            // reason: i < count which is bounded by MAX_CAPACITY (65535), fits u16
+            .map(|i| {
+                // reason: i < count, bounded by MAX_CAPACITY (65535), fits u16
+                #[allow(clippy::cast_possible_truncation)]
+                let idx = i as u16;
+                idx
+            })
             .collect();
         Self { indices }
     }
@@ -82,6 +90,8 @@ impl SelectionVector {
     /// Panics if `index` exceeds `SelectionVector::MAX_CAPACITY` (65535).
     pub fn push(&mut self, index: usize) {
         assert!(index <= Self::MAX_CAPACITY);
+        // reason: index <= MAX_CAPACITY (65535) asserted above, fits u16
+        #[allow(clippy::cast_possible_truncation)]
         self.indices.push(index as u16);
     }
 
@@ -179,6 +189,8 @@ impl SelectionVector {
             return false;
         }
         // Since indices are typically sorted, use binary search
+        // reason: index <= u16::MAX checked above
+        #[allow(clippy::cast_possible_truncation)]
         self.indices.binary_search(&(index as u16)).is_ok()
     }
 }

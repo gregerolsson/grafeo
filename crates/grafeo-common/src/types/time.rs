@@ -146,6 +146,8 @@ impl Time {
                 // We need to pad, but can't modify the slice, so parse differently
                 return {
                     let n: u32 = frac.parse().ok()?;
+                    // reason: frac.len() is at most 8 here (< 9 branch), so 9 - len fits u32
+                    #[allow(clippy::cast_possible_truncation)]
                     let scale = 10u32.pow(9 - frac.len() as u32);
                     let mut t = Self::from_hms_nano(hour, min, sec, n * scale)?;
                     if let Some(off) = offset {
@@ -179,7 +181,11 @@ impl Time {
     /// are not meaningful for time-of-day). The result wraps around at midnight.
     #[must_use]
     pub fn add_duration(self, dur: &super::Duration) -> Self {
+        // reason: nanos < NANOS_PER_DAY (86.4e12), well within i64 range
+        #[allow(clippy::cast_possible_wrap)]
         let total = self.nanos as i64 + dur.nanos();
+        // reason: NANOS_PER_DAY (86.4e12) is well within i64::MAX
+        #[allow(clippy::cast_possible_wrap)]
         let wrapped = total.rem_euclid(NANOS_PER_DAY as i64) as u64;
         Self {
             nanos: wrapped,
@@ -210,8 +216,13 @@ impl Time {
     fn utc_nanos(&self) -> u64 {
         match self.offset {
             Some(off) => {
+                // reason: nanos < NANOS_PER_DAY and constants are well within i64 range
+                #[allow(clippy::cast_possible_wrap)]
                 let adjusted = self.nanos as i64 - off as i64 * NANOS_PER_SECOND as i64;
-                adjusted.rem_euclid(NANOS_PER_DAY as i64) as u64
+                // reason: rem_euclid result is non-negative and < NANOS_PER_DAY, fits u64
+                #[allow(clippy::cast_possible_wrap)]
+                let result = adjusted.rem_euclid(NANOS_PER_DAY as i64) as u64;
+                result
             }
             None => self.nanos,
         }
