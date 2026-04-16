@@ -683,9 +683,7 @@ impl Config {
 mod num_cpus {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn get() -> usize {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
+        std::thread::available_parallelism().map_or(4, |n| n.get())
     }
 
     #[cfg(target_arch = "wasm32")]

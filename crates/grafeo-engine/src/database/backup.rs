@@ -285,8 +285,7 @@ pub fn read_backup_header(data: &[u8]) -> Result<(EpochId, EpochId, u64)> {
 pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 // ── Backup operations (called from GrafeoDB) ───────────────────────
@@ -324,7 +323,7 @@ pub(super) fn do_backup_full(
     // Copy the .grafeo file to the backup directory through the locked handle
     fm.copy_to(&dest_path)?;
 
-    let file_size = std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = std::fs::metadata(&dest_path).map_or(0, |m| m.len());
     let file_data = std::fs::read(&dest_path)
         .map_err(|e| Error::Internal(format!("failed to read backup file for checksum: {e}")))?;
     let checksum = crc32fast::hash(&file_data);

@@ -1082,18 +1082,20 @@ impl super::GrafeoDB {
                 for &id in &ids {
                     if let Some(node) = self.lpg_store().get_node(id) {
                         match node.properties.get(&pk) {
-                            Some(Value::Vector(v)) => {
-                                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    index.insert(id, v, &accessor);
-                                }))
-                                .is_err()
-                                {
-                                    grafeo_warn!(
-                                        "Vector index insert panicked for node {}",
-                                        id.as_u64()
-                                    );
-                                }
+                            Some(Value::Vector(v))
+                                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                    || {
+                                        index.insert(id, v, &accessor);
+                                    },
+                                ))
+                                .is_err() =>
+                            {
+                                grafeo_warn!(
+                                    "Vector index insert panicked for node {}",
+                                    id.as_u64()
+                                );
                             }
+                            Some(Value::Vector(_)) => {}
                             Some(_other) => {
                                 grafeo_warn!(
                                     "Node {} property '{}' expected Vector, skipping vector index insert",

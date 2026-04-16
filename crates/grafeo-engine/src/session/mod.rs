@@ -760,19 +760,18 @@ impl Session {
         if self.identity.has_grants() {
             match &cmd {
                 SessionCommand::CreateGraph { name, .. }
-                | SessionCommand::DropGraph { name, .. } => {
+                | SessionCommand::DropGraph { name, .. }
                     if !self
                         .identity
-                        .can_access_graph(name, crate::auth::Role::ReadWrite)
-                    {
-                        return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
-                            format!(
-                                "permission denied: no grant for graph '{name}' (user: {})",
-                                self.identity.user_id()
-                            ),
-                        )));
-                    }
+                        .can_access_graph(name, crate::auth::Role::ReadWrite) =>
+                {
+                    return Err(Error::Query(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!(
+                            "permission denied: no grant for graph '{name}' (user: {})",
+                            self.identity.user_id()
+                        ),
+                    )));
                 }
                 _ => {}
             }
