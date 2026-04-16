@@ -15,6 +15,20 @@ export declare class GrafeoDB {
   static openReadOnly(path: string): GrafeoDB
   /** Execute a GQL query. Returns a Promise<QueryResult>. */
   execute(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /**
+   * Runs a read-only GQL query and returns an async cursor.
+   *
+   * The returned `ResultStream` yields one row at a time via `await
+   * stream.next()`. Memory stays bounded regardless of result-set size.
+   *
+   * Rejects mutations (INSERT / DELETE / SET), EXPLAIN / PROFILE,
+   * SESSION / SCHEMA commands, and queries that require push-based
+   * operators (ORDER BY, aggregate, DISTINCT). Use `execute()` for those.
+   *
+   * **Stability:** experimental. Parameterized streaming queries are not
+   * yet supported.
+   */
+  executeStream(query: string): Promise<JsResultStream>
   /** Create a node with labels and optional properties. */
   createNode(labels: Array<string>, properties?: object | undefined | null): JsNode
   /** Create an edge between two nodes. */
@@ -42,8 +56,14 @@ export declare class GrafeoDB {
    */
   beginTransaction(isolationLevel?: string | undefined | null): Transaction
   /** Create a vector similarity index on a node property. */
-  createVectorIndex(label: string, property: string, dimensions?: number | undefined | null, metric?: string | undefined | null, m?: number | undefined | null, efConstruction?: number | undefined | null): Promise<void>
-  /** Search for the k nearest neighbors of a query vector. */
+  createVectorIndex(label: string, property: string, dimensions?: number | undefined | null, metric?: string | undefined | null, m?: number | undefined | null, efConstruction?: number | undefined | null, quantization?: string | undefined | null): Promise<void>
+  /**
+   * Search for the k nearest neighbors of a query vector.
+   *
+   * Returns an array of [nodeId, distance] pairs sorted by distance
+   * ascending (lower = more similar). The distance scale depends on
+   * the metric configured at index creation.
+   */
   vectorSearch(label: string, property: string, query: Array<number>, k: number, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
   /** Bulk-insert nodes with vector properties. */
   batchCreateNodes(label: string, property: string, vectors: Array<Array<number>>): Promise<Array<number>>
@@ -127,28 +147,59 @@ export declare class GrafeoDB {
   /**
    * Rebuild a vector index by rescanning all matching nodes.
    * Preserves the original index configuration.
+   *
+   * Note: Vector indexes auto-sync when you call setNodeProperty(),
+   * batchCreateNodes(), or batchCreateNodesWithProps() with vector data.
+   * You only need this after non-standard data imports or to compact
+   * the index after many deletions.
    */
   rebuildVectorIndex(label: string, property: string): Promise<void>
   /** Batch search for nearest neighbors of multiple query vectors. */
   batchVectorSearch(label: string, property: string, queries: Array<Array<number>>, k: number, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<Array<number>>>>
-  /** Search for diverse nearest neighbors using Maximal Marginal Relevance (MMR). */
+  /**
+   * Search for diverse nearest neighbors using Maximal Marginal Relevance (MMR).
+   *
+   * Returns an array of [nodeId, distance] pairs in MMR selection order.
+   * The distance values match vectorSearch() for the same nodes
+   * (lower = more similar). The ordering reflects relevance-diversity
+   * balance, not distance sorting.
+   */
   mmrSearch(label: string, property: string, query: Array<number>, k: number, fetchK?: number | undefined | null, lambdaMult?: number | undefined | null, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
-  /** Create a BM25 text index on a node property for full-text search. */
+  /**
+   * Create a BM25 text index on a node property for full-text search.
+   *
+   * The index is automatically kept in sync as nodes are created,
+   * updated, or deleted. You do not need to call rebuildTextIndex()
+   * after normal write operations.
+   */
   createTextIndex(label: string, property: string): Promise<void>
   /** Drop a text index for the given label and property. */
   dropTextIndex(label: string, property: string): Promise<boolean>
-  /** Rebuild a text index by rescanning all matching nodes. */
+  /**
+   * Rebuild a text index by rescanning all matching nodes.
+   *
+   * Note: Text indexes auto-sync on normal writes. You only need this
+   * after importing data through non-standard paths.
+   */
   rebuildTextIndex(label: string, property: string): Promise<void>
   /**
    * Search a text index using BM25 scoring.
    *
-   * Returns an array of [nodeId, score] pairs sorted by descending relevance.
+   * Returns an array of [nodeId, score] pairs sorted by descending
+   * relevance (higher score = more relevant). BM25 scores are
+   * unbounded positive floats.
    */
   textSearch(label: string, property: string, query: string, k: number): Promise<Array<Array<number>>>
   /**
    * Perform hybrid search combining text (BM25) and vector similarity.
    *
-   * Returns an array of [nodeId, score] pairs.
+   * Requires both a text index (createTextIndex) and a vector index
+   * (createVectorIndex). If either is missing, that source is silently
+   * omitted from fusion.
+   *
+   * Returns an array of [nodeId, score] pairs sorted by fused score
+   * descending (higher = more relevant). These are fusion scores,
+   * NOT distances.
    */
   hybridSearch(label: string, textProperty: string, vectorProperty: string, queryText: string, k: number, queryVector?: Array<number> | undefined | null, fusion?: string | undefined | null, weights?: Array<number> | undefined | null): Promise<Array<Array<number>>>
   /**
@@ -173,18 +224,6 @@ export declare class GrafeoDB {
   nodeHistorySince(nodeId: number, sinceEpoch: number): Promise<Array<any>>
   /** Returns all change events across entities in an epoch range. */
   changesBetween(startEpoch: number, endEpoch: number): Promise<Array<any>>
-  /** Execute a Cypher query. */
-  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE). */
-  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a Gremlin query. */
-  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a GraphQL query. */
-  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SPARQL query against the RDF triple store. */
-  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a query in a named language (e.g. `"graphql-rdf"`). */
-  executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
   /**
    * Import a CSV file as graph nodes.
    *
@@ -273,6 +312,36 @@ export declare class QueryResult {
 }
 
 /**
+ * Async cursor over the rows of a lazy GQL query.
+ *
+ * Obtained from [`GrafeoDB.executeStream()`](super::database::JsGrafeoDB::execute_stream).
+ * Holds bounded memory regardless of result size (one chunk at a time).
+ *
+ * # Stability: Experimental
+ */
+export declare class ResultStream {
+  /** Column names in the order they appear in each row object. */
+  get columns(): Array<string>
+  /**
+   * Pulls the next row as a plain object, or `null` when the stream is
+   * exhausted. Runs the Rust work on a blocking thread so the Node.js
+   * event loop stays responsive.
+   *
+   * Values follow the Grafeo JSON convention: strings, numbers, booleans,
+   * and `null` map directly; temporal and complex types use the tagged
+   * form documented in `grafeo-bindings-common::json` (e.g. `{ "$date": ... }`).
+   */
+  next(): Promise<JsonValue | null>
+  /**
+   * Explicitly releases the underlying operator tree. After calling this,
+   * `next()` returns `null`. Useful when you want to break out of iteration
+   * early without waiting for GC.
+   */
+  close(): void
+}
+export type JsResultStream = ResultStream
+
+/**
  * A database transaction with explicit commit/rollback.
  *
  * In Node.js 22+, use with `using` for automatic cleanup:
@@ -292,16 +361,6 @@ export declare class Transaction {
   rollback(): void
   /** Whether the transaction is still active. */
   get isActive(): boolean
-  /** Execute a Cypher query within this transaction. */
-  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE) within this transaction. */
-  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a Gremlin query within this transaction. */
-  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a GraphQL query within this transaction. */
-  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SPARQL query within this transaction. */
-  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
 }
 
 /** Options for CSV import. */

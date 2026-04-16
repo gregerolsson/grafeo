@@ -1,0 +1,120 @@
+// Lazy, cursor-based GQL result stream.
+
+using System.Runtime.InteropServices;
+using System.Text.Json;
+
+using Grafeo.Native;
+
+namespace Grafeo;
+
+/// <summary>
+/// Async cursor over the rows of a read-only GQL query.
+/// Pulls rows from the Rust engine on demand, so memory stays bounded
+/// regardless of result size.
+///
+/// Rejects mutating queries (INSERT / DELETE / SET), EXPLAIN / PROFILE,
+/// session/schema commands, and queries that compile to push-based pipelines
+/// (ORDER BY, aggregate, DISTINCT). Use <see cref="GrafeoDB.Execute(string)"/>
+/// for those.
+///
+/// Dispose the stream when done (via <c>using</c> or <c>await using</c>) to
+/// release the underlying Rust iterator.
+///
+/// Experimental (0.5.40+): API may change before Beta.
+/// </summary>
+public sealed class ResultStream : IDisposable, IAsyncDisposable
+{
+    private readonly IReadOnlyList<string> _columns;
+    private nint _handle;
+    private volatile bool _disposed;
+
+    internal ResultStream(nint handle, IReadOnlyList<string> columns)
+    {
+        _handle = handle;
+        _columns = columns;
+    }
+
+    /// <summary>Column names in the order they appear in each row dictionary.</summary>
+    public IReadOnlyList<string> Columns => _columns;
+
+    /// <summary>
+    /// Pulls the next row, or returns <c>null</c> when the stream is exhausted.
+    /// </summary>
+    public Dictionary<string, object?>? Next()
+    {
+        ThrowIfDisposed();
+        var status = NativeMethods.grafeo_stream_next_row_json(_handle, out var rowPtr);
+        if (status != 0)
+        {
+            throw GrafeoException.FromLastError((GrafeoStatus)status);
+        }
+        if (rowPtr == nint.Zero)
+        {
+            return null;
+        }
+        try
+        {
+            var json = Marshal.PtrToStringUTF8(rowPtr)
+                ?? throw new GrafeoException("Failed to decode row JSON", GrafeoStatus.Serialization);
+            var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(json)
+                ?? throw new GrafeoException("Row JSON is not an object", GrafeoStatus.Serialization);
+            return dict;
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_string(rowPtr);
+        }
+    }
+
+    /// <summary>
+    /// Iterates the remaining rows. Convenient for
+    /// <c>foreach (var row in stream.Rows())</c>.
+    /// </summary>
+    public IEnumerable<Dictionary<string, object?>> Rows()
+    {
+        while (true)
+        {
+            var row = Next();
+            if (row is null) yield break;
+            yield return row;
+        }
+    }
+
+    /// <summary>Drains the stream into a list. Prefer <see cref="Rows"/> for large result sets.</summary>
+    public List<Dictionary<string, object?>> ToList()
+    {
+        var list = new List<Dictionary<string, object?>>();
+        foreach (var row in Rows())
+        {
+            list.Add(row);
+        }
+        return list;
+    }
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        if (_handle != nint.Zero)
+        {
+            NativeMethods.grafeo_stream_free(_handle);
+            _handle = nint.Zero;
+        }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(ResultStream));
+        }
+    }
+}

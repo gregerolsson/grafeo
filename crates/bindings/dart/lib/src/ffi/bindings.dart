@@ -177,6 +177,36 @@ final class GrafeoBindings {
       void Function(Pointer<Void>)>('grafeo_free_result');
 
   // ===========================================================================
+  // Streaming (experimental, 0.5.40+)
+  // ===========================================================================
+
+  /// Open a streaming GQL query. Returns null on error.
+  late final grafeoStreamOpen = library.lookupFunction<
+      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>),
+      Pointer<Void> Function(
+          Pointer<Void>, Pointer<Utf8>)>('grafeo_stream_open');
+
+  /// Returns the column names as a JSON array string. Caller must
+  /// [grafeoFreeString] the pointer.
+  late final grafeoStreamColumnsJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_stream_columns_json');
+
+  /// Pulls the next row into `*out_json`. Returns GrafeoStatus:
+  /// - 0 (Ok) + non-null *out_json → row; caller frees the string
+  /// - 0 (Ok) + null *out_json → stream exhausted
+  /// - non-zero → error (call grafeoLastError for details)
+  late final grafeoStreamNextRowJson = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Pointer<Pointer<Utf8>>),
+      int Function(Pointer<Void>,
+          Pointer<Pointer<Utf8>>)>('grafeo_stream_next_row_json');
+
+  /// Frees a stream handle.
+  late final grafeoStreamFree = library.lookupFunction<
+      Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('grafeo_stream_free');
+
+  // ===========================================================================
   // Schema context
   // ===========================================================================
 

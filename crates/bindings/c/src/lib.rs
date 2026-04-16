@@ -24,4 +24,5 @@
 
 mod database;
 mod error;
+mod stream;
 mod types;

@@ -21,6 +21,7 @@ mod database;
 mod error;
 mod graph;
 mod query;
+mod stream;
 mod transaction;
 mod types;
 

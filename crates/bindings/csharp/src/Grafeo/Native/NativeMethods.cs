@@ -126,6 +126,29 @@ internal static partial class NativeMethods
     internal static partial void grafeo_free_result(nint result);
 
     // =========================================================================
+    // Streaming (experimental, 0.5.40+)
+    // =========================================================================
+
+    /// <summary>Open a streaming GQL query. Returns stream handle or null on error.</summary>
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint grafeo_stream_open(nint db, string query);
+
+    /// <summary>Returns the column names as a JSON array. Caller must free with grafeo_free_string.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_stream_columns_json(nint stream);
+
+    /// <summary>Pulls the next row as a JSON object into out_json.
+    /// Returns 0 (Ok) with non-null out_json: caller frees the string.
+    /// Returns 0 (Ok) with null out_json: stream exhausted.
+    /// Returns non-zero: error (call grafeo_last_error).</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_stream_next_row_json(nint stream, out nint outJson);
+
+    /// <summary>Frees a stream handle.</summary>
+    [LibraryImport(LibName)]
+    internal static partial void grafeo_stream_free(nint stream);
+
+    // =========================================================================
     // Schema context
     // =========================================================================
 

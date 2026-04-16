@@ -54,6 +54,7 @@ typedef struct GrafeoTransaction GrafeoTransaction;
 typedef struct GrafeoResult      GrafeoResult;
 typedef struct GrafeoNode        GrafeoNode;
 typedef struct GrafeoEdge        GrafeoEdge;
+typedef struct GrafeoStream      GrafeoStream;
 
 /* ---- Error handling ------------------------------------------------------ */
 
@@ -105,6 +106,28 @@ uint64_t    grafeo_result_rows_scanned(const GrafeoResult* result);
 const char* grafeo_result_nodes_json(const GrafeoResult* result);
 const char* grafeo_result_edges_json(const GrafeoResult* result);
 void        grafeo_free_result(GrafeoResult* result);
+
+/* ---- Streaming (experimental, 0.5.40+) ---------------------------------- */
+/* Lazy cursor-based results: bounded memory regardless of result size.
+ * Read-only, pull-only: rejects mutations, ORDER BY, aggregate, DISTINCT,
+ * EXPLAIN, PROFILE, and session/schema commands. Use grafeo_execute for
+ * those. */
+
+/* Opens a streaming query. Returns NULL on error (check grafeo_last_error). */
+GrafeoStream* grafeo_stream_open(GrafeoDatabase* db, const char* query);
+
+/* Returns the column names as a JSON array. Caller frees with grafeo_free_string. */
+char* grafeo_stream_columns_json(GrafeoStream* stream);
+
+/* Pulls the next row into *out_json as a JSON object.
+ * On success (GrafeoStatus::Ok) with non-NULL *out_json: caller frees the
+ * string with grafeo_free_string. On success with NULL *out_json: stream
+ * exhausted, stop iterating. On any other status, grafeo_last_error has
+ * details. */
+GrafeoStatus grafeo_stream_next_row_json(GrafeoStream* stream, char** out_json);
+
+/* Frees a stream handle. Safe to call on NULL. */
+void grafeo_stream_free(GrafeoStream* stream);
 
 /* ---- Schema context ------------------------------------------------------ */
 

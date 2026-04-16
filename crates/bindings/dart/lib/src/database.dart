@@ -12,6 +12,7 @@ import 'package:ffi/ffi.dart';
 import 'error.dart';
 import 'ffi/bindings.dart';
 import 'ffi/loader.dart';
+import 'stream.dart';
 import 'transaction.dart';
 import 'types.dart';
 import 'value.dart';
@@ -147,6 +148,22 @@ class GrafeoDB implements Finalizable {
     } finally {
       malloc.free(queryPtr);
     }
+  }
+
+  /// Open a lazy cursor over a read-only GQL query.
+  ///
+  /// Rows are pulled from the Rust engine on demand, so memory stays bounded
+  /// regardless of result size. Rejects mutations, EXPLAIN / PROFILE,
+  /// session/schema commands, and queries that compile to push-based
+  /// pipelines (ORDER BY, aggregate, DISTINCT). Use [execute] for those.
+  ///
+  /// Always call `stream.close()` (or rely on the [NativeFinalizer] as a
+  /// safety net) to release the underlying Rust iterator.
+  ///
+  /// Experimental (0.5.40+): API may change before Beta.
+  ResultStream executeStream(String query) {
+    _checkOpen();
+    return ResultStream.open(_handle, _bindings, query);
   }
 
   /// Execute a GQL query with parameters.

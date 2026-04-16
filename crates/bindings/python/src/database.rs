@@ -340,6 +340,39 @@ impl PyGrafeoDB {
         self.execute_language_impl("gql", query, params)
     }
 
+    /// Runs a read-only GQL query and returns a lazy iterator.
+    ///
+    /// Iterate with ``for row in db.execute_lazy(q):``. Each row is a dict
+    /// keyed by column name, and only one chunk (~2048 rows) is held in
+    /// memory at a time. Use this when the result set is too large to
+    /// materialize, or when you want first-row latency without waiting for
+    /// the full query to finish.
+    ///
+    /// **Supported queries:** plain read patterns (MATCH / WHERE / RETURN /
+    /// LIMIT). Not supported: mutations (INSERT / DELETE / SET), queries
+    /// that require ORDER BY / aggregation / DISTINCT, EXPLAIN / PROFILE,
+    /// and SESSION/SCHEMA commands. Use ``execute()`` for those.
+    ///
+    /// **Stability:** experimental. Parameterized streaming queries are not
+    /// yet supported and will be added in a follow-up release.
+    ///
+    /// Example:
+    ///     for row in db.execute_lazy("MATCH (p:Person) RETURN p.name, p.age"):
+    ///         print(row["p.name"], row["p.age"])
+    #[cfg(feature = "gql")]
+    fn execute_lazy(&self, query: &str) -> PyResult<crate::stream::PyResultStream> {
+        let db = self.inner.read();
+        let stream = db.execute_streaming(query).map_err(PyGrafeoError::from)?;
+        // Sync graph/schema state is not needed: execute_streaming rejects the
+        // session commands that would change them. We still drop the read
+        // guard explicitly for clarity.
+        drop(db);
+        Ok(crate::stream::PyResultStream::new(
+            Arc::clone(&self.inner),
+            stream,
+        ))
+    }
+
     /// Execute a GQL query at a specific historical epoch.
     ///
     /// Returns results as they would have appeared at the given epoch.

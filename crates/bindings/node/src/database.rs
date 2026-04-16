@@ -156,6 +156,30 @@ impl JsGrafeoDB {
         self.execute_language_impl("gql", query, params).await
     }
 
+    /// Runs a read-only GQL query and returns an async cursor.
+    ///
+    /// The returned `ResultStream` yields one row at a time via `await
+    /// stream.next()`. Memory stays bounded regardless of result-set size.
+    ///
+    /// Rejects mutations (INSERT / DELETE / SET), EXPLAIN / PROFILE,
+    /// SESSION / SCHEMA commands, and queries that require push-based
+    /// operators (ORDER BY, aggregate, DISTINCT). Use `execute()` for those.
+    ///
+    /// **Stability:** experimental. Parameterized streaming queries are not
+    /// yet supported.
+    #[napi(js_name = "executeStream")]
+    pub async fn execute_stream(&self, query: String) -> Result<crate::stream::JsResultStream> {
+        let db_arc = Arc::clone(&self.inner);
+        let keepalive = Arc::clone(&self.inner);
+        let stream = tokio::task::spawn_blocking(move || {
+            let db = db_arc.read();
+            db.execute_streaming(&query).map_err(NodeGrafeoError::from)
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))??;
+        Ok(crate::stream::JsResultStream::new(keepalive, stream))
+    }
+
     /// Create a node with labels and optional properties.
     #[napi(js_name = "createNode")]
     pub fn create_node(

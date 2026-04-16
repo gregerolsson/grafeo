@@ -94,6 +94,43 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         return BuildResult(resultPtr);
     }
 
+    /// <summary>
+    /// Open a lazy cursor over a read-only GQL query. Memory is bounded to
+    /// one chunk at a time regardless of total result size.
+    /// Rejects mutations, EXPLAIN / PROFILE, session/schema commands, and
+    /// queries that compile to push-based pipelines (ORDER BY, aggregate,
+    /// DISTINCT). Use <see cref="Execute(string)"/> for those.
+    /// Experimental (0.5.40+): signature may change before Beta.
+    /// </summary>
+    public ResultStream ExecuteStream(string query)
+    {
+        ThrowIfDisposed();
+        var streamPtr = NativeMethods.grafeo_stream_open(Handle, query);
+        if (streamPtr == nint.Zero)
+            throw GrafeoException.FromLastError(GrafeoStatus.Query);
+
+        // Read columns once; the JSON string is heap-allocated and must be freed.
+        var colsPtr = NativeMethods.grafeo_stream_columns_json(streamPtr);
+        IReadOnlyList<string> columns;
+        if (colsPtr == nint.Zero)
+        {
+            NativeMethods.grafeo_stream_free(streamPtr);
+            throw GrafeoException.FromLastError(GrafeoStatus.Query);
+        }
+        try
+        {
+            var json = Marshal.PtrToStringUTF8(colsPtr) ?? "[]";
+            columns = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json)
+                ?? new List<string>();
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_string(colsPtr);
+        }
+
+        return new ResultStream(streamPtr, columns);
+    }
+
     /// <summary>Execute a GQL query on the thread pool.</summary>
     public Task<QueryResult> ExecuteAsync(string query, CancellationToken ct = default)
     {
