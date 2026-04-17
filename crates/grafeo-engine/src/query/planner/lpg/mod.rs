@@ -866,8 +866,14 @@ impl Planner {
         }
 
         let mut columns = vec![scan.variable.clone()];
-        // VectorScan always projects a score column
-        columns.push(format!("_vscore_{}", scan.variable));
+        // VectorScan always projects a score column keyed by metric+property
+        let metric_tag = match scan.metric {
+            Some(VectorMetric::Cosine) | None => "cos",
+            Some(VectorMetric::Euclidean) => "euc",
+            Some(VectorMetric::DotProduct) => "dot",
+            Some(VectorMetric::Manhattan) => "man",
+        };
+        columns.push(format!("_vscore_{}_{}_{}", metric_tag, scan.property, scan.variable));
 
         Ok((Box::new(operator), columns))
     }
