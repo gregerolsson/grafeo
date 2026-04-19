@@ -271,3 +271,31 @@ fn recompact_merges_overlay() {
     let after = session.execute("MATCH (p:Person) RETURN count(p)").unwrap();
     assert_eq!(after.rows()[0][0], grafeo_common::types::Value::Int64(4));
 }
+
+#[test]
+fn named_graphs_survive_compact_and_recompact() {
+    let mut db = GrafeoDB::new_in_memory();
+
+    assert!(db.create_graph("europe").unwrap());
+    assert!(db.create_graph("asia").unwrap());
+
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    db.compact().unwrap();
+
+    let mut names = db.list_graphs();
+    names.sort();
+    assert_eq!(names, vec!["asia".to_string(), "europe".to_string()]);
+    assert!(db.store().graph("europe").is_some());
+    db.set_current_graph(Some("asia")).unwrap();
+    db.set_current_graph(None).unwrap();
+
+    db.recompact().unwrap();
+
+    let mut names = db.list_graphs();
+    names.sort();
+    assert_eq!(names, vec!["asia".to_string(), "europe".to_string()]);
+    assert!(db.store().graph("europe").is_some());
+
+    assert!(db.drop_graph("europe"));
+    assert_eq!(db.list_graphs(), vec!["asia".to_string()]);
+}

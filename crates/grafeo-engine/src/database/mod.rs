@@ -217,7 +217,12 @@ impl GrafeoDB {
         if let Some(ref ext_read) = self.external_read_store {
             ext_read.as_ref()
         } else {
-            &**self.lpg_store()
+            #[cfg(feature = "lpg")]
+            {
+                &**self.lpg_store()
+            }
+            #[cfg(not(feature = "lpg"))]
+            unreachable!("no graph store available: enable the `lpg` feature or use with_store()")
         }
     }
 
@@ -896,6 +901,15 @@ impl GrafeoDB {
         let current_epoch = self.transaction_manager.current_epoch();
         layered.overlay_store().sync_epoch(current_epoch);
 
+        // Named graphs are LPG-specific and outside the columnar base; move them
+        // from the pre-compact overlay into the new overlay so they survive
+        // compaction.
+        if let Some(ref old) = self.store {
+            layered
+                .overlay_store()
+                .install_named_graphs(old.take_named_graphs());
+        }
+
         self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStore>);
         self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
         self.store = Some(Arc::clone(layered.overlay_store()));
@@ -945,6 +959,11 @@ impl GrafeoDB {
         // Sync overlay epoch.
         let current_epoch = self.transaction_manager.current_epoch();
         new_layered.overlay_store().sync_epoch(current_epoch);
+
+        // Carry named graphs forward: the old overlay is about to be dropped.
+        new_layered
+            .overlay_store()
+            .install_named_graphs(layered.overlay_store().take_named_graphs());
 
         self.external_read_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStore>);
         self.external_write_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStoreMut>);

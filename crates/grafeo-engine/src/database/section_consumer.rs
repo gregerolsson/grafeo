@@ -65,7 +65,6 @@ use std::path::PathBuf;
 /// without a full checkpoint + mmap cycle. The [`can_spill`](MemoryConsumer::can_spill)
 /// method returns `true` for mmap-able index sections, signaling that future
 /// tiered storage support will enable actual spilling.
-#[cfg(feature = "lpg")]
 pub struct SectionConsumer {
     name: String,
     section: Arc<dyn Section>,
@@ -74,7 +73,6 @@ pub struct SectionConsumer {
     mmap_able: bool,
 }
 
-#[cfg(feature = "lpg")]
 impl SectionConsumer {
     /// Creates a consumer for the given section.
     ///
@@ -104,7 +102,6 @@ impl SectionConsumer {
     }
 }
 
-#[cfg(feature = "lpg")]
 impl MemoryConsumer for SectionConsumer {
     fn name(&self) -> &str {
         &self.name
