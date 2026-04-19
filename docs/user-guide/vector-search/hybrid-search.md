@@ -12,6 +12,13 @@ tags:
 
 Hybrid search combines BM25 text relevance with HNSW vector similarity, then fuses the results into a single ranking. This captures both exact keyword matches and semantic meaning.
 
+!!! tip "Filter-expression alternative (0.5.40+)"
+    For hybrid predicates that combine with a MATCH pattern, AND/OR with other
+    WHERE clauses, or need the score as a projected column, use
+    [filter-expression hybrid search](filter-expressions.md) instead.
+    `hybrid_search()` is best when you want a single top-K list with RRF or
+    weighted fusion.
+
 ## Prerequisites
 
 Hybrid search requires the `hybrid-search` feature flag, which is included in the `embedded`, `server`, and `full` profiles. It also depends on `text-index` and `vector-index`.
