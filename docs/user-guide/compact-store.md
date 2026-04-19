@@ -1,6 +1,6 @@
 ---
 title: Compact Store
-description: Convert a database to a read-only columnar format for faster queries and lower memory usage.
+description: Convert a database to a layered columnar format for faster queries and lower memory usage; remains writable through an overlay.
 tags:
   - performance
   - storage
@@ -57,7 +57,7 @@ memory reads.
         INSERT (p)-[:LIVES_IN]->(c)
     """)
 
-    # Switch to compact mode (read-only from here)
+    # Switch to compact mode (subsequent writes go to a mutable overlay)
     db.compact()
 
     # Queries work as before, but faster
@@ -142,7 +142,9 @@ memory reads.
 1. **Scans** all nodes from the current store, grouped by label
 2. **Infers** column types from property values and builds per-label columnar tables
 3. **Builds** forward and backward CSR adjacency for each edge type
-4. **Swaps** the database to read-only mode and drops the original store
+4. **Swaps** the database to a layered store: the new columnar tables become the
+   immutable base and a mutable overlay is attached on top to absorb subsequent
+   writes. `recompact()` later folds the overlay back into a fresh base.
 
 The result is a `CompactStore` backed by:
 
