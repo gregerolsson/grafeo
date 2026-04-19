@@ -578,8 +578,7 @@ fn test_score_reuse_isolates_different_query_vectors() {
     let row = &r.rows()[0];
     let other: f64 = match &row[1] {
         Value::Float64(f) => *f,
-        Value::Float32(f) => f64::from(*f),
-        other => panic!("expected float, got {:?}", other),
+        other => panic!("expected Float64, got {:?}", other),
     };
     assert!(
         other.abs() < 0.01,
