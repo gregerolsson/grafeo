@@ -155,7 +155,7 @@ fn return_arithmetic_multiple_ops() {
     for (query, expected) in cases {
         let r = session.execute(query).unwrap();
         assert_eq!(r.rows().len(), 1, "query: {query}");
-        assert_eq!(int_col(&r.rows()[0], 0), Some(*expected), "query: {query}",);
+        assert_eq!(int_col(&r.rows()[0], 0), Some(*expected), "query: {query}");
     }
 }
 
