@@ -596,6 +596,43 @@ fn test_topk_order_by_vector_similarity() {
     assert_eq!(result.row_count(), 2, "Top-2 should return exactly 2 rows");
 }
 
+#[test]
+fn test_profile_topk_order_by_vector_similarity() {
+    // Regression: PROFILE on a Limit-above-Sort top-k query used to panic in
+    // build_profile_tree because the top-k rewrite fused three logical
+    // operators into one physical operator without updating the logical tree.
+    // The planner now suppresses the rewrite under PROFILE.
+    let db = setup_article_db();
+    let session = db.session();
+
+    let result = session
+        .execute(
+            "PROFILE MATCH (doc:Article) \
+             RETURN doc \
+             ORDER BY cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) DESC LIMIT 2",
+        )
+        .unwrap();
+
+    assert_eq!(result.row_count(), 1, "PROFILE returns a single-row report");
+}
+
+#[test]
+fn test_profile_topk_order_by_text_score() {
+    // Same regression as above, for the text_score top-k path.
+    let db = setup_article_db();
+    let session = db.session();
+
+    let result = session
+        .execute(
+            "PROFILE MATCH (doc:Article) \
+             RETURN doc \
+             ORDER BY text_score(doc.body, 'attention mechanisms') DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(result.row_count(), 1, "PROFILE returns a single-row report");
+}
+
 // ============================================================================
 // Test 17: dot_product pushdown
 // ============================================================================

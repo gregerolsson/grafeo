@@ -494,7 +494,13 @@ impl super::Planner {
         // Top-K optimization: Limit(k) -> Sort(score_fn) -> NodeScan
         // can be rewritten to VectorScan(k) or TextScan(k). GQL emits the plan as
         // Limit-above-Sort, so the check belongs here rather than in plan_sort.
-        if let LogicalOperator::Sort(sort) = limit.input.as_ref()
+        //
+        // The rewrite is disabled under PROFILE because it fuses three logical
+        // operators into one physical operator without updating the logical tree.
+        // PROFILE walks the logical tree to build its output and would panic on
+        // the entry-count mismatch (see `try_topk_rewrite` docstring).
+        if !self.profiling.get()
+            && let LogicalOperator::Sort(sort) = limit.input.as_ref()
             && let Some(result) = self.try_topk_rewrite(sort, &limit.count)?
         {
             return Ok(result);
@@ -912,10 +918,11 @@ impl super::Planner {
     /// resolved, so the rewrite is skipped in that case.
     ///
     /// Caveat: this is a physical-only rewrite. The logical plan tree is
-    /// unchanged, so EXPLAIN still prints `Limit/Sort/Return/NodeScan`. PROFILE
-    /// walks the logical tree and would mismatch the (smaller) physical entry
-    /// count, so PROFILE on these queries can panic — to be addressed by lifting
-    /// the rewrite into the logical optimization phase.
+    /// unchanged, so EXPLAIN still prints `Limit/Sort/Return/NodeScan`. Because
+    /// PROFILE walks the logical tree and would mismatch the (smaller) physical
+    /// entry count, the caller in `plan_limit` skips this rewrite when
+    /// `self.profiling` is set. The proper fix is to lift the rewrite into the
+    /// logical optimization phase so the two trees stay in sync.
     fn try_topk_rewrite(
         &self,
         sort: &SortOp,
