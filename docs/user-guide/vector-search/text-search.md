@@ -64,6 +64,35 @@ for (const [nodeId, score] of results) {
 
 `text_search()` returns a list of `(node_id, score)` tuples sorted by **descending** relevance (higher score = more relevant). BM25 scores are unbounded positive floats whose magnitude depends on corpus statistics, so compare them only within a single query's results.
 
+## In-Query Text Scoring (0.5.40+)
+
+BM25 is also callable from GQL/Cypher as `text_score()` and `text_match()`,
+which the planner pushes down into a `TextScanOperator` when a text index
+exists. Two scan modes:
+
+- **Top-K** (`ORDER BY text_score(...) DESC LIMIT k`): returns the `k`
+  highest-scoring documents, using the inverted index to avoid scanning
+  non-matching docs.
+- **Threshold** (`WHERE text_score(...) > t`): returns every document whose
+  BM25 score exceeds `t`.
+
+```gql
+-- Top-K
+MATCH (a:Article)
+RETURN a.title, text_score(a.title, 'graph') AS score
+ORDER BY text_score(a.title, 'graph') DESC
+LIMIT 5
+
+-- Threshold
+MATCH (a:Article)
+WHERE text_score(a.title, 'graph') > 1.0
+RETURN a.title
+```
+
+See [filter-expression hybrid search](filter-expressions.md) for the full
+syntax, AND/OR composition with vector predicates, and index-missing fallback
+behavior.
+
 ## Auto-Sync Behavior
 
 Text indexes are **automatically maintained** as nodes change. You do not need to rebuild after normal write operations:
