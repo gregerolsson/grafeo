@@ -491,6 +491,15 @@ impl super::Planner {
 
     /// Plans a LIMIT operator.
     pub(super) fn plan_limit(&self, limit: &LimitOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Top-K optimization: Limit(k) -> Sort(score_fn) -> NodeScan
+        // can be rewritten to VectorScan(k) or TextScan(k). GQL emits the plan as
+        // Limit-above-Sort, so the check belongs here rather than in plan_sort.
+        if let LogicalOperator::Sort(sort) = limit.input.as_ref()
+            && let Some(result) = self.try_topk_rewrite(sort, &limit.count)?
+        {
+            return Ok(result);
+        }
+
         let (input_op, columns) = self.plan_operator(&limit.input)?;
         let schema = self.derive_schema_from_columns(&columns);
         Ok(crate::query::planner::common::build_limit(
@@ -520,11 +529,8 @@ impl super::Planner {
     /// that case we inject a property projection BEFORE the Return so the sort
     /// key is available in the output columns.
     pub(super) fn plan_sort(&self, sort: &SortOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Top-K optimization: Sort(fn) + Limit(k) + NodeScan
-        // can be rewritten to VectorScan(k) or TextScan(k)
-        if let Some(result) = self.try_topk_rewrite(sort)? {
-            return Ok(result);
-        }
+        // Top-K rewrite is wired from plan_limit (the actual plan shape is
+        // Limit-above-Sort), so plan_sort only handles the standard path.
 
         // Collect variable references from an expression tree (e.g., `n` in `labels(n)[0]`).
         fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
@@ -895,26 +901,40 @@ impl super::Planner {
             .collect()
     }
 
-    /// Attempts to rewrite Sort+Limit on a vector/text function into
-    /// a direct index scan that returns results in order.
-    fn try_topk_rewrite(&self, sort: &SortOp) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+    /// Attempts to rewrite Limit-above-Sort on a vector/text scoring function
+    /// into a direct index scan that returns results in order.
+    ///
+    /// Called from `plan_limit` when its input is a `Sort`. The expected plan
+    /// shape is `Limit(k) -> Sort(score_fn DESC) -> NodeScan(label)`, optionally
+    /// with a `Return(var)` between Sort and NodeScan (`find_node_scan` walks
+    /// through it). The sort key must be the score function call directly: an
+    /// alias like `... AS rank` followed by `ORDER BY rank` is not currently
+    /// resolved, so the rewrite is skipped in that case.
+    ///
+    /// Caveat: this is a physical-only rewrite. The logical plan tree is
+    /// unchanged, so EXPLAIN still prints `Limit/Sort/Return/NodeScan`. PROFILE
+    /// walks the logical tree and would mismatch the (smaller) physical entry
+    /// count, so PROFILE on these queries can panic — to be addressed by lifting
+    /// the rewrite into the logical optimization phase.
+    fn try_topk_rewrite(
+        &self,
+        sort: &SortOp,
+        count: &crate::query::plan::CountExpr,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         if sort.keys.len() != 1 {
             return Ok(None);
         }
         let sort_key = &sort.keys[0];
-        let LogicalOperator::Limit(limit) = sort.input.as_ref() else {
-            return Ok(None);
-        };
 
         // All remaining work is index-specific; skip when no index feature is compiled in.
         #[cfg(any(feature = "vector-index", feature = "text-index"))]
         {
-            let crate::query::plan::CountExpr::Literal(k) = &limit.count else {
+            let crate::query::plan::CountExpr::Literal(k) = count else {
                 return Ok(None);
             };
             let k = *k;
 
-            let Some((scan_var, scan_label)) = find_node_scan(&limit.input) else {
+            let Some((scan_var, scan_label)) = find_node_scan(&sort.input) else {
                 return Ok(None);
             };
             let Some(ref label) = scan_label else {
@@ -938,7 +958,7 @@ impl super::Planner {
 
         #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
         {
-            let _ = (sort_key, limit);
+            let _ = (sort_key, count);
             Ok(None)
         }
     }

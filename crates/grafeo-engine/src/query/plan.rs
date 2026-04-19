@@ -350,7 +350,9 @@ impl LogicalOperator {
             Self::MapCollect(op) => op.input.has_mutations(),
             Self::Return(op) => op.input.has_mutations(),
             Self::HorizontalAggregate(op) => op.input.has_mutations(),
-            Self::VectorScan(_) | Self::VectorJoin(_) | Self::TextScan(_) => false,
+            Self::VectorScan(op) => op.input.as_deref().is_some_and(Self::has_mutations),
+            Self::VectorJoin(op) => op.input.has_mutations(),
+            Self::TextScan(_) => false,
 
             // Operators with two children
             Self::Join(op) => op.left.has_mutations() || op.right.has_mutations(),
@@ -954,9 +956,10 @@ impl LogicalOperator {
                 }
             }
             Self::TextScan(op) => {
-                let mode = match op.k {
-                    Some(k) => format!("top-{k}"),
-                    None => "threshold".to_string(),
+                let mode = match (op.k, op.threshold) {
+                    (Some(k), _) => format!("top-{k}"),
+                    (None, Some(t)) => format!("threshold>={t}"),
+                    (None, None) => "default-top-100".to_string(),
                 };
                 let query = fmt_expr(&op.query);
                 let _ = writeln!(

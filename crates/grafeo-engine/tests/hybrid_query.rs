@@ -564,12 +564,16 @@ fn test_topk_order_by_text_score() {
     let db = setup_article_db();
     let session = db.session();
 
-    // ORDER BY text_score DESC LIMIT 1 — should rewrite to TextScan(k=1)
+    // The rewrite fires when the function appears directly in ORDER BY (no alias),
+    // so try_topk_rewrite can match the FunctionCall on sort_key.expression.
+    // We can't assert via EXPLAIN/PROFILE because LPG EXPLAIN walks the unrewritten
+    // logical plan and PROFILE has a separate entry-count mismatch when physical
+    // operators are fused; the user-visible signal is row count and ordering.
     let result = session
         .execute(
             "MATCH (doc:Article) \
-             RETURN doc.title, text_score(doc.body, 'attention mechanisms') AS rank \
-             ORDER BY rank DESC LIMIT 1",
+             RETURN doc \
+             ORDER BY text_score(doc.body, 'attention mechanisms') DESC LIMIT 1",
         )
         .unwrap();
 
@@ -581,12 +585,11 @@ fn test_topk_order_by_vector_similarity() {
     let db = setup_article_db();
     let session = db.session();
 
-    // ORDER BY cosine_similarity DESC LIMIT 2 — should rewrite to VectorScan(k=2)
     let result = session
         .execute(
             "MATCH (doc:Article) \
-             RETURN doc.title, cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) AS sim \
-             ORDER BY sim DESC LIMIT 2",
+             RETURN doc \
+             ORDER BY cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) DESC LIMIT 2",
         )
         .unwrap();
 

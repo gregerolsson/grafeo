@@ -204,7 +204,11 @@ impl InvertedIndex {
     /// given node ID, and computes BM25 with corpus statistics. Returns `0.0`
     /// if the document has no matching terms or doesn't exist.
     ///
-    /// This is O(query_terms) per call and is intended for per-row evaluation.
+    /// Cost is O(query_terms × average posting-list length) per call: for each
+    /// query term, the matching node is found by linear scan of that term's
+    /// posting list. Intended for per-row evaluation, where a few hundred
+    /// per-document scores are cheaper than reorganizing posting lists into
+    /// per-document maps.
     #[must_use]
     pub fn score_document(&self, id: NodeId, query: &str) -> f64 {
         let query_tokens = self.tokenizer.tokenize(query);
