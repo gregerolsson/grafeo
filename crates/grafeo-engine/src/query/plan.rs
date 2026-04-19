@@ -2444,4 +2444,204 @@ mod tests {
             panic!("Expected Return");
         }
     }
+
+    // ========================================================================
+    // has_mutations(): the index-scan operators carry an `input` subtree
+    // (used to combine graph patterns with vector/text scoring) and must
+    // recurse into it so a mutation buried under one is not misclassified
+    // as read-only.
+    // ========================================================================
+
+    fn read_only_scan() -> LogicalOperator {
+        LogicalOperator::NodeScan(NodeScanOp {
+            variable: "n".into(),
+            label: Some("Article".into()),
+            input: None,
+        })
+    }
+
+    fn mutating_create_node() -> LogicalOperator {
+        LogicalOperator::CreateNode(CreateNodeOp {
+            variable: Some("n".into()),
+            labels: vec!["Article".into()],
+            properties: vec![],
+            input: None,
+            on_match: None,
+            on_create: None,
+        })
+    }
+
+    #[test]
+    fn test_text_scan_is_leaf_no_mutations() {
+        let op = LogicalOperator::TextScan(TextScanOp {
+            variable: "doc".into(),
+            label: "Article".into(),
+            property: "body".into(),
+            query: LogicalExpression::Literal(Value::String("rust".into())),
+            k: Some(10),
+            threshold: None,
+            score_column: None,
+        });
+        assert!(!op.has_mutations(), "TextScan is a leaf and never mutates");
+    }
+
+    #[test]
+    fn test_vector_scan_no_input_no_mutations() {
+        let op = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "doc".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: Some("Article".into()),
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        });
+        assert!(
+            !op.has_mutations(),
+            "VectorScan with no input is read-only"
+        );
+    }
+
+    #[test]
+    fn test_vector_scan_recurses_into_mutating_input() {
+        let op = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "doc".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: Some("Article".into()),
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: Some(Box::new(mutating_create_node())),
+        });
+        assert!(
+            op.has_mutations(),
+            "VectorScan must propagate mutations from its input subtree"
+        );
+    }
+
+    #[test]
+    fn test_vector_scan_recurses_into_read_only_input() {
+        let op = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "doc".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: Some("Article".into()),
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: Some(Box::new(read_only_scan())),
+        });
+        assert!(
+            !op.has_mutations(),
+            "VectorScan with read-only input is read-only"
+        );
+    }
+
+    #[test]
+    fn test_vector_join_recurses_into_mutating_input() {
+        let op = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(mutating_create_node()),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            right_variable: "m".into(),
+            right_property: "embedding".into(),
+            right_label: Some("Movie".into()),
+            index_name: None,
+            k: 10,
+            metric: VectorMetric::Cosine,
+        });
+        assert!(
+            op.has_mutations(),
+            "VectorJoin must recurse into input — was previously hard-coded false"
+        );
+    }
+
+    #[test]
+    fn test_vector_join_with_read_only_input_is_read_only() {
+        let op = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(read_only_scan()),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            right_variable: "m".into(),
+            right_property: "embedding".into(),
+            right_label: Some("Movie".into()),
+            index_name: None,
+            k: 10,
+            metric: VectorMetric::Cosine,
+        });
+        assert!(!op.has_mutations());
+    }
+
+    // ========================================================================
+    // TextScan EXPLAIN/fmt_tree labeling: distinguishes top-k, threshold, and
+    // the default-top-100 path (when both k and threshold are None).
+    // ========================================================================
+
+    fn text_scan_with_modes(k: Option<usize>, threshold: Option<f64>) -> String {
+        let plan = LogicalPlan::new(LogicalOperator::TextScan(TextScanOp {
+            variable: "doc".into(),
+            label: "Article".into(),
+            property: "body".into(),
+            query: LogicalExpression::Literal(Value::String("rust".into())),
+            k,
+            threshold,
+            score_column: None,
+        }));
+        let mut out = String::new();
+        plan.root.fmt_tree(&mut out, 0);
+        out
+    }
+
+    #[test]
+    fn test_text_scan_display_top_k_mode() {
+        let out = text_scan_with_modes(Some(10), None);
+        assert!(out.contains("top-10"), "expected top-10 in:\n{out}");
+        assert!(
+            !out.contains("threshold"),
+            "top-k mode should not say threshold:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_text_scan_display_threshold_mode() {
+        let out = text_scan_with_modes(None, Some(0.5));
+        assert!(
+            out.contains("threshold>=0.5"),
+            "expected threshold>=0.5 in:\n{out}"
+        );
+        assert!(
+            !out.contains("top-"),
+            "threshold mode should not say top-:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_text_scan_display_default_mode_when_both_none() {
+        let out = text_scan_with_modes(None, None);
+        assert!(
+            out.contains("default-top-100"),
+            "expected default-top-100 (both k and threshold None) in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_text_scan_display_k_takes_precedence_over_threshold() {
+        // When both are set, k wins (top-k mode is what the planner actually executes).
+        let out = text_scan_with_modes(Some(5), Some(0.3));
+        assert!(out.contains("top-5"), "expected top-5 in:\n{out}");
+        assert!(
+            !out.contains("threshold"),
+            "k should take precedence over threshold:\n{out}"
+        );
+    }
 }
