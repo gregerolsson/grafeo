@@ -14,6 +14,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Changed
 
 - **`DatabaseStats.memory_bytes` now reflects the full hierarchical breakdown**: `detailed_stats().memory_bytes` returns `memory_usage().total_bytes` instead of just the buffer manager's tracked allocations. Reported values now include store, indexes, MVCC chains, plan caches, string pools, and buffer manager.
+- **Python `GrafeoError` exception class**: query, transaction, and database errors now raise `grafeo.GrafeoError` (subclass of `RuntimeError`) carrying `error_code` (e.g. `"GRAFEO-Q001"`) and `is_retryable` attributes. Existing `except RuntimeError:` paths still work.
 
 ### Fixed
 
