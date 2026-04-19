@@ -15,6 +15,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **MERGE index lookup**: `MERGE (n:Label {prop: value})` now uses property indexes when available, matching the performance of `MATCH` with property constraints. Previously, MERGE always scanned all nodes with the given label and compared properties manually, causing O(n) slowdown on large graphs. (#288)
 - **Index and search after `compact()`**: `create_vector_index`, `vector_search`, `create_text_index`, `text_search`, and the other ~26 index/search methods no longer panic with "no built-in LpgStore" or silently return empty results after `compact()`. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
 - **`LayeredStore` new-node visibility**: `get_node` and `get_node_property` now fall back to the overlay for nodes added after `compact()`, fixing `recompact()` silently dropping those nodes from the merged base. ([#286](https://github.com/GrafeoDB/grafeo/pull/286))
+- **Named graphs across `compact()` / `recompact()`**: `list_graphs`, `drop_graph`, `create_graph`, and `set_current_graph` now see graphs that existed before compaction. Named graphs are carried from the pre-compact overlay into the new overlay on rebuild.
 
 ## [0.5.39] - 2026-04-16
 
