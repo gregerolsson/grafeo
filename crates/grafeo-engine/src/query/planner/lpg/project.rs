@@ -1160,7 +1160,6 @@ impl super::Planner {
     }
 }
 
-
 // Score-column naming. The hash of the query expression is part of the name so
 // that two scoring calls with different query arguments (e.g. $q1 vs $q2) on
 // the same (variable, property) never collide. Producer and consumer sites

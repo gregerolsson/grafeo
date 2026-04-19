@@ -560,8 +560,16 @@ fn test_score_reuse_isolates_different_query_vectors() {
     let a = db.create_node(&["Doc"]);
     db.set_node_property(a, "title", Value::String("x-aligned".into()));
     db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
-    db.create_vector_index("Doc", "embedding", Some(3), Some("cosine"), None, None, None)
-        .unwrap();
+    db.create_vector_index(
+        "Doc",
+        "embedding",
+        Some(3),
+        Some("cosine"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     let r = db
         .session()
@@ -607,9 +615,21 @@ fn test_vector_scan_metric_mismatch_uses_brute_force() {
     db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
     let b = db.create_node(&["Doc"]);
     db.set_node_property(b, "title", Value::String("far".into()));
-    db.set_node_property(b, "embedding", Value::Vector(vec![0.0f32, 100.0, 0.0].into()));
-    db.create_vector_index("Doc", "embedding", Some(3), Some("cosine"), None, None, None)
-        .unwrap();
+    db.set_node_property(
+        b,
+        "embedding",
+        Value::Vector(vec![0.0f32, 100.0, 0.0].into()),
+    );
+    db.create_vector_index(
+        "Doc",
+        "embedding",
+        Some(3),
+        Some("cosine"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     let r = db
         .session()

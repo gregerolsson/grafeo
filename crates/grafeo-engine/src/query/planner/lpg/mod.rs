@@ -848,19 +848,12 @@ impl Planner {
                 .store
                 .get_vector_index_handle(label, &scan.property)
                 .and_then(|handle| handle.downcast::<VectorIndexKind>().ok())
-                .filter(|index| {
-                    scan.metric.is_none() || index.config().metric == metric
-                });
+                .filter(|index| scan.metric.is_none() || index.config().metric == metric);
             if let Some(index) = indexed {
-                VectorScanOperator::with_index(
-                    Arc::clone(&self.store),
-                    index,
-                    query_vec.clone(),
-                    k,
-                )
-                .with_property(&scan.property)
-                .with_label(label)
-                .with_metric(metric)
+                VectorScanOperator::with_index(Arc::clone(&self.store), index, query_vec.clone(), k)
+                    .with_property(&scan.property)
+                    .with_label(label)
+                    .with_metric(metric)
             } else {
                 VectorScanOperator::brute_force(
                     Arc::clone(&self.store),

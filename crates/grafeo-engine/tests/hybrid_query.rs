@@ -794,17 +794,33 @@ fn test_compound_with_scalar_remainder() {
     let a1 = db.create_node(&["Article"]);
     db.set_node_property(a1, "title", Value::String("A1".into()));
     db.set_node_property(a1, "body", Value::String("attention mechanisms".into()));
-    db.set_node_property(a1, "embedding", Value::Vector(vec![0.9_f32, 0.1, 0.0].into()));
+    db.set_node_property(
+        a1,
+        "embedding",
+        Value::Vector(vec![0.9_f32, 0.1, 0.0].into()),
+    );
     db.set_node_property(a1, "published", Value::Bool(true));
 
     let a2 = db.create_node(&["Article"]);
     db.set_node_property(a2, "title", Value::String("A2".into()));
     db.set_node_property(a2, "body", Value::String("attention mechanisms".into()));
-    db.set_node_property(a2, "embedding", Value::Vector(vec![0.9_f32, 0.1, 0.0].into()));
+    db.set_node_property(
+        a2,
+        "embedding",
+        Value::Vector(vec![0.9_f32, 0.1, 0.0].into()),
+    );
     db.set_node_property(a2, "published", Value::Bool(false));
 
-    db.create_vector_index("Article", "embedding", Some(3), Some("cosine"), None, None, None)
-        .unwrap();
+    db.create_vector_index(
+        "Article",
+        "embedding",
+        Some(3),
+        Some("cosine"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     db.create_text_index("Article", "body").unwrap();
 
     let session = db.session();
@@ -819,9 +835,12 @@ fn test_compound_with_scalar_remainder() {
         .expect("compound with scalar remainder should plan and execute");
 
     let titles = collect_strings(&result);
-    assert_eq!(titles, vec!["A1".to_string()],
+    assert_eq!(
+        titles,
+        vec!["A1".to_string()],
         "Only the published article should pass the scalar filter, got: {:?}",
-        titles);
+        titles
+    );
 }
 
 /// Compound OR where one side is missing the required index: should fall through
@@ -831,10 +850,22 @@ fn test_compound_or_with_missing_text_index_falls_through() {
     let db = GrafeoDB::new_in_memory();
     let a1 = db.create_node(&["Article"]);
     db.set_node_property(a1, "body", Value::String("rust".into()));
-    db.set_node_property(a1, "embedding", Value::Vector(vec![1.0_f32, 0.0, 0.0].into()));
+    db.set_node_property(
+        a1,
+        "embedding",
+        Value::Vector(vec![1.0_f32, 0.0, 0.0].into()),
+    );
 
-    db.create_vector_index("Article", "embedding", Some(3), Some("cosine"), None, None, None)
-        .unwrap();
+    db.create_vector_index(
+        "Article",
+        "embedding",
+        Some(3),
+        Some("cosine"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     // NB: no text index — compound OR pushdown should fall through
 
     let session = db.session();
