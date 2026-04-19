@@ -287,6 +287,7 @@ nav:
       - Sessions: user-guide/rust/sessions.md
     - Transactions: user-guide/transactions.md
     - Named Graphs: user-guide/named-graphs.md
+    - Catalog, Schemas & Graphs: user-guide/catalog-hierarchy.md
     - Temporal Properties & Time-Travel: user-guide/temporal.md
     - Observability: user-guide/observability.md
     - Offline Sync: user-guide/offline-sync.md
