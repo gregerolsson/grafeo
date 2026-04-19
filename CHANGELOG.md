@@ -11,6 +11,10 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Float64 and Float32Vector column codecs**: CompactStore now stores `Value::Float64` and `Value::Vector` properties natively instead of falling back to dictionary encoding. Mixed `Int64+Float64` columns coalesce to Float64. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
 - **Streaming query results** (experimental): `Session::execute_streaming` returns a `ResultStream` that pulls one `DataChunk` at a time from the operator pipeline instead of materializing the full result. Bounded memory and first-row latency for large scans. Rejects mutations, EXPLAIN/PROFILE, session commands, and queries that require push-based operators (ORDER BY, aggregate, DISTINCT). Python `execute_lazy()` and Node.js `executeStream()` expose the same surface. Active streams block `commit()` / `rollback()` until drained.
 
+### Changed
+
+- **`DatabaseStats.memory_bytes` now reflects the full hierarchical breakdown**: `detailed_stats().memory_bytes` returns `memory_usage().total_bytes` instead of just the buffer manager's tracked allocations. Reported values now include store, indexes, MVCC chains, plan caches, string pools, and buffer manager.
+
 ### Fixed
 
 - **MERGE index lookup**: `MERGE (n:Label {prop: value})` now uses property indexes when available, matching the performance of `MATCH` with property constraints. Previously, MERGE always scanned all nodes with the given label and compared properties manually, causing O(n) slowdown on large graphs. (#288)
