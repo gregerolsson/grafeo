@@ -2169,4 +2169,281 @@ mod tests {
             .unwrap();
         assert_eq!(val, Value::String(ArcStr::from("Butch")));
     }
+
+    // -------------------------------------------------------------------
+    // infer_type_from_values: all Value::* fall-through branches
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_type_timestamp_falls_back_to_dict() {
+        use grafeo_common::types::Timestamp;
+        let ts = Value::Timestamp(Timestamp::from_millis(1_700_000_000_000));
+        assert_eq!(infer_type_from_values(&[ts]), InferredType::Dict);
+    }
+
+    #[test]
+    fn test_infer_type_date_falls_back_to_dict() {
+        use grafeo_common::types::Date;
+        let d = Value::Date(Date::from_days(19000));
+        assert_eq!(infer_type_from_values(&[d]), InferredType::Dict);
+    }
+
+    #[test]
+    fn test_infer_type_vector_consistent_dim_picks_float32_vector() {
+        // Consistent-dimension Float32 vectors get a dedicated column type.
+        let v = Value::Vector(std::sync::Arc::from([0.1f32, 0.2, 0.3].as_slice()));
+        assert_eq!(
+            infer_type_from_values(&[v]),
+            InferredType::Float32Vector { dimensions: 3 }
+        );
+    }
+
+    #[test]
+    fn test_infer_type_mixed_dim_vectors_fall_back_to_dict() {
+        // Inconsistent dimensions force the Dict fallback.
+        let v3 = Value::Vector(std::sync::Arc::from([0.1f32, 0.2, 0.3].as_slice()));
+        let v5 = Value::Vector(std::sync::Arc::from(
+            [0.1f32, 0.2, 0.3, 0.4, 0.5].as_slice(),
+        ));
+        assert_eq!(infer_type_from_values(&[v3, v5]), InferredType::Dict);
+    }
+
+    #[test]
+    fn test_infer_type_bytes_falls_back_to_dict() {
+        let b = Value::Bytes(std::sync::Arc::from(b"payload".as_slice()));
+        assert_eq!(infer_type_from_values(&[b]), InferredType::Dict);
+    }
+
+    #[test]
+    fn test_infer_type_null_with_bool_yields_bitmap() {
+        // Nulls skipped; a pure Bool column stays Bitmap.
+        assert_eq!(
+            infer_type_from_values(&[Value::Null, Value::Bool(false), Value::Null]),
+            InferredType::Bitmap
+        );
+    }
+
+    #[test]
+    fn test_infer_type_saw_int_and_other_yields_dict() {
+        // Int + String (saw_other) should force Dict.
+        assert_eq!(
+            infer_type_from_values(&[Value::Int64(1), Value::from("hello")]),
+            InferredType::Dict
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Builder error variants: DuplicateLabel, DuplicateEdgeType
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_builder_duplicate_label_error() {
+        let result = CompactStoreBuilder::new()
+            .node_table("Person", |t| t.column_bitpacked("age", &[30], 6))
+            .node_table("Person", |t| t.column_bitpacked("age", &[40], 6))
+            .build();
+        assert!(matches!(
+            result,
+            Err(CompactStoreError::DuplicateLabel(ref s)) if s == "Person"
+        ));
+    }
+
+    #[test]
+    fn test_builder_duplicate_edge_type_error() {
+        let result = CompactStoreBuilder::new()
+            .node_table("A", |t| t.column_bitpacked("v", &[1], 4))
+            .node_table("B", |t| t.column_bitpacked("v", &[1], 4))
+            .rel_table("LINKS", "A", "B", |r| r.edges([(0, 0)]))
+            .rel_table("LINKS", "A", "B", |r| r.edges([(0, 0)]))
+            .build();
+        assert!(matches!(
+            result,
+            Err(CompactStoreError::DuplicateEdgeType(_))
+        ));
+    }
+
+    #[test]
+    fn test_builder_column_length_mismatch_error() {
+        let result = CompactStoreBuilder::new()
+            .node_table("Person", |t| {
+                t.column_bitpacked("age", &[25, 30, 35], 6)
+                    .column_dict("name", &["Alix", "Gus"]) // length 2, mismatch
+            })
+            .build();
+        assert!(matches!(
+            result,
+            Err(CompactStoreError::ColumnLengthMismatch {
+                expected: 3,
+                got: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn test_builder_value_overflow_error() {
+        // Values exceeding i64::MAX must be flagged.
+        let bad_value = (i64::MAX as u64) + 10;
+        let result = CompactStoreBuilder::new()
+            .node_table("Person", |t| {
+                t.column_bitpacked("x", &[1u64, bad_value], 64)
+            })
+            .build();
+        assert!(matches!(
+            result,
+            Err(CompactStoreError::ValueOverflow { ref column, value, .. })
+                if column == "x" && value == bad_value
+        ));
+    }
+
+    // -------------------------------------------------------------------
+    // Pre-built codec passthrough: NodeTableBuilder::column
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_node_table_builder_prebuilt_column() {
+        use crate::codec::BitPackedInts;
+
+        let bp = BitPackedInts::pack(&[100u64, 200, 300]);
+        let codec = ColumnCodec::BitPacked(bp);
+
+        let store = CompactStoreBuilder::new()
+            .node_table("Item", |t| t.column("value", codec))
+            .build()
+            .unwrap();
+
+        let ids = store.nodes_by_label("Item");
+        assert_eq!(ids.len(), 3);
+
+        // Check the pre-built column values are readable.
+        let mut values: Vec<i64> = ids
+            .iter()
+            .filter_map(|&id| {
+                store
+                    .get_node_property(id, &PropertyKey::new("value"))
+                    .and_then(|v| v.as_int64())
+            })
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec![100, 200, 300]);
+    }
+
+    // -------------------------------------------------------------------
+    // column_int8_vector: zero dimensions case (row_count=0)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_node_table_builder_int8_vector_zero_dimensions() {
+        // Zero dimensions yields 0 rows, no panic.
+        let store = CompactStoreBuilder::new()
+            .node_table("Item", |t| t.column_int8_vector("embed", Vec::new(), 0))
+            .build()
+            .unwrap();
+
+        let ids = store.nodes_by_label("Item");
+        assert_eq!(ids.len(), 0);
+    }
+
+    #[test]
+    fn test_node_table_builder_int8_vector_multi_row() {
+        // Two 3-dim vectors packed in one flat array.
+        let store = CompactStoreBuilder::new()
+            .node_table("Doc", |t| {
+                t.column_int8_vector("embed", vec![1i8, 2, 3, 4, 5, 6], 3)
+            })
+            .build()
+            .unwrap();
+
+        let ids = store.nodes_by_label("Doc");
+        assert_eq!(ids.len(), 2);
+    }
+
+    // -------------------------------------------------------------------
+    // from_graph_store / from_graph_store_preserving_ids edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_from_graph_store_preserving_ids_empty() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+        // No nodes, no edges.
+        let compact = crate::graph::compact::from_graph_store_preserving_ids(&store).unwrap();
+        assert_eq!(compact.node_count(), 0);
+        assert_eq!(compact.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_from_graph_store_single_node_no_properties() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+        store.create_node(&["Loner"]);
+
+        let compact = from_graph_store(&store).unwrap();
+        let ids = compact.nodes_by_label("Loner");
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn test_from_graph_store_preserving_ids_with_data() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        let gus = store.create_node(&["Person"]);
+        store.set_node_property(gus, "name", Value::from("Gus"));
+        let edge_id = store.create_edge(alix, gus, "KNOWS");
+        store.set_edge_property(edge_id, "since", Value::Int64(2020));
+
+        let compact = crate::graph::compact::from_graph_store_preserving_ids(&store).unwrap();
+
+        // Original IDs should still resolve to nodes.
+        let alix_resolved = compact.get_node(alix);
+        assert!(
+            alix_resolved.is_some(),
+            "original NodeId should remain resolvable after preserve_ids"
+        );
+        assert_eq!(
+            alix_resolved
+                .unwrap()
+                .properties
+                .get(&PropertyKey::new("name")),
+            Some(&Value::String(ArcStr::from("Alix")))
+        );
+
+        let edge_resolved = compact.get_edge(edge_id);
+        assert!(
+            edge_resolved.is_some(),
+            "original EdgeId should remain resolvable after preserve_ids"
+        );
+    }
+
+    #[test]
+    fn test_from_graph_store_skewed_properties() {
+        // One label with 5 nodes, each has only one of three properties.
+        // This stresses null-padding in sparse columns.
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+        for (i, (name, key)) in [
+            ("Alix", "a"),
+            ("Gus", "b"),
+            ("Vincent", "c"),
+            ("Jules", "a"),
+            ("Mia", "b"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let nid = store.create_node(&["Person"]);
+            store.set_node_property(nid, "name", Value::from(*name));
+            // Property 'a', 'b', or 'c' stored as Int64.
+            let score = i64::try_from(i).unwrap_or(0);
+            store.set_node_property(nid, key, Value::Int64(score));
+        }
+
+        let compact = from_graph_store(&store).unwrap();
+        assert_eq!(compact.nodes_by_label("Person").len(), 5);
+    }
 }

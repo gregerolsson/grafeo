@@ -1091,4 +1091,440 @@ mod tests {
         let mut pos = 0;
         assert!(ColumnCodec::read_from(&bad, &mut pos).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Serde round-trip tests: write_to + read_from
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_write_read_round_trip_bitpacked() {
+        let bp = BitPackedInts::pack(&[3u64, 7, 12, 5]);
+        let col = ColumnCodec::BitPacked(bp);
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len(), "read should consume entire buffer");
+
+        assert_eq!(decoded.len(), 4);
+        for i in 0..4 {
+            assert_eq!(decoded.get(i), col.get(i));
+        }
+    }
+
+    #[test]
+    fn test_write_read_round_trip_dict() {
+        let mut b = DictionaryBuilder::new();
+        for s in ["Amsterdam", "Berlin", "Amsterdam", "Paris"] {
+            b.add(s);
+        }
+        let col = ColumnCodec::Dict(b.build());
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert_eq!(decoded.len(), 4);
+        for i in 0..4 {
+            assert_eq!(decoded.get(i), col.get(i));
+        }
+    }
+
+    #[test]
+    fn test_write_read_round_trip_bitmap() {
+        let bv = BitVector::from_bools(&[true, false, true, true, false, false, true]);
+        let col = ColumnCodec::Bitmap(bv);
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert_eq!(decoded.len(), 7);
+        for i in 0..7 {
+            assert_eq!(decoded.get(i), col.get(i));
+        }
+    }
+
+    #[test]
+    fn test_write_read_round_trip_int8_vector() {
+        let data: Vec<i8> = vec![1, -2, 3, -4, 5, -6, 7, -8];
+        let col = ColumnCodec::Int8Vector {
+            data,
+            dimensions: 4,
+        };
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded.get_int8_vector(0), Some(&[1i8, -2, 3, -4][..]));
+        assert_eq!(decoded.get_int8_vector(1), Some(&[5i8, -6, 7, -8][..]));
+    }
+
+    // -----------------------------------------------------------------------
+    // Serde error cases: truncation and unknown discriminants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_read_from_empty_buffer_errors() {
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&[], &mut pos).unwrap_err();
+        assert_eq!(err, "truncated codec discriminant");
+    }
+
+    #[test]
+    fn test_read_from_unknown_discriminant_errors() {
+        // Discriminant values 0..=3 are valid; 99 is unknown.
+        let buf = vec![99u8];
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "unknown codec discriminant");
+    }
+
+    #[test]
+    fn test_read_from_truncated_bitpacked_bits() {
+        // Discriminant 0 (BitPacked) but no bits_per_value byte following.
+        let buf = vec![0u8];
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated bits_per_value");
+    }
+
+    #[test]
+    fn test_read_from_truncated_bitpacked_count() {
+        // Discriminant + bits byte, but truncated before u32 count.
+        let buf = vec![0u8, 4, 0, 0]; // only 2 of 4 bytes for u32 count
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated u32");
+    }
+
+    #[test]
+    fn test_read_from_truncated_bitpacked_words() {
+        // Discriminant + bits + count + data_len=2 but no u64 data words.
+        let mut buf = vec![0u8, 4];
+        buf.extend_from_slice(&1u32.to_le_bytes()); // count=1
+        buf.extend_from_slice(&2u32.to_le_bytes()); // data_len=2
+        // no u64 words
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated u64");
+    }
+
+    #[test]
+    fn test_read_from_truncated_dict_string() {
+        // Discriminant=1 (Dict), dict_len=1, slen=5, but only 3 bytes of string.
+        let mut buf = vec![1u8];
+        buf.extend_from_slice(&1u32.to_le_bytes()); // dict_len=1
+        buf.extend_from_slice(&5u32.to_le_bytes()); // slen=5
+        buf.extend_from_slice(b"abc"); // only 3 bytes, need 5
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated dict string");
+    }
+
+    #[test]
+    fn test_read_from_invalid_utf8_in_dict() {
+        let mut buf = vec![1u8];
+        buf.extend_from_slice(&1u32.to_le_bytes()); // dict_len=1
+        buf.extend_from_slice(&2u32.to_le_bytes()); // slen=2
+        buf.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "invalid UTF-8 in dict");
+    }
+
+    #[test]
+    fn test_read_from_truncated_bitmap_words() {
+        // Discriminant=2 (Bitmap), bit_len=64, data_len=1, but no u64 data.
+        let mut buf = vec![2u8];
+        buf.extend_from_slice(&64u32.to_le_bytes()); // bit_len
+        buf.extend_from_slice(&1u32.to_le_bytes()); // data_len
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated u64");
+    }
+
+    #[test]
+    fn test_read_from_truncated_int8_vector_dimensions() {
+        // Discriminant=3 (Int8Vector), only 1 byte of the 2-byte dimensions.
+        let buf = vec![3u8, 0];
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated u16");
+    }
+
+    #[test]
+    fn test_read_from_truncated_int8_vector_data() {
+        // Discriminant=3, dimensions=2, data_len=4, but only 2 data bytes.
+        let mut buf = vec![3u8];
+        buf.extend_from_slice(&2u16.to_le_bytes()); // dimensions=2
+        buf.extend_from_slice(&4u32.to_le_bytes()); // data_len=4
+        buf.extend_from_slice(&[10u8, 20]); // only 2 of 4 bytes
+        let mut pos = 0;
+        let err = ColumnCodec::read_from(&buf, &mut pos).unwrap_err();
+        assert_eq!(err, "truncated Int8Vector data");
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty (zero-length) columns: all codec variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_bitpacked_round_trip() {
+        let bp = BitPackedInts::pack(&[]);
+        let col = ColumnCodec::BitPacked(bp);
+        assert!(col.is_empty());
+        assert_eq!(col.len(), 0);
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_empty_dict_round_trip() {
+        let builder = DictionaryBuilder::new();
+        let dict = builder.build();
+        let col = ColumnCodec::Dict(dict);
+        assert!(col.is_empty());
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_empty_bitmap_round_trip() {
+        let bv = BitVector::from_bools(&[]);
+        let col = ColumnCodec::Bitmap(bv);
+        assert!(col.is_empty());
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_empty_int8_vector_round_trip() {
+        let col = ColumnCodec::Int8Vector {
+            data: Vec::new(),
+            dimensions: 4,
+        };
+        assert!(col.is_empty());
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len());
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_empty_string_in_dict() {
+        let mut b = DictionaryBuilder::new();
+        b.add("");
+        b.add("Alix");
+        b.add("");
+        let col = ColumnCodec::Dict(b.build());
+
+        assert_eq!(col.get(0), Some(Value::String(ArcStr::from(""))));
+        assert_eq!(col.get(1), Some(Value::String(ArcStr::from("Alix"))));
+        assert_eq!(col.get(2), Some(Value::String(ArcStr::from(""))));
+
+        // Round-trip to exercise the len=0 branch of write/read dict string.
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(decoded.get(0), Some(Value::String(ArcStr::from(""))));
+        assert_eq!(decoded.get(2), Some(Value::String(ArcStr::from(""))));
+    }
+
+    // -----------------------------------------------------------------------
+    // find_eq / find_in_range boundary exactness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_in_range_exact_boundaries_inclusive_vs_exclusive() {
+        // values: 10, 20, 30, 40, 50
+        let values = vec![10u64, 20, 30, 40, 50];
+        let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
+
+        // [20, 40] inclusive on both ends, boundary values included.
+        let inclusive =
+            col.find_in_range(Some(&Value::Int64(20)), Some(&Value::Int64(40)), true, true);
+        assert_eq!(inclusive, vec![1, 2, 3]);
+
+        // (20, 40) exclusive on both ends, boundaries excluded.
+        let exclusive = col.find_in_range(
+            Some(&Value::Int64(20)),
+            Some(&Value::Int64(40)),
+            false,
+            false,
+        );
+        assert_eq!(exclusive, vec![2]);
+
+        // [20, 40) inclusive-exclusive mix.
+        let mixed_a = col.find_in_range(
+            Some(&Value::Int64(20)),
+            Some(&Value::Int64(40)),
+            true,
+            false,
+        );
+        assert_eq!(mixed_a, vec![1, 2]);
+
+        // (20, 40] exclusive-inclusive mix.
+        let mixed_b = col.find_in_range(
+            Some(&Value::Int64(20)),
+            Some(&Value::Int64(40)),
+            false,
+            true,
+        );
+        assert_eq!(mixed_b, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_find_in_range_bitpacked_fallback_on_float_min() {
+        // Float min triggers the fallback path on BitPacked. The fallback
+        // still knows how to compare Int64 <-> Float64, so values >= 2.5
+        // out of [1, 2, 3] match.
+        let values = vec![1u64, 2, 3];
+        let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
+
+        let result = col.find_in_range(Some(&Value::Float64(2.5)), None, true, true);
+        assert_eq!(result, vec![2]);
+    }
+
+    #[test]
+    fn test_find_in_range_bitpacked_fallback_on_float_max() {
+        let values = vec![1u64, 2, 3];
+        let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
+
+        // Float max also routes through the fallback, comparing Int <-> Float.
+        let result = col.find_in_range(None, Some(&Value::Float64(2.5)), true, true);
+        assert_eq!(result, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_find_in_range_open_both_ends_returns_all() {
+        let values = vec![1u64, 2, 3, 4, 5];
+        let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
+
+        let all = col.find_in_range(None, None, true, true);
+        assert_eq!(all, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_find_in_range_fallback_dict_exclusive() {
+        let mut b = DictionaryBuilder::new();
+        for name in ["Amsterdam", "Berlin", "Paris", "Prague"] {
+            b.add(name);
+        }
+        let col = ColumnCodec::Dict(b.build());
+
+        // Exclusive on lower bound: "Berlin" excluded.
+        let result = col.find_in_range(Some(&Value::String("Berlin".into())), None, false, true);
+        assert_eq!(result, vec![2, 3]); // Paris, Prague
+
+        // Exclusive on upper bound: "Prague" excluded.
+        let result = col.find_in_range(None, Some(&Value::String("Prague".into())), true, false);
+        assert_eq!(result, vec![0, 1, 2]); // Amsterdam, Berlin, Paris
+    }
+
+    #[test]
+    fn test_find_in_range_fallback_mismatch_returns_none_for_row() {
+        // Target uses None from compare_values by mixing codec types.
+        // Bitmap column + Int64 range -> compare returns None -> rows excluded.
+        let col = ColumnCodec::Bitmap(BitVector::from_bools(&[true, false, true]));
+        let result = col.find_in_range(Some(&Value::Int64(0)), Some(&Value::Int64(5)), true, true);
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // get_raw_u64 / get_int8_vector on all non-matching variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_raw_u64_returns_none_for_all_non_bitpacked() {
+        let mut b = DictionaryBuilder::new();
+        b.add("x");
+        assert_eq!(ColumnCodec::Dict(b.build()).get_raw_u64(0), None);
+
+        assert_eq!(
+            ColumnCodec::Int8Vector {
+                data: vec![1i8],
+                dimensions: 1
+            }
+            .get_raw_u64(0),
+            None
+        );
+    }
+
+    #[test]
+    fn test_get_int8_vector_returns_none_for_all_non_vector() {
+        let bp = BitPackedInts::pack(&[1u64]);
+        assert_eq!(ColumnCodec::BitPacked(bp).get_int8_vector(0), None);
+
+        let mut b = DictionaryBuilder::new();
+        b.add("x");
+        assert_eq!(ColumnCodec::Dict(b.build()).get_int8_vector(0), None);
+
+        let bv = BitVector::from_bools(&[true]);
+        assert_eq!(ColumnCodec::Bitmap(bv).get_int8_vector(0), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // heap_bytes on empty columns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_heap_bytes_empty_columns() {
+        let bp = BitPackedInts::pack(&[]);
+        assert_eq!(ColumnCodec::BitPacked(bp).heap_bytes(), 0);
+
+        let builder = DictionaryBuilder::new();
+        assert_eq!(ColumnCodec::Dict(builder.build()).heap_bytes(), 0);
+
+        let col = ColumnCodec::Int8Vector {
+            data: Vec::new(),
+            dimensions: 4,
+        };
+        assert_eq!(col.heap_bytes(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // find_eq for Dict where target string is not in the dictionary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_find_eq_dict_target_not_in_dictionary() {
+        let mut b = DictionaryBuilder::new();
+        b.add("Amsterdam");
+        b.add("Berlin");
+        let col = ColumnCodec::Dict(b.build());
+
+        // Target "Prague" does not exist in the dictionary, so encode returns None.
+        let result = col.find_eq(&Value::String(ArcStr::from("Prague")));
+        assert!(result.is_empty());
+    }
 }
