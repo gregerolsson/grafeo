@@ -542,7 +542,7 @@ fn test_plan_horizontal_aggregate_edge() {
         .session()
         .execute(
             "MATCH p = (a:Person {name: 'Alix'})-[r:FOLLOWS*1..2]->(b:Person) \
-             RETURN sum(r.weight) AS total",
+             RETURN sum(r.weight)",
         )
         .expect("horizontal-aggregate edge query must plan and execute");
     assert!(rs.row_count() >= 1);
