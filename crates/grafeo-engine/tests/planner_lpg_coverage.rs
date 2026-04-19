@@ -543,3 +543,88 @@ fn test_plan_horizontal_aggregate_edge() {
         assert!(rs.row_count() >= 1);
     }
 }
+
+// ============================================================================
+// Regression: score column reuse must not cross-contaminate different queries
+// (project.rs find_projected_score / vector_score_column_name).
+// ============================================================================
+
+/// Two cosine_similarity calls with DIFFERENT query vectors on the same
+/// property must not share a score column. Before the fix, the RETURN'd
+/// `other` value was read from the filter's score column (computed against
+/// [1,0,0]) instead of being recomputed against [0,1,0].
+#[cfg(feature = "vector-index")]
+#[test]
+fn test_score_reuse_isolates_different_query_vectors() {
+    let db = GrafeoDB::new_in_memory();
+    let a = db.create_node(&["Doc"]);
+    db.set_node_property(a, "title", Value::String("x-aligned".into()));
+    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
+    db.create_vector_index("Doc", "embedding", Some(3), Some("cosine"), None, None, None)
+        .unwrap();
+
+    let r = db
+        .session()
+        .execute(
+            "MATCH (d:Doc) \
+             WHERE cosine_similarity(d.embedding, [1.0, 0.0, 0.0]) > 0.99 \
+             RETURN d.title, cosine_similarity(d.embedding, [0.0, 1.0, 0.0]) AS other",
+        )
+        .expect("query must plan and execute");
+    assert_eq!(r.row_count(), 1);
+    // The filter matched [1,0,0] (sim=1.0); `other` is against [0,1,0] (sim=0.0).
+    // If the planner incorrectly reused the filter's score column, `other`
+    // would read 1.0 instead of 0.0.
+    let row = &r.rows()[0];
+    let other: f64 = match &row[1] {
+        Value::Float64(f) => *f,
+        Value::Float32(f) => f64::from(*f),
+        other => panic!("expected float, got {:?}", other),
+    };
+    assert!(
+        other.abs() < 0.01,
+        "second call with orthogonal query should be ~0, got {}",
+        other,
+    );
+}
+
+// ============================================================================
+// Regression: VectorScan must use the requested metric, not the index's, when
+// they differ (mod.rs plan_vector_scan falls back to brute-force).
+// ============================================================================
+
+/// A cosine-built index queried with `euclidean_distance` must produce
+/// euclidean-correct results. Before the fix, plan_vector_scan still routed
+/// through the HNSW index (ranked by cosine) and only rescaled threshold
+/// comparisons, returning the wrong neighbors.
+#[cfg(feature = "vector-index")]
+#[test]
+fn test_vector_scan_metric_mismatch_uses_brute_force() {
+    let db = GrafeoDB::new_in_memory();
+    // A is close to query in Euclidean space (distance ~1.41) but far in cosine.
+    // B is far in Euclidean space (distance ~99) but cosine-identical to query.
+    let a = db.create_node(&["Doc"]);
+    db.set_node_property(a, "title", Value::String("near".into()));
+    db.set_node_property(a, "embedding", Value::Vector(vec![1.0f32, 0.0, 0.0].into()));
+    let b = db.create_node(&["Doc"]);
+    db.set_node_property(b, "title", Value::String("far".into()));
+    db.set_node_property(b, "embedding", Value::Vector(vec![0.0f32, 100.0, 0.0].into()));
+    db.create_vector_index("Doc", "embedding", Some(3), Some("cosine"), None, None, None)
+        .unwrap();
+
+    let r = db
+        .session()
+        .execute(
+            "MATCH (d:Doc) \
+             WHERE euclidean_distance(d.embedding, [0.0, 1.0, 0.0]) < 10.0 \
+             RETURN d.title",
+        )
+        .expect("query must plan and execute");
+    let titles = strings_col0(&r);
+    assert_eq!(
+        titles,
+        vec!["near"],
+        "euclidean threshold must filter out B (dist=99); got {:?}",
+        titles,
+    );
+}
