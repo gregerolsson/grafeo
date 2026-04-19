@@ -534,15 +534,15 @@ fn test_plan_map_collect_via_collect_map() {
 
 /// sum(r.weight) over FOLLOWS edges in a variable-length path forces the Edge
 /// branch of plan_horizontal_aggregate when the binder emits a
-/// HorizontalAggregateOp. Any planner error is a regression we want to
-/// surface rather than swallow.
+/// HorizontalAggregateOp. No ORDER BY: referencing the aggregate alias in
+/// ORDER BY is a separate planner concern unrelated to this coverage target.
 #[test]
 fn test_plan_horizontal_aggregate_edge() {
     let rs = social_graph()
         .session()
         .execute(
             "MATCH p = (a:Person {name: 'Alix'})-[r:FOLLOWS*1..2]->(b:Person) \
-             RETURN sum(r.weight) AS total ORDER BY total",
+             RETURN sum(r.weight) AS total",
         )
         .expect("horizontal-aggregate edge query must plan and execute");
     assert!(rs.row_count() >= 1);

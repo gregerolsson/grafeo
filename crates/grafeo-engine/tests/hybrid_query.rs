@@ -722,10 +722,12 @@ fn test_profile_shows_vector_scan() {
     let db = setup_article_db();
     let session = db.session();
 
+    // `>=` pushes down; strict `>` falls through to per-row evaluation so
+    // the engine can honor the exact boundary semantics.
     let result = session
         .execute(
             "PROFILE MATCH (doc:Article) \
-             WHERE cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) > 0.5 \
+             WHERE cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) >= 0.5 \
              RETURN doc.title",
         )
         .unwrap();
