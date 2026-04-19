@@ -150,7 +150,7 @@ impl ColumnCodec {
             Self::Float64(vec) => vec.len(),
             Self::Float32Vector { data, dimensions } => {
                 let dims = *dimensions as usize;
-                if dims == 0 { 0 } else { data.len() / dims }
+                data.len().checked_div(dims).unwrap_or(0)
             }
         }
     }
