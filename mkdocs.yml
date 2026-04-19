@@ -262,6 +262,7 @@ nav:
       - HNSW Index: user-guide/vector-search/hnsw-index.md
       - Text Search: user-guide/vector-search/text-search.md
       - Hybrid Search: user-guide/vector-search/hybrid-search.md
+      - Filter Expressions: user-guide/vector-search/filter-expressions.md
       - MMR Search: user-guide/vector-search/mmr-search.md
       - Quantization: user-guide/vector-search/quantization.md
       - Python API: user-guide/vector-search/python-api.md
