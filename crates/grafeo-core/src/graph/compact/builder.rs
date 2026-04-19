@@ -578,6 +578,10 @@ fn infer_column_type(codec: &ColumnCodec) -> ColumnType {
         ColumnCodec::Int8Vector { dimensions, .. } => ColumnType::Int8Vector {
             dimensions: *dimensions,
         },
+        ColumnCodec::Float64(_) => ColumnType::Float64,
+        ColumnCodec::Float32Vector { dimensions, .. } => ColumnType::Float32Vector {
+            dimensions: *dimensions,
+        },
     }
 }
 
@@ -649,8 +653,12 @@ fn compute_zone_map_bool(values: &[bool]) -> ZoneMap {
 enum InferredType {
     /// All non-null values are `Value::Int64` with value >= 0.
     BitPacked,
+    /// All non-null values are `Value::Float64`, or mixed `Int64`+`Float64`.
+    Float64,
     /// All non-null values are `Value::Bool`.
     Bitmap,
+    /// All non-null values are `Value::Vector` with consistent dimensions.
+    Float32Vector { dimensions: u16 },
     /// All non-null values are `Value::String`, or mixed/unsupported types.
     Dict,
 }
@@ -789,6 +797,42 @@ pub fn from_graph_store(
                         t.columns.push((key.clone(), ColumnCodec::BitPacked(bp)));
                         t.record_len(u64_values.len());
                     }
+                    InferredType::Float64 => {
+                        let f64_values: Vec<f64> = values
+                            .iter()
+                            .map(|v| match v {
+                                Value::Float64(f) => *f,
+                                Value::Int64(n) => *n as f64,
+                                _ => 0.0,
+                            })
+                            .collect();
+                        t.columns
+                            .push((key.clone(), ColumnCodec::Float64(f64_values)));
+                        t.record_len(values.len());
+                    }
+                    InferredType::Float32Vector { dimensions } => {
+                        let mut flat: Vec<f32> =
+                            Vec::with_capacity(values.len() * dimensions as usize);
+                        for v in values {
+                            match v {
+                                Value::Vector(vec) => flat.extend_from_slice(vec),
+                                _ => {
+                                    flat.extend(std::iter::repeat_n(
+                                        0.0f32,
+                                        usize::from(dimensions),
+                                    ));
+                                }
+                            }
+                        }
+                        t.columns.push((
+                            key.clone(),
+                            ColumnCodec::Float32Vector {
+                                data: flat,
+                                dimensions,
+                            },
+                        ));
+                        t.record_len(values.len());
+                    }
                     InferredType::Bitmap => {
                         let bool_values: Vec<bool> = values
                             .iter()
@@ -908,6 +952,38 @@ pub fn from_graph_store(
                                     .collect();
                                 let bp = BitPackedInts::pack(&u64_values);
                                 r.properties.push((key.clone(), ColumnCodec::BitPacked(bp)));
+                            }
+                            InferredType::Float64 => {
+                                let f64_values: Vec<f64> = values
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Float64(f) => *f,
+                                        Value::Int64(n) => *n as f64,
+                                        _ => 0.0,
+                                    })
+                                    .collect();
+                                r.properties
+                                    .push((key.clone(), ColumnCodec::Float64(f64_values)));
+                            }
+                            InferredType::Float32Vector { dimensions } => {
+                                let mut flat: Vec<f32> =
+                                    Vec::with_capacity(values.len() * dimensions as usize);
+                                for v in values {
+                                    match v {
+                                        Value::Vector(vec) => flat.extend_from_slice(vec),
+                                        _ => flat.extend(std::iter::repeat_n(
+                                            0.0f32,
+                                            usize::from(dimensions),
+                                        )),
+                                    }
+                                }
+                                r.properties.push((
+                                    key.clone(),
+                                    ColumnCodec::Float32Vector {
+                                        data: flat,
+                                        dimensions,
+                                    },
+                                ));
                             }
                             InferredType::Bitmap => {
                                 let bool_values: Vec<bool> = values
@@ -1102,20 +1178,53 @@ pub fn from_graph_store_preserving_ids(
 /// - Otherwise returns `Dict` (string fallback).
 fn infer_type_from_values(values: &[Value]) -> InferredType {
     let mut saw_int = false;
+    let mut saw_float = false;
     let mut saw_bool = false;
+    let mut saw_vector = false;
     let mut saw_other = false;
+    let mut vector_dims: Option<u16> = None;
 
     for v in values {
         match v {
             Value::Null => {} // skip nulls
             Value::Int64(n) if *n >= 0 => saw_int = true,
+            Value::Float64(_) => saw_float = true,
             Value::Bool(_) => saw_bool = true,
+            Value::Vector(vec) => {
+                saw_vector = true;
+                let Ok(dims) = u16::try_from(vec.len()) else {
+                    saw_other = true; // too many dimensions for columnar storage
+                    continue;
+                };
+                if let Some(prev) = vector_dims {
+                    if prev != dims {
+                        saw_other = true; // mixed dimensions → fallback
+                    }
+                } else {
+                    vector_dims = Some(dims);
+                }
+            }
             _ => saw_other = true,
         }
     }
 
-    if saw_other || (saw_int && saw_bool) {
+    // Vectors are exclusive — mixed with other types falls back to Dict.
+    if saw_vector
+        && !saw_other
+        && !saw_int
+        && !saw_float
+        && !saw_bool
+        && let Some(dims) = vector_dims
+    {
+        return InferredType::Float32Vector { dimensions: dims };
+    }
+
+    // Mixed Int64+Float64 coalesces to Float64.
+    // Vectors mixed with any other type fall back to Dict.
+    if saw_other || saw_vector || ((saw_int || saw_float) && saw_bool) {
         InferredType::Dict
+    } else if saw_float {
+        InferredType::Float64
     } else if saw_int {
         InferredType::BitPacked
     } else if saw_bool {
@@ -1421,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_graph_store_float_falls_back_to_dict() {
+    fn test_from_graph_store_float64_column() {
         use crate::graph::lpg::LpgStore;
 
         let store = LpgStore::new().unwrap();
@@ -1434,14 +1543,11 @@ mod tests {
         let ids = compact.nodes_by_label("Sensor");
         assert_eq!(ids.len(), 1);
 
-        // Float64 falls back to Dict, serialized as string.
+        // Float64 values are stored natively.
         let val = compact
             .get_node_property(ids[0], &PropertyKey::new("reading"))
             .unwrap();
-        match val {
-            Value::String(s) => assert!(s.contains("98.6"), "expected '98.6' in '{s}'"),
-            other => panic!("expected String (Dict fallback), got {other:?}"),
-        }
+        assert_eq!(val, Value::Float64(98.6));
     }
 
     #[test]
@@ -1616,7 +1722,15 @@ mod tests {
     fn test_infer_type_float() {
         assert_eq!(
             infer_type_from_values(&[Value::Float64(1.5)]),
-            InferredType::Dict
+            InferredType::Float64
+        );
+    }
+
+    #[test]
+    fn test_infer_type_mixed_int_float_coalesces_to_float() {
+        assert_eq!(
+            infer_type_from_values(&[Value::Int64(1), Value::Float64(2.5)]),
+            InferredType::Float64
         );
     }
 

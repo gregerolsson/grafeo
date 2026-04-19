@@ -2,6 +2,20 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.40] - 2026-04-19
+
+### Added
+
+- **BM25 text scan operator**: `TextScanOperator` supports top-K and threshold modes. `text_score()` and `text_match()` are now evaluable as per-row filter expressions. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
+- **Hybrid query planner pushdown**: `text_score(n.prop, "query") > threshold` and vector score predicates are pushed down to dedicated scan operators. Compound AND/OR hybrid joins, ORDER BY + LIMIT to top-K recognition, and score column projection to avoid recompute. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
+- **Float64 and Float32Vector column codecs**: CompactStore now stores `Value::Float64` and `Value::Vector` properties natively instead of falling back to dictionary encoding. Mixed `Int64+Float64` columns coalesce to Float64. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
+
+### Fixed
+
+- **MERGE index lookup**: `MERGE (n:Label {prop: value})` now uses property indexes when available, matching the performance of `MATCH` with property constraints. Previously, MERGE always scanned all nodes with the given label and compared properties manually, causing O(n) slowdown on large graphs. (#288)
+- **Index and search after `compact()`**: `create_vector_index`, `vector_search`, `create_text_index`, `text_search`, and the other ~26 index/search methods no longer panic with "no built-in LpgStore" or silently return empty results after `compact()`. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
+- **`LayeredStore` new-node visibility**: `get_node` and `get_node_property` now fall back to the overlay for nodes added after `compact()`, fixing `recompact()` silently dropping those nodes from the merged base. ([#286](https://github.com/GrafeoDB/grafeo/pull/286))
+
 ## [0.5.39] - 2026-04-16
 
 Block-STM conflict partitioning, push-based query execution, AES-256-GCM encryption at rest, runtime metrics with Prometheus export, and a writable layered compact store.

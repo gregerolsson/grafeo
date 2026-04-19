@@ -27,6 +27,13 @@ pub enum ColumnType {
         /// Number of dimensions in each vector.
         dimensions: u16,
     },
+    /// IEEE 754 double-precision floating-point values.
+    Float64,
+    /// Fixed-dimension 32-bit float vector (for embeddings / vector search).
+    Float32Vector {
+        /// Number of dimensions in each vector.
+        dimensions: u16,
+    },
 }
 
 /// A single column within a table schema.

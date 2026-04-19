@@ -126,7 +126,20 @@ impl MergeOperator {
 
     /// Tries to find a matching node with the given resolved properties.
     fn find_matching_node(&self, resolved_match_props: &[(String, Value)]) -> Option<NodeId> {
-        let candidates: Vec<NodeId> = if let Some(first_label) = self.config.labels.first() {
+        // Use a property index when available to avoid a full label scan.
+        // Null conditions are excluded from the index query and verified in the loop.
+        let use_index = resolved_match_props
+            .iter()
+            .any(|(k, v)| !v.is_null() && self.store.has_property_index(k));
+
+        let candidates: Vec<NodeId> = if use_index {
+            let conditions: Vec<(&str, Value)> = resolved_match_props
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect();
+            self.store.find_nodes_by_properties(&conditions)
+        } else if let Some(first_label) = self.config.labels.first() {
             self.store.nodes_by_label(first_label)
         } else {
             self.store.node_ids()
@@ -745,6 +758,110 @@ mod tests {
         let node = store.get_node(node_id).unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("updated")),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_merge_uses_property_index() {
+        let lpg_store = Arc::new(LpgStore::new().unwrap());
+        lpg_store.create_property_index("name");
+        assert!(lpg_store.has_property_index("name"));
+
+        // Use the trait object for node creation so the &[(PropertyKey, Value)] signature applies.
+        let store: Arc<dyn GraphStoreMut> = lpg_store;
+
+        for i in 0..50u32 {
+            store.create_node_with_props(
+                &["Person"],
+                &[(
+                    PropertyKey::new("name"),
+                    Value::String(format!("person_{i}").into()),
+                )],
+            );
+        }
+
+        let target_id = store.create_node_with_props(
+            &["Person"],
+            &[(PropertyKey::new("name"), Value::String("Beatrix".into()))],
+        );
+
+        // MERGE should find the existing node via index lookup
+        let mut merge = MergeOperator::new(
+            Arc::clone(&store),
+            None,
+            MergeConfig {
+                variable: "n".to_string(),
+                labels: vec!["Person".to_string()],
+                match_properties: const_props(vec![("name", Value::String("Beatrix".into()))]),
+                on_create_properties: vec![],
+                on_match_properties: const_props(vec![("found", Value::Bool(true))]),
+                output_schema: vec![LogicalType::Node],
+                output_column: 0,
+                bound_variable_column: None,
+            },
+        );
+
+        let result = merge.next().unwrap();
+        assert!(result.is_some());
+
+        // ON MATCH should have fired on the correct node
+        let node = store.get_node(target_id).unwrap();
+        assert_eq!(
+            node.properties.get(&PropertyKey::new("found")),
+            Some(&Value::Bool(true))
+        );
+
+        // No new node should have been created
+        let persons = store.nodes_by_label("Person");
+        assert_eq!(persons.len(), 51);
+    }
+
+    #[test]
+    fn test_merge_creates_via_index_miss() {
+        let lpg_store = Arc::new(LpgStore::new().unwrap());
+        lpg_store.create_property_index("name");
+
+        let store: Arc<dyn GraphStoreMut> = lpg_store;
+
+        store.create_node_with_props(
+            &["Person"],
+            &[(PropertyKey::new("name"), Value::String("Django".into()))],
+        );
+
+        // MERGE for a name not in the index — should create
+        let mut merge = MergeOperator::new(
+            Arc::clone(&store),
+            None,
+            MergeConfig {
+                variable: "n".to_string(),
+                labels: vec!["Person".to_string()],
+                match_properties: const_props(vec![("name", Value::String("Shosanna".into()))]),
+                on_create_properties: const_props(vec![("created", Value::Bool(true))]),
+                on_match_properties: vec![],
+                output_schema: vec![LogicalType::Node],
+                output_column: 0,
+                bound_variable_column: None,
+            },
+        );
+
+        let result = merge.next().unwrap();
+        assert!(result.is_some());
+
+        let persons = store.nodes_by_label("Person");
+        assert_eq!(persons.len(), 2);
+
+        let new_nodes: Vec<_> = persons
+            .iter()
+            .filter_map(|&id| store.get_node(id))
+            .filter(|n| {
+                n.properties.get(&PropertyKey::new("name"))
+                    == Some(&Value::String("Shosanna".into()))
+            })
+            .collect();
+        assert_eq!(new_nodes.len(), 1);
+        assert_eq!(
+            new_nodes[0].properties.get(&PropertyKey::new("created")),
             Some(&Value::Bool(true))
         );
     }

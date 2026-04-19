@@ -738,6 +738,30 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::Construct(construct) => self.bind_operator(&construct.input),
+            LogicalOperator::TextScan(scan) => {
+                self.context.add_variable(
+                    scan.variable.clone(),
+                    VariableInfo {
+                        name: scan.variable.clone(),
+                        data_type: LogicalType::Node,
+                        is_node: true,
+                        is_edge: false,
+                    },
+                );
+                if let Some(ref score_col) = scan.score_column {
+                    self.context.add_variable(
+                        score_col.clone(),
+                        VariableInfo {
+                            name: score_col.clone(),
+                            data_type: LogicalType::Float64,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                self.validate_expression(&scan.query)?;
+                Ok(())
+            }
         }
     }
 
@@ -2502,7 +2526,7 @@ mod tests {
             property: "embedding".to_string(),
             label: Some("Doc".to_string()),
             query_vector: LogicalExpression::Variable("undefined_vec".to_string()),
-            k: 10,
+            k: Some(10),
             metric: None,
             min_similarity: None,
             max_distance: None,

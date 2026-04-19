@@ -157,7 +157,8 @@ impl GraphStore for LayeredStore {
         if self.is_node_dirty(id) {
             return self.overlay.get_node(id);
         }
-        self.base.get_node(id)
+        // dirty_node_ids only tracks modified base nodes; new overlay nodes fall through here.
+        self.base.get_node(id).or_else(|| self.overlay.get_node(id))
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
@@ -227,7 +228,9 @@ impl GraphStore for LayeredStore {
         if self.is_node_dirty(id) {
             return self.overlay.get_node_property(id, key);
         }
-        self.base.get_node_property(id, key)
+        self.base
+            .get_node_property(id, key)
+            .or_else(|| self.overlay.get_node_property(id, key))
     }
 
     fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
@@ -673,6 +676,66 @@ impl GraphStore for LayeredStore {
             return self.overlay.get_edge_history(id);
         }
         Vec::new()
+    }
+
+    #[cfg(feature = "text-index")]
+    fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
+        if self.is_node_deleted_from_base(node_id) {
+            return None;
+        }
+        self.overlay.score_text(node_id, label, property, query)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+    ) -> Vec<(NodeId, f64)> {
+        let deleted = self.deleted_from_base_nodes.read();
+        let mut results = self
+            .overlay
+            .text_search(label, property, query, k + deleted.len());
+        results.retain(|(id, _)| !deleted.contains(id));
+        results.truncate(k);
+        results
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        threshold: f64,
+    ) -> Vec<(NodeId, f64)> {
+        let deleted = self.deleted_from_base_nodes.read();
+        let mut results = self
+            .overlay
+            .text_search_with_threshold(label, property, query, threshold);
+        results.retain(|(id, _)| !deleted.contains(id));
+        results
+    }
+
+    #[cfg(feature = "text-index")]
+    fn has_text_index(&self, label: &str, property: &str) -> bool {
+        self.overlay.has_text_index(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.overlay.has_vector_index(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn get_vector_index_handle(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        self.overlay.get_vector_index_handle(label, property)
     }
 }
 
