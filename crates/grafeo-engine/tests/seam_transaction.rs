@@ -751,7 +751,11 @@ mod multi_schema_atomicity {
         // Provoke a constraint violation in beta; the earlier alpha write
         // must unwind on rollback.
         session.execute("SESSION SET SCHEMA beta").unwrap();
-        let _ = session.execute("INSERT (:Strict {})"); // missing required 'name'
+        let violation = session.execute("INSERT (:Strict {})"); // missing required 'name'
+        assert!(
+            violation.is_err(),
+            "INSERT with missing NOT NULL property must fail in beta"
+        );
         session.execute("ROLLBACK").unwrap();
 
         session.execute("SESSION SET SCHEMA alpha").unwrap();

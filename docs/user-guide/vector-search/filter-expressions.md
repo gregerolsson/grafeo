@@ -37,7 +37,7 @@ the planner pick the execution strategy.
 | `text_score(n.prop, "query")` | `Float64` (BM25 score, higher = more relevant) | Use in WHERE with a threshold, or project in RETURN |
 | `text_match(n.prop, "query")` | `Boolean` (true if the document matches) | Use directly as a WHERE predicate |
 | `cosine_similarity(n.vec, $q)` | `Float64` (higher = more similar) | WHERE threshold or RETURN projection |
-| `euclidean_distance(n.vec, $q)` | `Float64` (lower = more similar) | WHERE threshold (use `<`) or RETURN projection |
+| `euclidean_distance(n.vec, $q)` | `Float64` (lower = more similar) | WHERE threshold (use `<=` for pushdown) or RETURN projection |
 
 The same names work in Cypher. SPARQL and SQL/PGQ follow the same shape where
 supported.
@@ -92,7 +92,7 @@ LIMIT 5
 
 ```gql
 MATCH (doc:Article)
-WHERE cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) > 0.5
+WHERE cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) >= 0.5
 RETURN doc.title
 ```
 
@@ -100,16 +100,16 @@ With a vector index, this pushes down into a `VectorScanOperator`. Without one,
 the planner falls back to brute-force per-row evaluation so the query still
 returns the correct rows.
 
-Use `euclidean_distance(...) < threshold` for the distance formulation:
+Use `euclidean_distance(...) <= threshold` for the distance formulation:
 
 ```gql
 MATCH (doc:Article)
-WHERE euclidean_distance(doc.embedding, [0.9, 0.1, 0.0]) < 0.5
+WHERE euclidean_distance(doc.embedding, [0.9, 0.1, 0.0]) <= 0.5
 RETURN doc.title
 ```
 
 !!! note "Operator direction matters for pushdown"
-    Natural directions push down to an index scan: `cosine_similarity(prop, q) > t`, `euclidean_distance(prop, q) < t`, `manhattan_distance(prop, q) < t`, and `text_score(prop, q) > t` / `text_score(prop, q) >= t`. Inverted comparisons (e.g. `cosine_similarity < t`), `dot_product` (not currently pushdown-supported), and queries whose vector is not resolvable at plan time (property reference, unresolved parameter) also fall through to brute-force per-row evaluation.
+    Inclusive operators push down to an index scan: `cosine_similarity(prop, q) >= t`, `euclidean_distance(prop, q) <= t`, `manhattan_distance(prop, q) <= t`, and `text_score(prop, q) > t` / `text_score(prop, q) >= t`. Strict `>` / `<` on the vector distance metrics fall back to per-row evaluation because the underlying scan compares inclusively (`>=` / `<=`), so a strict-boundary row would leak if pushed. Inverted comparisons (e.g. `cosine_similarity < t`), `dot_product` (not currently pushdown-supported), and queries whose vector is not resolvable at plan time (property reference, unresolved parameter) also fall through to brute-force per-row evaluation.
 
 ## Compound predicates (AND / OR)
 

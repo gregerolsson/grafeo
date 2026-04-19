@@ -92,21 +92,17 @@ impl From<PyGrafeoError> for PyErr {
     }
 }
 
-/// Builds a `GrafeoError` with `error_code` and `is_retryable` attributes set
-/// when a code is known. Falls back to a plain `GrafeoError(message)` when
-/// the code cannot be determined.
+/// Builds a `GrafeoError` with `error_code` and `is_retryable` attributes
+/// always populated. If the upstream error did not carry a specific code,
+/// the generic `Internal` code is used so that callers can rely on both
+/// attributes being present on every `GrafeoError`.
 fn build_grafeo_error(message: String, code: Option<ErrorCode>) -> PyErr {
     Python::attach(|py| {
         let err = GrafeoError::new_err(message);
-        if let Some(code) = code {
-            // Best-effort attribute attachment. If setattr fails (e.g. under
-            // a stripped-down interpreter), the caller still sees a
-            // GrafeoError with the message, just without the structured
-            // attributes.
-            let inst = err.value(py);
-            let _ = inst.setattr("error_code", code.as_str());
-            let _ = inst.setattr("is_retryable", code.is_retryable());
-        }
+        let code = code.unwrap_or(ErrorCode::Internal);
+        let inst = err.value(py);
+        let _ = inst.setattr("error_code", code.as_str());
+        let _ = inst.setattr("is_retryable", code.is_retryable());
         err
     })
 }
