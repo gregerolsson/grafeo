@@ -6,8 +6,8 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Added
 
-- **BM25 text scan operator**: `TextScanOperator` supports top-K and threshold modes. `text_score()` and `text_match()` are now evaluable as per-row filter expressions. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
-- **Hybrid query planner pushdown**: `text_score(n.prop, "query") > threshold` and vector score predicates are pushed down to dedicated scan operators. Compound AND/OR hybrid joins, ORDER BY + LIMIT to top-K recognition, and score column projection to avoid recompute. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
+- **Unified hybrid queries**: graph + vector + text in a single query. `text_score()` and `text_match()` evaluable as per-row filter expressions, with planner pushdown of `text_score(n.prop, "query") > threshold` and vector score predicates to dedicated `TextScan` / `VectorScan` operators. Compound AND/OR hybrid joins, ORDER BY + LIMIT recognized as top-K, and score column projection to avoid recompute. Inspired by [#287](https://github.com/GrafeoDB/grafeo/pull/287) ([@temporaryfix](https://github.com/temporaryfix)); reimplemented with a `GraphStoreSearch` subtrait, symmetric per-row fallback when no index exists, and `filter_hybrid.rs` planner module.
+- **BM25 text scan operator**: `TextScanOperator` supports top-K and threshold modes. `InvertedIndex` gains `score_document`, `search_with_threshold`, and `bm25_term_score` helpers. ([#287](https://github.com/GrafeoDB/grafeo/pull/287), [@temporaryfix](https://github.com/temporaryfix))
 - **Float64 and Float32Vector column codecs**: CompactStore now stores `Value::Float64` and `Value::Vector` properties natively instead of falling back to dictionary encoding. Mixed `Int64+Float64` columns coalesce to Float64. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
 
 ### Fixed
@@ -15,6 +15,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **MERGE index lookup**: `MERGE (n:Label {prop: value})` now uses property indexes when available, matching the performance of `MATCH` with property constraints. Previously, MERGE always scanned all nodes with the given label and compared properties manually, causing O(n) slowdown on large graphs. (#288)
 - **Index and search after `compact()`**: `create_vector_index`, `vector_search`, `create_text_index`, `text_search`, and the other ~26 index/search methods no longer panic with "no built-in LpgStore" or silently return empty results after `compact()`. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
 - **`LayeredStore` new-node visibility**: `get_node` and `get_node_property` now fall back to the overlay for nodes added after `compact()`, fixing `recompact()` silently dropping those nodes from the merged base. ([#286](https://github.com/GrafeoDB/grafeo/pull/286))
+- **Named graphs across `compact()` / `recompact()`**: `list_graphs`, `drop_graph`, `create_graph`, and `set_current_graph` now see graphs that existed before compaction. Named graphs are carried from the pre-compact overlay into the new overlay on rebuild.
 
 ## [0.5.39] - 2026-04-16
 

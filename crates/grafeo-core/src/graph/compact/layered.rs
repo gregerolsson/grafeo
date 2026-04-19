@@ -2165,4 +2165,199 @@ mod tests {
         );
         assert!(might, "zone map should indicate since might match 2020");
     }
+
+    // ── M. Focused coverage for promotion and delete-then-recreate ────
+
+    /// Deleting a base node and then creating a fresh overlay node with the
+    /// same label must not double-count. The overlay allocator seeded by
+    /// `max_node_id + 1` guarantees the new node gets a distinct ID, and
+    /// the tombstone on the deleted base ID prevents it from reappearing.
+    /// Covers the deletion bookkeeping in `neighbors`, `node_ids`, and
+    /// `node_count`.
+    #[test]
+    fn test_layered_delete_and_recreate_node() {
+        let layered = build_test_layered();
+
+        let persons_before = layered.nodes_by_label("Person");
+        assert_eq!(persons_before.len(), 2);
+        let target = persons_before[0];
+
+        // Record neighbors of the other person (baseline). Alix -> Amsterdam,
+        // Gus -> Amsterdam both exist in the base; choose the non-target.
+        let other = persons_before[1];
+        let other_neighbors_before = layered.neighbors(other, Direction::Outgoing);
+
+        // Delete target (base node), then create a fresh Person in the overlay.
+        assert!(layered.delete_node(target));
+        let replacement = layered.create_node(&["Person"]);
+        layered.set_node_property(replacement, "name", Value::from("Shosanna"));
+
+        // Counts should reflect: 3 base - 1 deleted + 1 overlay node = 3.
+        assert_eq!(layered.node_count(), 3);
+
+        // nodes_by_label should see exactly 2 Persons again: the non-deleted
+        // base person and the new overlay person.
+        let persons_after = layered.nodes_by_label("Person");
+        assert_eq!(persons_after.len(), 2);
+        assert!(persons_after.contains(&other));
+        assert!(persons_after.contains(&replacement));
+        assert!(
+            !persons_after.contains(&target),
+            "deleted base node must not reappear"
+        );
+
+        // Neighbors of the non-target person should be unchanged.
+        let other_neighbors_after = layered.neighbors(other, Direction::Outgoing);
+        assert_eq!(other_neighbors_before, other_neighbors_after);
+
+        // node_ids must not contain the tombstoned id.
+        let all_ids = layered.node_ids();
+        assert!(!all_ids.contains(&target));
+        assert!(all_ids.contains(&replacement));
+    }
+
+    /// Mutating a base-only node promotes it into the overlay with all its
+    /// labels and properties copied over, and the overlay's node ID counter
+    /// is restored so subsequent `create_node` calls still get fresh IDs.
+    /// Exercises `ensure_in_overlay` end to end.
+    #[test]
+    fn test_layered_promote_node_on_mutation() {
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let target = persons[0];
+
+        // Record the overlay's next-id allocator before promotion so we can
+        // verify it is restored afterwards.
+        let next_id_before = layered.overlay.next_node_id();
+
+        // Snapshot the base node to compare after promotion.
+        let base_node = layered.base.get_node(target).unwrap();
+        let base_labels: Vec<String> = base_node
+            .labels
+            .iter()
+            .map(|l| l.as_str().to_string())
+            .collect();
+        let base_name = layered
+            .base
+            .get_node_property(target, &PropertyKey::new("name"))
+            .unwrap();
+
+        // Mutate: set a new property to trigger promotion.
+        layered.set_node_property(target, "city", Value::from("Amsterdam"));
+
+        // Overlay now owns the node; labels survived.
+        let promoted = layered.overlay.get_node(target).unwrap();
+        let promoted_labels: Vec<String> = promoted
+            .labels
+            .iter()
+            .map(|l| l.as_str().to_string())
+            .collect();
+        assert_eq!(promoted_labels, base_labels);
+
+        // Existing properties survived (read through the layered store).
+        let name_after = layered
+            .get_node_property(target, &PropertyKey::new("name"))
+            .unwrap();
+        assert_eq!(name_after, base_name);
+
+        // New property is set.
+        assert_eq!(
+            layered.get_node_property(target, &PropertyKey::new("city")),
+            Some(Value::String(ArcStr::from("Amsterdam")))
+        );
+
+        // ID counter was restored: allocating a new node must not collide
+        // with the promoted id or any existing base id.
+        let next_id_after = layered.overlay.next_node_id();
+        assert_eq!(
+            next_id_before, next_id_after,
+            "overlay next_node_id should be restored after promotion"
+        );
+        let fresh = layered.create_node(&["Person"]);
+        assert_ne!(fresh, target);
+        for &p in &persons {
+            assert_ne!(fresh, p);
+        }
+    }
+
+    /// Mutating a base-only edge promotes the edge into the overlay together
+    /// with both its endpoints, and its properties are preserved. Covers
+    /// `ensure_edge_in_overlay` including its cascade into
+    /// `ensure_in_overlay` for src and dst.
+    #[test]
+    fn test_layered_promote_edge_on_mutation() {
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let edges = layered.edges_from(persons[0], Direction::Outgoing);
+        assert_eq!(edges.len(), 1);
+        let (target_dst, target_eid) = edges[0];
+
+        // Capture the base edge's metadata for later comparison.
+        let base_edge = layered.base.get_edge(target_eid).unwrap();
+        let base_since = base_edge
+            .properties
+            .get(&PropertyKey::new("since"))
+            .cloned()
+            .unwrap();
+
+        // Mutate: this promotes the edge and its endpoints.
+        layered.set_edge_property(target_eid, "weight", Value::Float64(0.75));
+
+        // The edge is now owned by the overlay.
+        assert!(layered.overlay.get_edge(target_eid).is_some());
+        // Original property still readable via the layered store.
+        let since_after = layered
+            .get_edge_property(target_eid, &PropertyKey::new("since"))
+            .unwrap();
+        assert_eq!(since_after, base_since);
+        // New property is readable.
+        assert_eq!(
+            layered.get_edge_property(target_eid, &PropertyKey::new("weight")),
+            Some(Value::Float64(0.75))
+        );
+
+        // Both endpoints are promoted and reachable from the overlay.
+        assert!(
+            layered.overlay.get_node(persons[0]).is_some(),
+            "edge source must be in the overlay after promotion"
+        );
+        assert!(
+            layered.overlay.get_node(target_dst).is_some(),
+            "edge destination must be in the overlay after promotion"
+        );
+
+        // Endpoints' existing properties are intact through the layered view.
+        assert!(
+            layered
+                .get_node_property(persons[0], &PropertyKey::new("name"))
+                .is_some()
+        );
+        assert!(
+            layered
+                .get_node_property(target_dst, &PropertyKey::new("name"))
+                .is_some()
+        );
+    }
+
+    /// Setting a property on a base-only node marks the node dirty. Directly
+    /// exercises the private `is_node_dirty` accessor used by the promotion
+    /// machinery.
+    #[test]
+    fn test_layered_is_node_dirty_after_mutation() {
+        let layered = build_test_layered();
+        let persons = layered.nodes_by_label("Person");
+        let target = persons[0];
+
+        assert!(
+            !layered.is_node_dirty(target),
+            "base-only node should start clean"
+        );
+
+        layered.set_node_property(target, "city", Value::from("Berlin"));
+
+        assert!(
+            layered.is_node_dirty(target),
+            "node must be dirty after a mutating set_node_property"
+        );
+    }
 }

@@ -132,3 +132,106 @@ fn self_time_ns(node: &ProfileNode) -> u64 {
     let child_time: u64 = node.children.iter().map(|c| c.stats.lock().time_ns).sum();
     own_time.saturating_sub(child_time)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::plan::{
+        FilterOp, LogicalExpression, LogicalOperator, NodeScanOp, ReturnItem, ReturnOp,
+    };
+
+    /// Builds a simple `Return(Filter(NodeScan))` tree for profile-tree tests.
+    fn three_level_plan() -> LogicalOperator {
+        LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("n".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                })),
+                pushdown_hint: None,
+            })),
+        })
+    }
+
+    /// Verifies the builder walks in post-order: children must be consumed
+    /// before their parent. Also checks that self-time subtracts child time.
+    #[test]
+    fn test_profile_tree_post_order() {
+        let plan = three_level_plan();
+
+        // Provide three entries, ordered post-order: NodeScan, Filter, Return.
+        // Pre-set distinct wall-times on each so we can check self_time subtraction.
+        let (scan_entry, scan_stats) = ProfileEntry::new("NodeScan", "n:Person".to_string());
+        let (filter_entry, filter_stats) = ProfileEntry::new("Filter", "true".to_string());
+        let (return_entry, return_stats) = ProfileEntry::new("Return", "n".to_string());
+
+        scan_stats.lock().time_ns = 100;
+        scan_stats.lock().rows_out = 10;
+        filter_stats.lock().time_ns = 250; // Includes child (100) + 150 own
+        filter_stats.lock().rows_out = 10;
+        return_stats.lock().time_ns = 400; // Includes child (250) + 150 own
+        return_stats.lock().rows_out = 10;
+
+        let mut iter = vec![scan_entry, filter_entry, return_entry].into_iter();
+        let root = build_profile_tree(&plan, &mut iter);
+
+        // Root is Return, its child is Filter, whose child is NodeScan.
+        assert_eq!(root.name, "Return");
+        assert_eq!(root.children.len(), 1);
+        let filter = &root.children[0];
+        assert_eq!(filter.name, "Filter");
+        assert_eq!(filter.children.len(), 1);
+        let scan = &filter.children[0];
+        assert_eq!(scan.name, "NodeScan");
+        assert!(scan.children.is_empty());
+
+        // Self-time subtracts children: Return = 400 - 250 = 150; Filter = 250 - 100 = 150.
+        assert_eq!(self_time_ns(&root), 150);
+        assert_eq!(self_time_ns(filter), 150);
+        // Leaf has no children, so self = own time.
+        assert_eq!(self_time_ns(scan), 100);
+    }
+
+    /// Sanity check for the formatted output produced by `profile_result`.
+    #[test]
+    fn test_profile_result_formatting_and_saturating_self_time() {
+        // Build a tree where child time exceeds parent time: saturating_sub
+        // should produce 0 rather than underflowing.
+        let plan = LogicalOperator::Filter(FilterOp {
+            predicate: LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            pushdown_hint: None,
+        });
+        let (scan_entry, scan_stats) = ProfileEntry::new("NodeScan", "n:*".to_string());
+        let (filter_entry, filter_stats) = ProfileEntry::new("Filter", "true".to_string());
+        // Child dwarfs parent: child=500, parent=100 -> self should saturate at 0.
+        scan_stats.lock().time_ns = 500;
+        filter_stats.lock().time_ns = 100;
+        filter_stats.lock().rows_out = 3;
+
+        let mut iter = vec![scan_entry, filter_entry].into_iter();
+        let root = build_profile_tree(&plan, &mut iter);
+        assert_eq!(self_time_ns(&root), 0);
+
+        let result = profile_result(&root, 1.23);
+        assert_eq!(result.columns, vec!["profile".to_string()]);
+        let text = match &result.rows[0][0] {
+            grafeo_common::types::Value::String(s) => s.to_string(),
+            other => panic!("expected String, got {other:?}"),
+        };
+        assert!(text.contains("Filter"));
+        assert!(text.contains("NodeScan"));
+        assert!(text.contains("Total time: 1.23ms"));
+    }
+}

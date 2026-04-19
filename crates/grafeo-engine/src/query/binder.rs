@@ -2537,4 +2537,206 @@ mod tests {
         let err = binder.bind(&plan).unwrap_err();
         assert!(err.to_string().contains("undefined_vec"));
     }
+
+    /// UNWIND with ORDINALITY and OFFSET binds three variables: the element
+    /// (Any), the 1-based ORDINALITY index (Int64), and the 0-based OFFSET
+    /// index (Int64).
+    #[test]
+    fn test_bind_unwind_ordinality_and_offset() {
+        use crate::query::plan::UnwindOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Unwind(UnwindOp {
+            expression: LogicalExpression::List(vec![
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(1)),
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(2)),
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(3)),
+            ]),
+            variable: "x".to_string(),
+            ordinality_var: Some("i".to_string()),
+            offset_var: Some("j".to_string()),
+            input: Box::new(LogicalOperator::Empty),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+
+        assert!(ctx.contains("x"));
+        assert!(ctx.contains("i"));
+        assert!(ctx.contains("j"));
+        // ORDINALITY and OFFSET are both typed Int64.
+        assert_eq!(ctx.get("i").unwrap().data_type, LogicalType::Int64);
+        assert_eq!(ctx.get("j").unwrap().data_type, LogicalType::Int64);
+        // Element variable is Any (could be any list-element type).
+        assert_eq!(ctx.get("x").unwrap().data_type, LogicalType::Any);
+        // None of the three is a node or edge.
+        for v in ["x", "i", "j"] {
+            let info = ctx.get(v).unwrap();
+            assert!(!info.is_node);
+            assert!(!info.is_edge);
+        }
+    }
+
+    /// MERGE on a relationship pattern validates its source/target variables
+    /// and registers the edge variable. Match-property expressions are validated.
+    #[test]
+    fn test_bind_merge_relationship_properties() {
+        use crate::query::plan::{JoinOp, JoinType, MergeRelationshipOp};
+
+        // Build a plan with two bound nodes (a, b) via a cross-join NodeScans,
+        // then MERGE a WORKS relationship between them with a `start` property.
+        let plan = LogicalPlan::new(LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".to_string(),
+            source_variable: "a".to_string(),
+            target_variable: "b".to_string(),
+            edge_type: "WORKS".to_string(),
+            match_properties: vec![(
+                "start".to_string(),
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(2026)),
+            )],
+            on_create: vec![],
+            on_match: vec![],
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: Some("Company".to_string()),
+                    input: None,
+                })),
+                join_type: JoinType::Cross,
+                conditions: vec![],
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("a"));
+        assert!(ctx.contains("b"));
+        assert!(ctx.contains("r"));
+        let rel = ctx.get("r").unwrap();
+        assert!(rel.is_edge);
+        assert!(!rel.is_node);
+        assert_eq!(rel.data_type, LogicalType::Edge);
+
+        // Referencing an undefined variable in a match-property should fail.
+        let bad_plan = LogicalPlan::new(LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".to_string(),
+            source_variable: "a".to_string(),
+            target_variable: "b".to_string(),
+            edge_type: "WORKS".to_string(),
+            match_properties: vec![(
+                "start".to_string(),
+                LogicalExpression::Property {
+                    variable: "ghost".to_string(),
+                    property: "year".to_string(),
+                },
+            )],
+            on_create: vec![],
+            on_match: vec![],
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                join_type: JoinType::Cross,
+                conditions: vec![],
+            })),
+        }));
+        let mut binder2 = Binder::new();
+        let err = binder2.bind(&bad_plan).unwrap_err();
+        assert!(err.to_string().contains("Undefined variable 'ghost'"));
+    }
+
+    /// Undefined variable 'xx' when only 'x' is defined produces a
+    /// "Did you mean 'x'?" suggestion in the error message.
+    #[test]
+    fn test_undefined_variable_suggestion() {
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("xx".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Unwind(crate::query::plan::UnwindOp {
+                expression: LogicalExpression::List(vec![LogicalExpression::Literal(
+                    grafeo_common::types::Value::Int64(1),
+                )]),
+                variable: "x".to_string(),
+                ordinality_var: None,
+                offset_var: None,
+                input: Box::new(LogicalOperator::Empty),
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let err = binder.bind(&plan).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Undefined variable 'xx'"), "got: {msg}");
+        assert!(
+            msg.contains("Did you mean 'x'?"),
+            "should suggest the similar variable 'x', got: {msg}"
+        );
+    }
+
+    /// Aggregate registers both aggregate aliases (e.g. `cnt`) and the
+    /// stringified group-by expression ("n.age") so downstream clauses
+    /// (ORDER BY / HAVING / RETURN) can reference them.
+    #[test]
+    fn test_bind_aggregate_group_by_alias() {
+        use crate::query::plan::{AggregateExpr, AggregateFunction, AggregateOp};
+
+        // Aggregate groups by n.age, plus a COUNT(*) aliased as "cnt".
+        // Downstream ORDER BY would reference either "n.age" (group column)
+        // or "cnt" (aggregate alias), so both must end up in the binding
+        // context after binding the Aggregate.
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable("cnt".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Aggregate(AggregateOp {
+                group_by: vec![LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "age".to_string(),
+                }],
+                aggregates: vec![AggregateExpr {
+                    function: AggregateFunction::Count,
+                    expression: None,
+                    expression2: None,
+                    distinct: false,
+                    alias: Some("cnt".to_string()),
+                    percentile: None,
+                    separator: None,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                })),
+                having: None,
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        // Aggregate alias is registered as a variable.
+        assert!(ctx.contains("cnt"), "aggregate alias 'cnt' should be bound");
+        // The group-by output column "n.age" is registered so RETURN /
+        // ORDER BY / HAVING can reference it.
+        assert!(
+            ctx.contains("n.age"),
+            "group-by output column 'n.age' should be registered, got: {:?}",
+            ctx.variable_names()
+        );
+    }
 }

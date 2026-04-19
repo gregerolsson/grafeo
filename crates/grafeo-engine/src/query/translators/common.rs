@@ -120,7 +120,7 @@ pub(crate) fn is_binary_set_function(func: AggregateFunction) -> bool {
 /// checks (`@skip` must not exclude AND `@include` must include).
 ///
 /// Returns `true` if the field should be included, `false` if it should be skipped.
-#[cfg(any(feature = "graphql", test))]
+#[cfg(feature = "graphql")]
 pub(crate) fn graphql_directives_allow(
     directives: &[grafeo_adapters::query::graphql::ast::Directive],
 ) -> bool {

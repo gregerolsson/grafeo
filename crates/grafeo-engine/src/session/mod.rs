@@ -297,6 +297,7 @@ impl Session {
     /// Used by the layered store integration: the session's `store` field is
     /// the overlay `LpgStore` (for MVCC), but reads and writes should route
     /// through the `LayeredStore` (which merges base + overlay).
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
     pub(crate) fn override_stores(
         &mut self,
         read_store: Arc<dyn GraphStore>,

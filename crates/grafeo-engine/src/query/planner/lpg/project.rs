@@ -491,6 +491,21 @@ impl super::Planner {
 
     /// Plans a LIMIT operator.
     pub(super) fn plan_limit(&self, limit: &LimitOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // Top-K optimization: Limit(k) -> Sort(score_fn) -> NodeScan
+        // can be rewritten to VectorScan(k) or TextScan(k). GQL emits the plan as
+        // Limit-above-Sort, so the check belongs here rather than in plan_sort.
+        //
+        // The rewrite is disabled under PROFILE because it fuses three logical
+        // operators into one physical operator without updating the logical tree.
+        // PROFILE walks the logical tree to build its output and would panic on
+        // the entry-count mismatch (see `try_topk_rewrite` docstring).
+        if !self.profiling.get()
+            && let LogicalOperator::Sort(sort) = limit.input.as_ref()
+            && let Some(result) = self.try_topk_rewrite(sort, &limit.count)?
+        {
+            return Ok(result);
+        }
+
         let (input_op, columns) = self.plan_operator(&limit.input)?;
         let schema = self.derive_schema_from_columns(&columns);
         Ok(crate::query::planner::common::build_limit(
@@ -520,11 +535,8 @@ impl super::Planner {
     /// that case we inject a property projection BEFORE the Return so the sort
     /// key is available in the output columns.
     pub(super) fn plan_sort(&self, sort: &SortOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Top-K optimization: Sort(fn) + Limit(k) + NodeScan
-        // can be rewritten to VectorScan(k) or TextScan(k)
-        if let Some(result) = self.try_topk_rewrite(sort)? {
-            return Ok(result);
-        }
+        // Top-K rewrite is wired from plan_limit (the actual plan shape is
+        // Limit-above-Sort), so plan_sort only handles the standard path.
 
         // Collect variable references from an expression tree (e.g., `n` in `labels(n)[0]`).
         fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
@@ -895,46 +907,82 @@ impl super::Planner {
             .collect()
     }
 
-    /// Attempts to rewrite Sort+Limit on a vector/text function into
-    /// a direct index scan that returns results in order.
-    fn try_topk_rewrite(&self, sort: &SortOp) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Must have exactly one sort key
+    /// Attempts to rewrite Limit-above-Sort on a vector/text scoring function
+    /// into a direct index scan that returns results in order.
+    ///
+    /// Called from `plan_limit` when its input is a `Sort`. The expected plan
+    /// shape is `Limit(k) -> Sort(score_fn DESC) -> NodeScan(label)`, optionally
+    /// with a `Return(var)` between Sort and NodeScan (`find_node_scan` walks
+    /// through it). The sort key must be the score function call directly: an
+    /// alias like `... AS rank` followed by `ORDER BY rank` is not currently
+    /// resolved, so the rewrite is skipped in that case.
+    ///
+    /// Caveats:
+    ///
+    /// - **Physical-only**. The logical plan tree is unchanged, so EXPLAIN still
+    ///   prints `Limit/Sort/Return/NodeScan`. PROFILE walks the logical tree and
+    ///   would mismatch the (smaller) physical entry count; the caller in
+    ///   `plan_limit` skips this rewrite when `self.profiling` is set.
+    /// - **Bare scan only**. The rewrite produces a physical operator whose
+    ///   columns are `[NodeId, score]`. If the original tree had a `Return` or
+    ///   `Project` between Sort and NodeScan (which GQL emits for any RETURN
+    ///   clause), substituting the rewrite drops that projection — output rows
+    ///   would contain raw `Int64` NodeIds instead of resolved nodes / mapped
+    ///   columns. To stay correct we therefore require `sort.input` to be a bare
+    ///   NodeScan with no wrapping. In practice that means the rewrite never
+    ///   fires from GQL today; it remains in place for future planner shapes
+    ///   (e.g. an internal rewrite that hoists the projection above Limit).
+    ///
+    /// Both caveats disappear if the rewrite is lifted into the logical
+    /// optimization phase so the two trees stay in sync.
+    fn try_topk_rewrite(
+        &self,
+        sort: &SortOp,
+        count: &crate::query::plan::CountExpr,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         if sort.keys.len() != 1 {
             return Ok(None);
         }
         let sort_key = &sort.keys[0];
 
-        // Input must be Limit (Sort wraps Limit in the AST)
-        let LogicalOperator::Limit(limit) = sort.input.as_ref() else {
-            return Ok(None);
-        };
-        // Parameter-based limits can't be used for top-K rewrite at plan time
-        let crate::query::plan::CountExpr::Literal(k) = &limit.count else {
-            return Ok(None); // Non-constant limit
-        };
-        let k = *k;
+        // All remaining work is index-specific; skip when no index feature is compiled in.
+        #[cfg(any(feature = "vector-index", feature = "text-index"))]
+        {
+            let crate::query::plan::CountExpr::Literal(k) = count else {
+                return Ok(None);
+            };
+            let k = *k;
 
-        // Walk through the Limit's input to find a NodeScan
-        let Some((scan_var, scan_label)) = find_node_scan(&limit.input) else {
-            return Ok(None);
-        };
-        let Some(ref label) = scan_label else {
-            return Ok(None); // No label → can't look up index
-        };
+            // Bare-scan-only guard (see docstring): refuse to fire when there
+            // is any wrapping between Sort and NodeScan, since the rewrite
+            // would silently drop it.
+            let LogicalOperator::NodeScan(scan) = sort.input.as_ref() else {
+                return Ok(None);
+            };
+            let scan_var = scan.variable.clone();
+            let Some(ref label) = scan.label else {
+                return Ok(None);
+            };
 
-        // Sort key must be a vector or text function call
-        match &sort_key.expression {
-            LogicalExpression::FunctionCall { name, args, .. } => match name.as_str() {
-                #[cfg(feature = "vector-index")]
-                "cosine_similarity" | "euclidean_distance" | "dot_product"
-                | "manhattan_distance" => {
-                    self.try_vector_topk(name, args, k, &scan_var, label, sort_key)
-                }
-                #[cfg(feature = "text-index")]
-                "text_score" => self.try_text_topk(args, k, &scan_var, label, sort_key),
+            match &sort_key.expression {
+                LogicalExpression::FunctionCall { name, args, .. } => match name.as_str() {
+                    #[cfg(feature = "vector-index")]
+                    "cosine_similarity" | "euclidean_distance" | "dot_product"
+                    | "manhattan_distance" => {
+                        self.try_vector_topk(name, args, k, &scan_var, label, sort_key)
+                    }
+                    #[cfg(feature = "text-index")]
+                    "text_score" => self.try_text_topk(args, k, &scan_var, label, sort_key),
+                    _ => Ok(None),
+                },
                 _ => Ok(None),
-            },
-            _ => Ok(None),
+            }
+        }
+
+        #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
+        {
+            let _ = (sort_key, count);
+            Ok(None)
         }
     }
 
@@ -989,6 +1037,12 @@ impl super::Planner {
 
         // Check for vector index
         if !self.store.has_vector_index(label, &property) {
+            return Ok(None);
+        }
+
+        // Top-K rewrite needs a resolvable query vector. Fall through
+        // otherwise so the standard Sort + Filter path evaluates per-row.
+        if self.resolve_vector_literal(&query_vector).is_err() {
             return Ok(None);
         }
 
@@ -1047,7 +1101,7 @@ impl super::Planner {
             query: args[1].clone(),
             k: Some(k),
             threshold: None,
-            score_column: Some(format!("_tscore_{}", scan_var)),
+            score_column: Some(text_score_column_name(scan_var, property, &args[1])),
         };
 
         self.plan_operator(&LogicalOperator::TextScan(text_scan))
@@ -1067,47 +1121,114 @@ impl super::Planner {
         expr: &LogicalExpression,
         columns: &[String],
     ) -> Option<String> {
-        if let LogicalExpression::FunctionCall { name, args, .. } = expr {
+        #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
+        {
+            let _ = (expr, columns);
+            None
+        }
+
+        #[cfg(any(feature = "vector-index", feature = "text-index"))]
+        {
+            let LogicalExpression::FunctionCall { name, args, .. } = expr else {
+                return None;
+            };
+
+            #[cfg(feature = "vector-index")]
             let is_vector_fn = matches!(
                 name.as_str(),
                 "cosine_similarity" | "euclidean_distance" | "dot_product" | "manhattan_distance"
             );
-            let is_text_fn = name == "text_score";
+            #[cfg(not(feature = "vector-index"))]
+            let is_vector_fn = false;
 
-            if is_vector_fn || is_text_fn {
-                // The first arg is the property access n.prop; variable is the
-                // node variable whose score column was projected by the scan.
-                if let Some(LogicalExpression::Property {
-                    variable, property, ..
-                }) = args.first()
-                {
-                    let score_col = if is_vector_fn {
-                        let metric_tag = match name.as_str() {
-                            "cosine_similarity" => "cos",
-                            "euclidean_distance" => "euc",
-                            "dot_product" => "dot",
-                            "manhattan_distance" => "man",
-                            _ => "cos",
-                        };
-                        format!("_vscore_{}_{}_{}", metric_tag, property, variable)
-                    } else {
-                        format!("_tscore_{}", variable)
-                    };
-                    if columns.contains(&score_col) {
-                        return Some(score_col);
-                    }
+            #[cfg(feature = "text-index")]
+            let is_text_fn = name == "text_score";
+            #[cfg(not(feature = "text-index"))]
+            let is_text_fn = false;
+
+            if !(is_vector_fn || is_text_fn) {
+                return None;
+            }
+
+            // The first arg is the property access n.prop; variable is the
+            // node variable whose score column was projected by the scan.
+            // args[1] is the query expression, which is part of the column
+            // name so a different query (e.g. $q2 instead of $q1) against
+            // the same property does not reuse the wrong score.
+            let (Some(LogicalExpression::Property { variable, property }), Some(query)) =
+                (args.first(), args.get(1))
+            else {
+                return None;
+            };
+
+            #[cfg(feature = "vector-index")]
+            if is_vector_fn {
+                let metric_tag = match name.as_str() {
+                    "cosine_similarity" => "cos",
+                    "euclidean_distance" => "euc",
+                    "dot_product" => "dot",
+                    "manhattan_distance" => "man",
+                    _ => "cos",
+                };
+                let score_col = vector_score_column_name(metric_tag, property, variable, query);
+                if columns.contains(&score_col) {
+                    return Some(score_col);
                 }
             }
+
+            #[cfg(feature = "text-index")]
+            if is_text_fn {
+                let score_col = text_score_column_name(variable, property, query);
+                if columns.contains(&score_col) {
+                    return Some(score_col);
+                }
+            }
+
+            None
         }
-        None
     }
 }
 
-fn find_node_scan(op: &LogicalOperator) -> Option<(String, Option<String>)> {
-    match op {
-        LogicalOperator::NodeScan(scan) => Some((scan.variable.clone(), scan.label.clone())),
-        LogicalOperator::Return(ret) => find_node_scan(&ret.input),
-        LogicalOperator::Project(proj) => find_node_scan(&proj.input),
-        _ => None,
-    }
+// Score-column naming. The hash of the query expression is part of the name so
+// that two scoring calls with different query arguments (e.g. $q1 vs $q2) on
+// the same (variable, property) never collide. Producer and consumer sites
+// must go through these helpers, otherwise `find_projected_score` could hand
+// back a score that was computed against a different query.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+pub(super) fn score_query_hash(query: &LogicalExpression) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    format!("{:?}", query).hash(&mut h);
+    h.finish()
+}
+
+#[cfg(feature = "vector-index")]
+pub(super) fn vector_score_column_name(
+    metric_tag: &str,
+    property: &str,
+    variable: &str,
+    query: &LogicalExpression,
+) -> String {
+    format!(
+        "_vscore_{}_{}_{}_{:x}",
+        metric_tag,
+        property,
+        variable,
+        score_query_hash(query)
+    )
+}
+
+#[cfg(feature = "text-index")]
+pub(super) fn text_score_column_name(
+    variable: &str,
+    property: &str,
+    query: &LogicalExpression,
+) -> String {
+    format!(
+        "_tscore_{}_{}_{:x}",
+        property,
+        variable,
+        score_query_hash(query)
+    )
 }

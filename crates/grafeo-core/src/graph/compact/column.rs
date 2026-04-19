@@ -150,7 +150,7 @@ impl ColumnCodec {
             Self::Float64(vec) => vec.len(),
             Self::Float32Vector { data, dimensions } => {
                 let dims = *dimensions as usize;
-                if dims == 0 { 0 } else { data.len() / dims }
+                data.len().checked_div(dims).unwrap_or(0)
             }
         }
     }
@@ -953,5 +953,142 @@ mod tests {
         };
         assert_eq!(col.get(1), None);
         assert_eq!(col.get_int8_vector(1), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Large Int8Vector column: serde round-trip and random access at scale
+    // -----------------------------------------------------------------------
+
+    /// Build a 100-vector Int8Vector column of dim 384, serialize it via
+    /// `write_to`, deserialize via `read_from`, and verify bit-exact roundtrip
+    /// at representative indices. Covers the Int8Vector branches in `get`,
+    /// `get_int8_vector`, and both `write_to` / `read_from` (discriminant 3).
+    #[test]
+    fn test_column_int8_vector_roundtrip() {
+        let dims: u16 = 384;
+        let rows = 100usize;
+        // Deterministic values: row r, dim d -> ((r * 7 + d) mod 251) - 120.
+        // reason: intentional modular wrap to produce i8 values across the range
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let data: Vec<i8> = (0..rows * dims as usize)
+            .map(|idx| (((idx * 7) % 251) as i64 - 120) as i8)
+            .collect();
+        let col = ColumnCodec::Int8Vector {
+            data: data.clone(),
+            dimensions: dims,
+        };
+        assert_eq!(col.len(), rows);
+
+        // Serialize and deserialize.
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).unwrap();
+        assert_eq!(pos, buf.len(), "read_from should consume the full buffer");
+        assert_eq!(decoded.len(), rows);
+
+        // Check representative indices after the round-trip.
+        for &row in &[0usize, 1, 50, 99] {
+            let decoded_slice = decoded.get_int8_vector(row).unwrap();
+            let start = row * dims as usize;
+            assert_eq!(decoded_slice, &data[start..start + dims as usize]);
+            // Also verify the Value::List decoding path is consistent.
+            let decoded_value = decoded.get(row).unwrap();
+            if let Value::List(items) = decoded_value {
+                assert_eq!(items.len(), dims as usize);
+                assert_eq!(items[0], Value::Int64(i64::from(decoded_slice[0])));
+            } else {
+                panic!("expected Value::List for Int8Vector element");
+            }
+        }
+    }
+
+    /// Index-out-of-bounds and zero-dimensions edge cases for `Int8Vector`
+    /// exercised together. Covers the early-return guards in both `get`
+    /// (lines 62-70) and `get_int8_vector` (lines 100-110).
+    #[test]
+    fn test_column_vector_oob_and_zero_dim() {
+        // OOB: 2 vectors of dim 3, index 5 is well past the end.
+        let col = ColumnCodec::Int8Vector {
+            data: vec![1i8, 2, 3, 4, 5, 6],
+            dimensions: 3,
+        };
+        assert_eq!(col.len(), 2);
+        assert!(col.get(2).is_none());
+        assert!(col.get(5).is_none());
+        assert!(col.get_int8_vector(2).is_none());
+        assert!(col.get_int8_vector(5).is_none());
+
+        // Zero-dim column: len == 0 by construction and no element is accessible.
+        let zero = ColumnCodec::Int8Vector {
+            data: Vec::new(),
+            dimensions: 0,
+        };
+        assert_eq!(zero.len(), 0);
+        assert!(zero.is_empty());
+        assert!(zero.get(0).is_none());
+        assert!(zero.get_int8_vector(0).is_none());
+    }
+
+    /// A `Dict` column queried with `Int64` bounds: both bounds are a type
+    /// mismatch, so `find_in_range` takes the fallback path. Inside the
+    /// fallback, `compare_values(String, Int64)` returns `None` for every row,
+    /// so the result is empty. Covers the non-BitPacked entry into
+    /// `find_in_range_fallback` with a type-mismatched range.
+    #[test]
+    fn test_find_in_range_incompatible_types() {
+        let mut builder = DictionaryBuilder::new();
+        for city in ["Amsterdam", "Berlin", "Paris", "Prague", "Barcelona"] {
+            builder.add(city);
+        }
+        let col = ColumnCodec::Dict(builder.build());
+
+        let result =
+            col.find_in_range(Some(&Value::Int64(0)), Some(&Value::Int64(100)), true, true);
+        assert!(
+            result.is_empty(),
+            "Int64 bounds on a Dict column should yield no matches"
+        );
+    }
+
+    /// A buffer that is truncated mid-codec must return an error, never panic.
+    /// Serializes a valid BitPacked column, then truncates the buffer at each
+    /// interior byte and verifies `read_from` reports an error.
+    #[test]
+    fn test_column_serde_truncated_buffer() {
+        let col = ColumnCodec::BitPacked(BitPackedInts::pack(&[1u64, 2, 3, 4, 5]));
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        assert!(buf.len() > 4);
+
+        // Truncate to zero: missing discriminant.
+        let mut pos = 0;
+        assert!(ColumnCodec::read_from(&[], &mut pos).is_err());
+
+        // Truncate after the discriminant but before bits_per_value.
+        let mut pos = 0;
+        assert!(ColumnCodec::read_from(&buf[..1], &mut pos).is_err());
+
+        // Truncate mid-header (before the row count u32 is complete).
+        let mut pos = 0;
+        assert!(ColumnCodec::read_from(&buf[..3], &mut pos).is_err());
+
+        // Truncate mid-payload (drop the last byte of the packed u64 words).
+        let mut pos = 0;
+        assert!(ColumnCodec::read_from(&buf[..buf.len() - 1], &mut pos).is_err());
+
+        // Unknown discriminant: must return an error, not panic.
+        let mut pos = 0;
+        assert!(ColumnCodec::read_from(&[0xFFu8], &mut pos).is_err());
+
+        // Truncated Int8Vector payload (dimensions OK, length promises more
+        // bytes than exist). Build a minimal header: discriminant=3, dims=2,
+        // data_len=4, but only provide 2 bytes of payload.
+        let mut bad = vec![3u8];
+        bad.extend_from_slice(&2u16.to_le_bytes());
+        bad.extend_from_slice(&4u32.to_le_bytes());
+        bad.extend_from_slice(&[0u8, 0u8]);
+        let mut pos = 0;
+        assert!(ColumnCodec::read_from(&bad, &mut pos).is_err());
     }
 }

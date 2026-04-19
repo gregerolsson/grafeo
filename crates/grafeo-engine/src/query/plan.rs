@@ -350,7 +350,9 @@ impl LogicalOperator {
             Self::MapCollect(op) => op.input.has_mutations(),
             Self::Return(op) => op.input.has_mutations(),
             Self::HorizontalAggregate(op) => op.input.has_mutations(),
-            Self::VectorScan(_) | Self::VectorJoin(_) | Self::TextScan(_) => false,
+            Self::VectorScan(op) => op.input.as_deref().is_some_and(Self::has_mutations),
+            Self::VectorJoin(op) => op.input.has_mutations(),
+            Self::TextScan(_) => false,
 
             // Operators with two children
             Self::Join(op) => op.left.has_mutations() || op.right.has_mutations(),
@@ -954,9 +956,10 @@ impl LogicalOperator {
                 }
             }
             Self::TextScan(op) => {
-                let mode = match op.k {
-                    Some(k) => format!("top-{k}"),
-                    None => "threshold".to_string(),
+                let mode = match (op.k, op.threshold) {
+                    (Some(k), _) => format!("top-{k}"),
+                    (None, Some(t)) => format!("threshold>={t}"),
+                    (None, None) => "default-top-100".to_string(),
                 };
                 let query = fmt_expr(&op.query);
                 let _ = writeln!(
@@ -2440,5 +2443,384 @@ mod tests {
         } else {
             panic!("Expected Return");
         }
+    }
+
+    // ========================================================================
+    // has_mutations(): the index-scan operators carry an `input` subtree
+    // (used to combine graph patterns with vector/text scoring) and must
+    // recurse into it so a mutation buried under one is not misclassified
+    // as read-only.
+    // ========================================================================
+
+    fn read_only_scan() -> LogicalOperator {
+        LogicalOperator::NodeScan(NodeScanOp {
+            variable: "n".into(),
+            label: Some("Article".into()),
+            input: None,
+        })
+    }
+
+    fn mutating_create_node() -> LogicalOperator {
+        LogicalOperator::CreateNode(CreateNodeOp {
+            variable: "n".into(),
+            labels: vec!["Article".into()],
+            properties: vec![],
+            input: None,
+        })
+    }
+
+    #[test]
+    fn test_text_scan_is_leaf_no_mutations() {
+        let op = LogicalOperator::TextScan(TextScanOp {
+            variable: "doc".into(),
+            label: "Article".into(),
+            property: "body".into(),
+            query: LogicalExpression::Literal(Value::String("rust".into())),
+            k: Some(10),
+            threshold: None,
+            score_column: None,
+        });
+        assert!(!op.has_mutations(), "TextScan is a leaf and never mutates");
+    }
+
+    #[test]
+    fn test_vector_scan_no_input_no_mutations() {
+        let op = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "doc".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: Some("Article".into()),
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        });
+        assert!(!op.has_mutations(), "VectorScan with no input is read-only");
+    }
+
+    #[test]
+    fn test_vector_scan_recurses_into_mutating_input() {
+        let op = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "doc".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: Some("Article".into()),
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: Some(Box::new(mutating_create_node())),
+        });
+        assert!(
+            op.has_mutations(),
+            "VectorScan must propagate mutations from its input subtree"
+        );
+    }
+
+    #[test]
+    fn test_vector_scan_recurses_into_read_only_input() {
+        let op = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "doc".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: Some("Article".into()),
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: Some(Box::new(read_only_scan())),
+        });
+        assert!(
+            !op.has_mutations(),
+            "VectorScan with read-only input is read-only"
+        );
+    }
+
+    #[test]
+    fn test_vector_join_recurses_into_mutating_input() {
+        let op = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(mutating_create_node()),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            right_variable: "m".into(),
+            right_property: "embedding".into(),
+            right_label: Some("Movie".into()),
+            index_name: None,
+            k: 10,
+            metric: Some(VectorMetric::Cosine),
+            min_similarity: None,
+            max_distance: None,
+            score_variable: None,
+        });
+        assert!(
+            op.has_mutations(),
+            "VectorJoin must recurse into input, was previously hard-coded false"
+        );
+    }
+
+    #[test]
+    fn test_vector_join_with_read_only_input_is_read_only() {
+        let op = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(read_only_scan()),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(Value::Vector(vec![0.5_f32].into())),
+            right_variable: "m".into(),
+            right_property: "embedding".into(),
+            right_label: Some("Movie".into()),
+            index_name: None,
+            k: 10,
+            metric: Some(VectorMetric::Cosine),
+            min_similarity: None,
+            max_distance: None,
+            score_variable: None,
+        });
+        assert!(!op.has_mutations());
+    }
+
+    // ========================================================================
+    // TextScan EXPLAIN/fmt_tree labeling: distinguishes top-k, threshold, and
+    // the default-top-100 path (when both k and threshold are None).
+    // ========================================================================
+
+    fn text_scan_with_modes(k: Option<usize>, threshold: Option<f64>) -> String {
+        let plan = LogicalPlan::new(LogicalOperator::TextScan(TextScanOp {
+            variable: "doc".into(),
+            label: "Article".into(),
+            property: "body".into(),
+            query: LogicalExpression::Literal(Value::String("rust".into())),
+            k,
+            threshold,
+            score_column: None,
+        }));
+        let mut out = String::new();
+        plan.root.fmt_tree(&mut out, 0);
+        out
+    }
+
+    #[test]
+    fn test_text_scan_display_top_k_mode() {
+        let out = text_scan_with_modes(Some(10), None);
+        assert!(out.contains("top-10"), "expected top-10 in:\n{out}");
+        assert!(
+            !out.contains("threshold"),
+            "top-k mode should not say threshold:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_text_scan_display_threshold_mode() {
+        let out = text_scan_with_modes(None, Some(0.5));
+        assert!(
+            out.contains("threshold>=0.5"),
+            "expected threshold>=0.5 in:\n{out}"
+        );
+        assert!(
+            !out.contains("top-"),
+            "threshold mode should not say top-:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_text_scan_display_default_mode_when_both_none() {
+        let out = text_scan_with_modes(None, None);
+        assert!(
+            out.contains("default-top-100"),
+            "expected default-top-100 (both k and threshold None) in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_text_scan_display_k_takes_precedence_over_threshold() {
+        // When both are set, k wins (top-k mode is what the planner actually executes).
+        let out = text_scan_with_modes(Some(5), Some(0.3));
+        assert!(out.contains("top-5"), "expected top-5 in:\n{out}");
+        assert!(
+            !out.contains("threshold"),
+            "k should take precedence over threshold:\n{out}"
+        );
+    }
+
+    /// EXPLAIN tree for Project(Filter(Expand(NodeScan))) includes each
+    /// operator name, uses 2-space indentation per depth, and calls
+    /// `display_label` semantics (labels appear in the tree).
+    #[test]
+    fn test_explain_tree_basic_operators() {
+        let plan = LogicalOperator::Project(ProjectOp {
+            projections: vec![Projection {
+                expression: LogicalExpression::Property {
+                    variable: "b".into(),
+                    property: "name".into(),
+                },
+                alias: Some("name".into()),
+            }],
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: "b".into(),
+                        property: "age".into(),
+                    }),
+                    op: BinaryOp::Gt,
+                    right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
+                },
+                input: Box::new(LogicalOperator::Expand(ExpandOp {
+                    from_variable: "a".into(),
+                    to_variable: "b".into(),
+                    edge_variable: None,
+                    direction: ExpandDirection::Outgoing,
+                    edge_types: vec!["KNOWS".into()],
+                    min_hops: 1,
+                    max_hops: Some(1),
+                    input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "a".into(),
+                        label: Some("Person".into()),
+                        input: None,
+                    })),
+                    path_alias: None,
+                    path_mode: PathMode::Walk,
+                })),
+                pushdown_hint: Some(PushdownHint::LabelFirst),
+            })),
+            pass_through_input: false,
+        });
+
+        let tree = plan.explain_tree();
+
+        // Each operator appears with the expected name
+        assert!(tree.contains("Project"), "missing Project in:\n{tree}");
+        assert!(tree.contains("Filter"), "missing Filter in:\n{tree}");
+        assert!(tree.contains("Expand"), "missing Expand in:\n{tree}");
+        assert!(tree.contains("NodeScan"), "missing NodeScan in:\n{tree}");
+
+        // Indentation: Project at depth 0, Filter at depth 1 (2 spaces),
+        // Expand at depth 2 (4 spaces), NodeScan at depth 3 (6 spaces).
+        assert!(tree.starts_with("Project"));
+        assert!(
+            tree.contains("\n  Filter"),
+            "Filter should be indented by 2 spaces"
+        );
+        assert!(
+            tree.contains("\n    Expand"),
+            "Expand should be indented by 4 spaces"
+        );
+        assert!(
+            tree.contains("\n      NodeScan"),
+            "NodeScan should be indented by 6 spaces"
+        );
+
+        // Labels from display_label-style rendering appear: Person label,
+        // KNOWS edge type, label-first pushdown hint, projection alias.
+        assert!(tree.contains("Person"));
+        assert!(tree.contains("KNOWS"));
+        assert!(tree.contains("[label-first]"));
+        assert!(tree.contains("AS name"));
+    }
+
+    /// `has_mutations` recurses through Project/Filter into their inputs.
+    #[test]
+    fn test_has_mutations_recursive() {
+        // Project(Filter(CreateNode)) ⇒ true
+        let with_mutation = LogicalOperator::Project(ProjectOp {
+            projections: vec![],
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Literal(Value::Bool(true)),
+                input: Box::new(LogicalOperator::CreateNode(CreateNodeOp {
+                    variable: "n".into(),
+                    labels: vec!["Person".into()],
+                    properties: vec![],
+                    input: None,
+                })),
+                pushdown_hint: None,
+            })),
+            pass_through_input: false,
+        });
+        assert!(with_mutation.has_mutations());
+
+        // Project(Filter(NodeScan)) ⇒ false
+        let read_only = LogicalOperator::Project(ProjectOp {
+            projections: vec![],
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Literal(Value::Bool(true)),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".into(),
+                    label: None,
+                    input: None,
+                })),
+                pushdown_hint: None,
+            })),
+            pass_through_input: false,
+        });
+        assert!(!read_only.has_mutations());
+    }
+
+    /// Union returns all its branches in order via `children()`, and
+    /// Apply returns both input and subplan.
+    #[test]
+    fn test_children_collection_for_union_and_apply() {
+        let leaf = |label: &str| {
+            LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".into(),
+                label: Some(label.into()),
+                input: None,
+            })
+        };
+
+        let union = LogicalOperator::Union(UnionOp {
+            inputs: vec![leaf("Amsterdam"), leaf("Berlin"), leaf("Prague")],
+        });
+        let children = union.children();
+        assert_eq!(children.len(), 3);
+        match children[0] {
+            LogicalOperator::NodeScan(s) => assert_eq!(s.label.as_deref(), Some("Amsterdam")),
+            _ => panic!("Expected NodeScan"),
+        }
+        match children[2] {
+            LogicalOperator::NodeScan(s) => assert_eq!(s.label.as_deref(), Some("Prague")),
+            _ => panic!("Expected NodeScan"),
+        }
+
+        let apply = LogicalOperator::Apply(ApplyOp {
+            input: Box::new(leaf("Person")),
+            subplan: Box::new(leaf("Company")),
+            shared_variables: vec![],
+            optional: false,
+        });
+        let apply_children = apply.children();
+        assert_eq!(apply_children.len(), 2);
+        match apply_children[0] {
+            LogicalOperator::NodeScan(s) => assert_eq!(s.label.as_deref(), Some("Person")),
+            _ => panic!("Expected input NodeScan"),
+        }
+        match apply_children[1] {
+            LogicalOperator::NodeScan(s) => assert_eq!(s.label.as_deref(), Some("Company")),
+            _ => panic!("Expected subplan NodeScan"),
+        }
+    }
+
+    /// Unresolved `CountExpr::Parameter` falls back to a default estimate of 10.0.
+    #[test]
+    fn test_count_expr_parameter_default() {
+        let param = CountExpr::Parameter("limit".to_string());
+        assert!((param.estimate() - 10.0).abs() < f64::EPSILON);
+
+        let literal = CountExpr::Literal(42);
+        assert!((literal.estimate() - 42.0).abs() < f64::EPSILON);
+        assert_eq!(literal.value(), 42);
+        assert_eq!(literal.try_value(), Ok(42));
+
+        // try_value returns an error for unresolved parameters,
+        // preserving the parameter name in the message.
+        let err = param.try_value().unwrap_err();
+        assert!(err.contains("$limit"), "error should mention $limit: {err}");
+
+        // Display/Equality sanity
+        assert_eq!(format!("{literal}"), "42");
+        assert_eq!(format!("{param}"), "$limit");
+        assert!(literal == 42usize);
     }
 }

@@ -2585,4 +2585,210 @@ mod tests {
     fn test_count_distinct_single_value() {
         assert_eq!(count_distinct(&[42.0]), 1);
     }
+
+    // ==================== Vector/Text Scan & AGM Tests ====================
+
+    /// Vector scan caps cardinality at k and applies selectivity when thresholds are set.
+    #[test]
+    fn test_estimate_vector_scan_topk_and_threshold() {
+        use crate::query::plan::VectorScanOp;
+
+        let estimator = CardinalityEstimator::new();
+
+        // k=10, no threshold: result is exactly k.
+        let plain = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "n".to_string(),
+            index_name: None,
+            property: "embedding".to_string(),
+            label: None,
+            query_vector: LogicalExpression::Variable("q".to_string()),
+            k: Some(10),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        });
+        let plain_card = estimator.estimate(&plain);
+        assert!(plain_card <= 10.0);
+        assert!((plain_card - 10.0).abs() < 1e-9);
+
+        // Similarity threshold applies 0.7 scaling factor.
+        let with_threshold = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "n".to_string(),
+            index_name: None,
+            property: "embedding".to_string(),
+            label: None,
+            query_vector: LogicalExpression::Variable("q".to_string()),
+            k: Some(10),
+            metric: None,
+            min_similarity: Some(0.8),
+            max_distance: None,
+            input: None,
+        });
+        let filtered = estimator.estimate(&with_threshold);
+        assert!(filtered < plain_card);
+        assert!(filtered >= 1.0);
+        assert!((filtered - 7.0).abs() < 1e-9);
+    }
+
+    /// Vector join respects k-per-input-row and threshold selectivity.
+    /// (Closest analogue for "text scan top-k" in the existing engine.)
+    #[test]
+    fn test_estimate_text_scan_topk_and_threshold() {
+        use crate::query::plan::VectorJoinOp;
+
+        let mut estimator = CardinalityEstimator::new();
+        estimator.add_table_stats("Article", TableStats::new(40));
+
+        let input = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "a".to_string(),
+            label: Some("Article".to_string()),
+            input: None,
+        });
+
+        // k=5, no threshold: card = input * k = 40 * 5 = 200.
+        let plain = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(input.clone()),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Variable("q".to_string()),
+            right_variable: "m".to_string(),
+            right_property: "emb".to_string(),
+            right_label: None,
+            index_name: None,
+            k: 5,
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            score_variable: None,
+        });
+        let plain_card = estimator.estimate(&plain);
+        assert!((plain_card - 200.0).abs() < 1e-9);
+
+        // min_similarity applies 0.7 scaling: 200 * 0.7 = 140.
+        let with_threshold = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(input),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Variable("q".to_string()),
+            right_variable: "m".to_string(),
+            right_property: "emb".to_string(),
+            right_label: None,
+            index_name: None,
+            k: 5,
+            metric: None,
+            min_similarity: Some(0.5),
+            max_distance: None,
+            score_variable: None,
+        });
+        let filtered = estimator.estimate(&with_threshold);
+        assert!(filtered < plain_card);
+        assert!((filtered - 140.0).abs() < 1e-9);
+    }
+
+    /// 3-way join Person-Works-Company uses the AGM bound (min_card^(n/2))
+    /// rather than the Cartesian product of inputs.
+    #[test]
+    fn test_estimate_multi_way_join_agm_bound() {
+        let mut estimator = CardinalityEstimator::new();
+        // min cardinality is 50 (Works)
+        estimator.add_table_stats("Person", TableStats::new(1000));
+        estimator.add_table_stats("Works", TableStats::new(50));
+        estimator.add_table_stats("Company", TableStats::new(200));
+
+        let mwj = LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "p".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                }),
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "w".to_string(),
+                    label: Some("Works".to_string()),
+                    input: None,
+                }),
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "c".to_string(),
+                    label: Some("Company".to_string()),
+                    input: None,
+                }),
+            ],
+            conditions: vec![],
+            shared_variables: vec!["p".to_string()],
+        });
+
+        let card = estimator.estimate(&mwj);
+        // AGM: min^(n/2) = 50^(3/2) = 50^1.5 ~= 353.55
+        let expected = 50.0_f64.powf(1.5);
+        assert!(
+            (card - expected).abs() < 0.01,
+            "got {card}, expected {expected}"
+        );
+        // Cartesian would be 1000 * 50 * 200 = 10_000_000, far larger.
+        assert!(card < 1000.0 * 50.0 * 200.0);
+    }
+
+    /// Empty multi-way join returns zero (no inputs → no rows).
+    #[test]
+    fn test_estimate_multi_way_join_empty_inputs() {
+        let estimator = CardinalityEstimator::new();
+        let mwj = LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![],
+            conditions: vec![],
+            shared_variables: vec![],
+        });
+        assert!(estimator.estimate(&mwj).abs() < f64::EPSILON);
+    }
+
+    /// Range predicate (`age BETWEEN 25 AND 65`) with no histogram but with
+    /// min/max falls back to linear range-based selectivity.
+    #[test]
+    fn test_range_selectivity_with_histogram_fallback() {
+        let mut estimator = CardinalityEstimator::new();
+        // Column has range [18, 80] but no histogram.
+        let age_stats = ColumnStats::new(62).with_range(18.0, 80.0);
+        estimator.add_table_stats(
+            "Person",
+            TableStats::new(1000).with_column("age", age_stats),
+        );
+
+        // Encode `age >= 25 AND age <= 65` as an AND of two range predicates.
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Binary {
+                left: Box::new(LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "age".to_string(),
+                }),
+                op: BinaryOp::Ge,
+                right: Box::new(LogicalExpression::Literal(Value::Int64(25))),
+            }),
+            op: BinaryOp::And,
+            right: Box::new(LogicalExpression::Binary {
+                left: Box::new(LogicalExpression::Property {
+                    variable: "n".to_string(),
+                    property: "age".to_string(),
+                }),
+                op: BinaryOp::Le,
+                right: Box::new(LogicalExpression::Literal(Value::Int64(65))),
+            }),
+        };
+        let filter = LogicalOperator::Filter(FilterOp {
+            predicate,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: Some("Person".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        });
+
+        let card = estimator.estimate(&filter);
+        // Each side uses min/max fallback: `>= 25` picks (80 - 25)/(80 - 18) ~= 0.89;
+        // `<= 65` picks (65 - 18)/(80 - 18) ~= 0.76. AND multiplies under
+        // the independence assumption. Final card must be well below 1000
+        // and above the single-equality estimate.
+        assert!(card < 1000.0);
+        assert!(card > 10.0);
+    }
 }

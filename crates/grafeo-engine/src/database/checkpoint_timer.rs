@@ -188,6 +188,10 @@ impl CheckpointTimer {
             || 0,
         );
 
+        #[allow(
+            unused_mut,
+            reason = "mut needed when triple-store/ring-index/vector-index/text-index features push sections"
+        )]
         let mut sections: Vec<Box<dyn grafeo_common::storage::Section>> =
             vec![Box::new(catalog_section), Box::new(lpg)];
 

@@ -1789,12 +1789,9 @@ mod tests {
     fn test_property_storage_with_compression() {
         let storage = PropertyStorage::with_compression(CompressionMode::Auto);
 
-        for i in 0..100 {
-            storage.set(
-                NodeId::new(i),
-                PropertyKey::new("age"),
-                Value::Int64(20 + (i as i64 % 50)),
-            );
+        for i in 0u64..100 {
+            let age = 20 + i64::try_from(i % 50).unwrap();
+            storage.set(NodeId::new(i), PropertyKey::new("age"), Value::Int64(age));
         }
 
         // Values should still be readable
@@ -1814,8 +1811,11 @@ mod tests {
             PropertyColumn::with_compression(CompressionMode::Auto);
 
         // Add many sequential integers
-        for i in 0..2000 {
-            col.set(NodeId::new(i), Value::Int64(1000 + i as i64));
+        for i in 0u64..2000 {
+            col.set(
+                NodeId::new(i),
+                Value::Int64(1000 + i64::try_from(i).unwrap()),
+            );
         }
 
         // Should have triggered compression at some point
@@ -1855,8 +1855,8 @@ mod tests {
             PropertyColumn::with_compression(CompressionMode::Auto);
 
         // Add booleans
-        for i in 0..2000 {
-            col.set(NodeId::new(i as u64), Value::Bool(i % 2 == 0));
+        for i in 0u64..2000 {
+            col.set(NodeId::new(i), Value::Bool(i % 2 == 0));
         }
 
         // Verify total count
@@ -1872,8 +1872,8 @@ mod tests {
         let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
 
         // Add fewer values than the threshold
-        for i in 0..100 {
-            col.set(NodeId::new(i), Value::Int64(i as i64));
+        for i in 0u64..100 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
         }
 
         // Force compression
@@ -1888,8 +1888,8 @@ mod tests {
     fn test_compression_stats() {
         let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
 
-        for i in 0..50 {
-            col.set(NodeId::new(i), Value::Int64(i as i64));
+        for i in 0u64..50 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
         }
 
         let stats = col.compression_stats();
@@ -1901,11 +1901,11 @@ mod tests {
     fn test_storage_compression_stats() {
         let storage = PropertyStorage::with_compression(CompressionMode::Auto);
 
-        for i in 0..100 {
+        for i in 0u64..100 {
             storage.set(
                 NodeId::new(i),
                 PropertyKey::new("age"),
-                Value::Int64(i as i64),
+                Value::Int64(i64::try_from(i).unwrap()),
             );
             storage.set(
                 NodeId::new(i),
@@ -1924,11 +1924,11 @@ mod tests {
     fn test_memory_usage() {
         let storage = PropertyStorage::new();
 
-        for i in 0..100 {
+        for i in 0u64..100 {
             storage.set(
                 NodeId::new(i),
                 PropertyKey::new("value"),
-                Value::Int64(i as i64),
+                Value::Int64(i64::try_from(i).unwrap()),
             );
         }
 

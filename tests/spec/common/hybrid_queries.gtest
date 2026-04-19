@@ -1,0 +1,165 @@
+# Common: Unified hybrid queries (BM25 text + vector + graph in one query)
+#
+# Covers: text_score / text_match per-row evaluation and pushdown,
+# CREATE TEXT INDEX DDL via GQL, threshold and "no index" fallthrough
+# behavior, and AND/OR compound predicates that mix text and vector
+# scoring on a single label scan.
+
+meta:
+  language: gql
+  model: lpg
+  section: hybrid-queries
+  title: Unified hybrid queries
+  dataset: empty
+  requires: [text-index, vector-index]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # CREATE TEXT INDEX DDL
+  # ---------------------------------------------------------------------------
+
+  - name: create_text_index_basic
+    setup:
+      - "INSERT (:Article {body: 'attention mechanisms in graph neural networks'})"
+      - "INSERT (:Article {body: 'rust database internals with mvcc'})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "MATCH (n:Article) RETURN count(n) AS cnt"
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # text_match: boolean predicate (BM25 score > 0)
+  # ---------------------------------------------------------------------------
+
+  - name: text_match_finds_matching_doc
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'rust database internals'})"
+      - "INSERT (:Article {title: 'A2', body: 'attention mechanisms in graph nets'})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "MATCH (n:Article) WHERE text_match(n.body, 'rust database') RETURN n.title"
+    expect:
+      rows:
+        - [A1]
+
+  - name: text_match_with_no_match_is_empty
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'rust database'})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "MATCH (n:Article) WHERE text_match(n.body, 'transformer architectures') RETURN n.title"
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # text_score: numeric BM25 score in WHERE
+  # ---------------------------------------------------------------------------
+
+  - name: text_score_above_threshold_in_where
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'attention mechanisms in graph neural networks'})"
+      - "INSERT (:Article {title: 'A2', body: 'rust database internals with mvcc'})"
+      - "INSERT (:Article {title: 'A3', body: 'attention transformer models'})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "MATCH (n:Article) WHERE text_score(n.body, 'attention') > 0.0 RETURN n.title ORDER BY n.title"
+    expect:
+      ordered: true
+      rows:
+        - [A1]
+        - [A3]
+
+  # text_score with `>=` triggers the same pushdown path as `>` and must be
+  # accepted by the predicate extractor (regression for BinaryOp::Ge).
+  # Use a non-zero threshold so per-row eval and pushdown agree (zero-score
+  # documents aren't iterated by threshold-mode TextScan).
+  - name: text_score_ge_operator_pushdown
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'rust database engine internals'})"
+      - "INSERT (:Article {title: 'A2', body: 'rust web framework'})"
+      - "INSERT (:Article {title: 'A3', body: 'cooking recipes for beginners'})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "MATCH (n:Article) WHERE text_score(n.body, 'rust') >= 0.001 RETURN count(n) AS c"
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # text_score in RETURN: per-row evaluation, score projected to user
+  # ---------------------------------------------------------------------------
+
+  - name: text_score_projected_in_return
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'attention is all you need'})"
+      - "INSERT (:Article {title: 'A2', body: 'cooking rice for beginners'})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "MATCH (n:Article) WHERE text_score(n.body, 'attention') > 0.0 RETURN n.title"
+    expect:
+      rows:
+        - [A1]
+
+  # ---------------------------------------------------------------------------
+  # No-index fallthrough: text_score returns 0.0 when no index exists,
+  # so the > 0.0 predicate is false for every row (per-row eval, no error).
+  # This guards Decision D1 (symmetric fallback) in the implementation.
+  # ---------------------------------------------------------------------------
+
+  - name: text_score_without_index_returns_no_rows
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'attention mechanisms'})"
+    query: |
+      MATCH (n:Article)
+      WHERE text_score(n.body, 'attention') > 0.0
+      RETURN n.title
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # AND compound: vector similarity AND text match on the same label scan.
+  # Both index scans run; the planner intersects via hash-join.
+  # ---------------------------------------------------------------------------
+
+  - name: compound_vector_and_text_intersect
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'attention mechanisms', embedding: vector([0.9, 0.1, 0.0])})"
+      - "INSERT (:Article {title: 'A2', body: 'rust database', embedding: vector([0.9, 0.1, 0.0])})"
+      - "INSERT (:Article {title: 'A3', body: 'attention transformer', embedding: vector([0.0, 1.0, 0.0])})"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - "CREATE INDEX article_emb FOR (n:Article) ON (n.embedding) USING VECTOR {dimensions: 3, metric: 'cosine'}"
+      - |
+        MATCH (n:Article)
+        WHERE cosine_similarity(n.embedding, [0.9, 0.1, 0.0]) > 0.5
+          AND text_match(n.body, 'attention')
+        RETURN n.title
+    expect:
+      # A1 matches both; A2 matches vector but not text; A3 matches text but not vector.
+      rows:
+        - [A1]
+
+  # ---------------------------------------------------------------------------
+  # Graph traversal + text predicate: per-row eval (pushdown disabled when
+  # the scan is no longer a bare label scan).
+  # ---------------------------------------------------------------------------
+
+  - name: graph_traversal_plus_text_predicate
+    setup:
+      - "INSERT (:User {name: 'Alix'})"
+      - "INSERT (:Article {title: 'A1', body: 'attention mechanisms'})"
+      - "INSERT (:Article {title: 'A2', body: 'rust database'})"
+      - "MATCH (u:User {name: 'Alix'}), (a:Article {title: 'A1'}) INSERT (u)-[:WROTE]->(a)"
+      - "MATCH (u:User {name: 'Alix'}), (a:Article {title: 'A2'}) INSERT (u)-[:WROTE]->(a)"
+    statements:
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+      - |
+        MATCH (u:User {name: 'Alix'})-[:WROTE]->(a:Article)
+        WHERE text_score(a.body, 'attention') > 0.0
+        RETURN a.title
+    expect:
+      rows:
+        - [A1]

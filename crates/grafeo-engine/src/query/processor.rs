@@ -709,6 +709,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
 
 /// Formats a physical EXPLAIN result showing both the logical plan and the
 /// physical operator names mapped to each logical operator.
+#[cfg(feature = "triple-store")]
 pub(crate) fn physical_explain_result(
     plan: &LogicalPlan,
     entries: Vec<crate::query::profile::ProfileEntry>,
@@ -730,6 +731,7 @@ pub(crate) fn physical_explain_result(
 }
 
 /// Recursively formats a physical plan node showing operator name and label.
+#[cfg(feature = "triple-store")]
 fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileNode, depth: usize) {
     use std::fmt::Write;
     let indent = "  ".repeat(depth);

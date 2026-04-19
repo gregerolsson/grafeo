@@ -1976,6 +1976,180 @@ mod tests {
         assert_eq!(ids.len(), 2);
     }
 
+    // -------------------------------------------------------------------
+    // from_graph_store: vector-valued properties fall back to Dict
+    // -------------------------------------------------------------------
+
+    /// Nodes with `Value::Vector` properties of different dimensions produce
+    /// a Dict column (vectors are not an inferred type). Covers the Dict
+    /// fallback for "other" values in `infer_type_from_values` and the
+    /// per-row Display serialization inside the Dict build path.
+    #[test]
+    fn test_from_graph_store_mixed_vector_dims() {
+        use crate::graph::lpg::LpgStore;
+        use std::sync::Arc;
+
+        let store = LpgStore::new().unwrap();
+
+        // Two nodes with differently-dimensioned embeddings.
+        let alix = store.create_node(&["Doc"]);
+        let short: Arc<[f32]> = Arc::from([0.1f32, 0.2, 0.3].as_slice());
+        store.set_node_property(alix, "embedding", Value::Vector(short));
+
+        let gus = store.create_node(&["Doc"]);
+        let long: Arc<[f32]> = Arc::from([0.4f32, 0.5, 0.6, 0.7, 0.8].as_slice());
+        store.set_node_property(gus, "embedding", Value::Vector(long));
+
+        let compact = from_graph_store(&store).unwrap();
+        let ids = compact.nodes_by_label("Doc");
+        assert_eq!(ids.len(), 2);
+
+        // Both embeddings should be readable as strings (Dict fallback).
+        let mut seen_vec_strings = 0usize;
+        for &id in &ids {
+            let val = compact
+                .get_node_property(id, &PropertyKey::new("embedding"))
+                .expect("embedding property missing");
+            match val {
+                Value::String(s) => {
+                    // Display format is lowercase "vector([...])"; compare
+                    // case-insensitively to be resilient to formatting tweaks.
+                    let lower = s.to_lowercase();
+                    assert!(
+                        lower.contains("vector"),
+                        "dict-encoded vector should include the vector tag: {s}"
+                    );
+                    seen_vec_strings += 1;
+                }
+                other => panic!("expected Dict fallback (String), got {other:?}"),
+            }
+        }
+        assert_eq!(seen_vec_strings, 2);
+    }
+
+    /// A `Value::Vector` with consistent dimensions across nodes round-trips
+    /// through the Float32Vector column codec and comes back as `Value::Vector`
+    /// with the original dimensions and values.
+    #[test]
+    fn test_from_graph_store_float32_vector() {
+        use crate::graph::lpg::LpgStore;
+        use std::sync::Arc;
+
+        let store = LpgStore::new().unwrap();
+        let expected: [f32; 4] = [0.1, 0.2, 0.3, 0.4];
+        for name in ["Alix", "Gus", "Vincent"] {
+            let id = store.create_node(&["Doc"]);
+            store.set_node_property(id, "name", Value::from(name));
+            let emb: Arc<[f32]> = Arc::from(expected.as_slice());
+            store.set_node_property(id, "embedding", Value::Vector(emb));
+        }
+
+        let compact = from_graph_store(&store).unwrap();
+        let ids = compact.nodes_by_label("Doc");
+        assert_eq!(ids.len(), 3);
+
+        for &id in &ids {
+            let v = compact
+                .get_node_property(id, &PropertyKey::new("embedding"))
+                .expect("embedding missing");
+            match v {
+                Value::Vector(data) => {
+                    assert_eq!(&*data, &expected, "unexpected vector contents");
+                }
+                other => panic!("expected Value::Vector, got {other:?}"),
+            }
+        }
+    }
+
+    /// Nodes where only ~10% of them carry a given property exercise the
+    /// null-padding path in `from_graph_store`. Covers the `push(Value::Null)`
+    /// fill loops that keep column lengths aligned to row count.
+    #[test]
+    fn test_from_graph_store_all_null() {
+        use crate::graph::lpg::LpgStore;
+
+        let store = LpgStore::new().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..20 {
+            let nid = store.create_node(&["Item"]);
+            // Only 2 out of 20 nodes (10%) have "flag" set.
+            if i == 3 || i == 17 {
+                store.set_node_property(nid, "flag", Value::Int64(i64::from(i)));
+            }
+            ids.push(nid);
+        }
+
+        let compact = from_graph_store(&store).unwrap();
+        let rows = compact.nodes_by_label("Item");
+        assert_eq!(rows.len(), 20);
+
+        // Count rows whose "flag" decoded value is nonzero (BitPacked null
+        // padding decodes as 0). We expect exactly 2.
+        let mut nonzero = 0usize;
+        for &id in &rows {
+            if let Some(Value::Int64(v)) = compact.get_node_property(id, &PropertyKey::new("flag"))
+                && v > 0
+            {
+                nonzero += 1;
+            }
+        }
+        assert_eq!(
+            nonzero, 2,
+            "only 2 nodes had a real 'flag' value; the rest should be zero-padded"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Zone map boundary cases
+    // -------------------------------------------------------------------
+
+    /// Zone map for a u64 column whose maximum equals `i64::MAX` exactly
+    /// should keep both bounds (boundary-inclusive), while a max one above
+    /// `i64::MAX` drops them. Guards against off-by-one errors in the
+    /// overflow check.
+    #[test]
+    fn test_compute_zone_map_i64_boundary() {
+        // Exactly at the boundary: keep bounds.
+        let at_boundary = vec![0u64, 100, i64::MAX as u64];
+        let zm = compute_zone_map_u64(&at_boundary);
+        assert_eq!(zm.min, Some(Value::Int64(0)));
+        assert_eq!(zm.max, Some(Value::Int64(i64::MAX)));
+        assert_eq!(zm.row_count, 3);
+
+        // One above the boundary: drop bounds, preserve row_count.
+        let above_boundary = vec![0u64, i64::MAX as u64 + 1];
+        let zm = compute_zone_map_u64(&above_boundary);
+        assert!(zm.min.is_none());
+        assert!(zm.max.is_none());
+        assert_eq!(zm.row_count, 2);
+    }
+
+    /// Zone map for a mixed true/false bool column: min is false, max is
+    /// true. Distinct from the existing `test_zone_map_bool_mixed` in that
+    /// the ratio of true/false is skewed to sanity-check the any()-based
+    /// implementation.
+    #[test]
+    fn test_compute_zone_map_bool() {
+        // Heavily skewed: one true, many false.
+        let mostly_false = vec![false; 9]
+            .into_iter()
+            .chain(std::iter::once(true))
+            .collect::<Vec<_>>();
+        let zm = compute_zone_map_bool(&mostly_false);
+        assert_eq!(zm.min, Some(Value::Bool(false)));
+        assert_eq!(zm.max, Some(Value::Bool(true)));
+        assert_eq!(zm.row_count, 10);
+
+        // Heavily skewed the other way: one false, many true.
+        let mostly_true = std::iter::once(false)
+            .chain(std::iter::repeat_n(true, 9))
+            .collect::<Vec<_>>();
+        let zm = compute_zone_map_bool(&mostly_true);
+        assert_eq!(zm.min, Some(Value::Bool(false)));
+        assert_eq!(zm.max, Some(Value::Bool(true)));
+        assert_eq!(zm.row_count, 10);
+    }
+
     #[test]
     fn test_from_graph_store_multi_label_sorted_key() {
         use crate::graph::lpg::LpgStore;
