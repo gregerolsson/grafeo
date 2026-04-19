@@ -814,7 +814,17 @@ impl Planner {
         scan: &VectorScanOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         use grafeo_core::execution::operators::VectorScanOperator;
-        use grafeo_core::index::vector::DistanceMetric;
+        use grafeo_core::index::vector::{DistanceMetric, VectorIndexKind};
+
+        // Hybrid shape `VectorScan(input=graph_pattern)` is not supported by
+        // the physical VectorScanOperator: it has no input slot and would
+        // silently drop upstream bindings. Reject rather than mis-plan;
+        // callers should build a VectorJoin for this case.
+        if scan.input.is_some() {
+            return Err(Error::Internal(
+                "VectorScan with an input subtree is not supported, use VectorJoin for hybrid graph+vector queries".to_string(),
+            ));
+        }
 
         // Resolve the query vector expression to Vec<f32>
         let query_vec = self.resolve_vector_literal(&scan.query_vector)?;
@@ -829,32 +839,28 @@ impl Planner {
 
         let k = scan.k.unwrap_or(usize::MAX);
 
-        // Try HNSW-accelerated path when an index handle is available.
-        // The with_metric() builder ensures threshold comparisons use the
-        // correct distance scale regardless of with_index()'s default.
+        // Try the HNSW-accelerated path when an index exists AND the requested
+        // metric matches the index's metric. The index ranks by its own
+        // metric, so using it with a different metric would return the wrong
+        // neighbors (with_metric only rescales threshold comparisons).
         let mut operator = if let Some(ref label) = scan.label {
-            if let Some(handle) = self.store.get_vector_index_handle(label, &scan.property) {
-                use grafeo_core::index::vector::VectorIndexKind;
-                if let Ok(index) = handle.downcast::<VectorIndexKind>() {
-                    VectorScanOperator::with_index(
-                        Arc::clone(&self.store),
-                        index,
-                        query_vec.clone(),
-                        k,
-                    )
-                    .with_property(&scan.property)
-                    .with_label(label)
-                    .with_metric(metric)
-                } else {
-                    VectorScanOperator::brute_force(
-                        Arc::clone(&self.store),
-                        &scan.property,
-                        query_vec.clone(),
-                        k,
-                        metric,
-                    )
-                    .with_label(label)
-                }
+            let indexed = self
+                .store
+                .get_vector_index_handle(label, &scan.property)
+                .and_then(|handle| handle.downcast::<VectorIndexKind>().ok())
+                .filter(|index| {
+                    scan.metric.is_none() || index.config().metric == metric
+                });
+            if let Some(index) = indexed {
+                VectorScanOperator::with_index(
+                    Arc::clone(&self.store),
+                    index,
+                    query_vec.clone(),
+                    k,
+                )
+                .with_property(&scan.property)
+                .with_label(label)
+                .with_metric(metric)
             } else {
                 VectorScanOperator::brute_force(
                     Arc::clone(&self.store),
@@ -883,16 +889,18 @@ impl Planner {
         }
 
         let mut columns = vec![scan.variable.clone()];
-        // VectorScan always projects a score column keyed by metric+property
+        // VectorScan always projects a score column keyed by metric+property+query
         let metric_tag = match scan.metric {
             Some(VectorMetric::Cosine) | None => "cos",
             Some(VectorMetric::Euclidean) => "euc",
             Some(VectorMetric::DotProduct) => "dot",
             Some(VectorMetric::Manhattan) => "man",
         };
-        columns.push(format!(
-            "_vscore_{}_{}_{}",
-            metric_tag, scan.property, scan.variable
+        columns.push(project::vector_score_column_name(
+            metric_tag,
+            &scan.property,
+            &scan.variable,
+            &scan.query_vector,
         ));
 
         Ok((Box::new(operator), columns))

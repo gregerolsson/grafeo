@@ -68,7 +68,7 @@ impl super::Planner {
             return Ok(None);
         }
 
-        // Build TextScanOp — always project the score column so downstream
+        // Build TextScanOp. Always project the score column so downstream
         // RETURN/ORDER BY expressions can reference it instead of recomputing.
         let text_scan = super::TextScanOp {
             variable: scan.variable.clone(),
@@ -77,7 +77,10 @@ impl super::Planner {
             query: extracted.query_expr.clone(),
             k: None,
             threshold: Some(extracted.threshold),
-            score_column: Some(format!("_tscore_{}", scan.variable)),
+            score_column: Some(super::project::text_score_column_name(
+                &scan.variable,
+                &extracted.query_expr,
+            )),
         };
 
         // Plan through the TextScan path
@@ -273,7 +276,7 @@ impl super::Planner {
             input: None,
         });
 
-        // Build TextScanOp (threshold mode — always project score column)
+        // Build TextScanOp (threshold mode, always project score column).
         let text_scan_op = LogicalOperator::TextScan(super::TextScanOp {
             variable: scan.variable.clone(),
             property: text_pred.property.clone(),
@@ -281,7 +284,10 @@ impl super::Planner {
             query: text_pred.query_expr.clone(),
             k: None,
             threshold: Some(text_pred.threshold),
-            score_column: Some(format!("_tscore_{}", scan.variable)),
+            score_column: Some(super::project::text_score_column_name(
+                &scan.variable,
+                &text_pred.query_expr,
+            )),
         });
 
         let (left_op, left_cols) = self.plan_operator(&vector_scan_op)?;

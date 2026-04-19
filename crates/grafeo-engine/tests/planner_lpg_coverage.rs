@@ -498,14 +498,14 @@ fn test_resolve_vector_literal_non_literal_falls_through() {
     )
     .unwrap();
 
-    let result = db.session().execute(
-        "MATCH (d:Doc) WHERE cosine_similarity(d.embedding, d.embedding) > 0.99 \
-         RETURN d.title",
-    );
-    match result {
-        Ok(r) => assert_eq!(r.row_count(), 1),
-        Err(_) => {}
-    }
+    let result = db
+        .session()
+        .execute(
+            "MATCH (d:Doc) WHERE cosine_similarity(d.embedding, d.embedding) > 0.99 \
+             RETURN d.title",
+        )
+        .expect("non-literal query vector must fall through to per-row evaluation");
+    assert_eq!(result.row_count(), 1);
 }
 
 // ============================================================================
