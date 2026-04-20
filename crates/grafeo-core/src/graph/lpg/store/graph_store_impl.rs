@@ -335,24 +335,27 @@ impl GraphStoreSearch for LpgStore {
         }
 
         // Brute-force fallback: scan nodes, compute distance, take top-k.
+        // Keep `Arc<[f32]>` from `Value::Vector` instead of copying each vector
+        // into an owned `Vec<f32>`: `brute_force_knn` only needs `&[f32]` and
+        // the store already owns the embedding data behind an Arc.
         let node_ids = match label {
             Some(l) => <Self as GraphStore>::nodes_by_label(self, l),
             None => <Self as GraphStore>::node_ids(self),
         };
         let property_key = PropertyKey::new(property);
-        let vectors: Vec<(NodeId, Vec<f32>)> = node_ids
+        let vectors: Vec<(NodeId, Arc<[f32]>)> = node_ids
             .into_iter()
             .filter_map(|id| {
                 <Self as GraphStore>::get_node_property(self, id, &property_key).and_then(|v| {
-                    if let Value::Vector(vec) = v {
-                        Some((id, vec.to_vec()))
+                    if let Value::Vector(arc) = v {
+                        Some((id, arc))
                     } else {
                         None
                     }
                 })
             })
             .collect();
-        let iter = vectors.iter().map(|(id, v)| (*id, v.as_slice()));
+        let iter = vectors.iter().map(|(id, arc)| (*id, arc.as_ref()));
         brute_force_knn(iter, query, k, metric)
             .into_iter()
             .map(|(id, d)| (id, f64::from(d)))

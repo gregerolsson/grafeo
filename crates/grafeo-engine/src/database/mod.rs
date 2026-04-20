@@ -1881,7 +1881,7 @@ impl GrafeoDB {
         self.projections.read().keys().cloned().collect()
     }
 
-    /// Returns a named projection as a [`GraphStore`] trait object.
+    /// Returns a named projection as a [`GraphStoreSearch`] trait object.
     #[must_use]
     pub fn projection(&self, name: &str) -> Option<Arc<dyn GraphStoreSearch>> {
         self.projections
@@ -1894,10 +1894,9 @@ impl GrafeoDB {
     ///
     /// Returns a read-only trait object for the active graph store.
     ///
-    /// This provides the [`GraphStore`] interface for code that only needs
-    /// read operations. For write access, use [`graph_store_mut()`](Self::graph_store_mut).
-    ///
-    /// [`GraphStore`]: grafeo_core::graph::GraphStore
+    /// This provides the [`GraphStoreSearch`] interface (graph-structure reads
+    /// plus text/vector search capabilities) for code that only needs read
+    /// operations. For write access, use [`graph_store_mut()`](Self::graph_store_mut).
     #[must_use]
     pub fn graph_store(&self) -> Arc<dyn GraphStoreSearch> {
         if let Some(ref ext_read) = self.external_read_store {
