@@ -2561,6 +2561,11 @@ impl Session {
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
         self.require_lpg("GQL")?;
 
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::statement_failure::maybe_fail_statement().map_err(|e| {
+            grafeo_common::utils::error::Error::Internal(format!("injected failure: {e}"))
+        })?;
+
         use crate::query::{
             binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
             translators::gql,
@@ -3886,6 +3891,12 @@ impl Session {
     #[cfg(feature = "lpg")]
     fn commit_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::commit");
+
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::statement_failure::maybe_fail_commit().map_err(|e| {
+            grafeo_common::utils::error::Error::Internal(format!("injected commit failure: {e}"))
+        })?;
+
         self.check_no_active_streams("commit")?;
         // Nested transaction: release the auto-savepoint (changes are preserved).
         {

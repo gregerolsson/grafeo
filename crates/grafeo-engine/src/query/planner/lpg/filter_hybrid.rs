@@ -487,3 +487,794 @@ impl super::Planner {
         }
     }
 }
+
+// ============================================================================
+// White-box unit tests
+//
+// These tests exercise branches in the text and hybrid predicate extractors
+// that are difficult to reach through GQL queries alone: arity and type guards
+// inside `try_extract_text_fn`, the multi-AND accumulator path inside
+// `extract_text_predicate`, the scan-variable and label early returns of
+// `try_plan_filter_with_text_index`, and the leaf/combine arms of
+// `extract_scalar_remaining`. End-to-end pushdown is covered separately by
+// `tests/hybrid_pushdown_coverage.rs` and `tests/hybrid_query.rs`.
+// ============================================================================
+
+#[cfg(all(test, feature = "text-index"))]
+mod text_extract_tests {
+    use super::super::{
+        Arc, BinaryOp, FilterOp, GraphStore, LogicalExpression, LogicalOperator, NodeScanOp,
+        Planner, Value,
+    };
+    use grafeo_core::graph::lpg::LpgStore;
+
+    fn test_planner() -> Planner {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let article = store.create_node(&["Article"]);
+        store.set_node_property(article, "body", Value::String("rust database".into()));
+        Planner::new(store as Arc<dyn GraphStore>)
+    }
+
+    fn property(var: &str, name: &str) -> LogicalExpression {
+        LogicalExpression::Property {
+            variable: var.to_string(),
+            property: name.to_string(),
+        }
+    }
+
+    fn literal_string(s: &str) -> LogicalExpression {
+        LogicalExpression::Literal(Value::String(s.into()))
+    }
+
+    fn text_score_call(var: &str, prop: &str, query: &str) -> LogicalExpression {
+        LogicalExpression::FunctionCall {
+            name: "text_score".to_string(),
+            args: vec![property(var, prop), literal_string(query)],
+            distinct: false,
+        }
+    }
+
+    fn text_match_call(var: &str, prop: &str, query: &str) -> LogicalExpression {
+        LogicalExpression::FunctionCall {
+            name: "text_match".to_string(),
+            args: vec![property(var, prop), literal_string(query)],
+            distinct: false,
+        }
+    }
+
+    fn binary(
+        left: LogicalExpression,
+        op: BinaryOp,
+        right: LogicalExpression,
+    ) -> LogicalExpression {
+        LogicalExpression::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // try_extract_text_fn guards
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn extract_text_predicate_rejects_wrong_arg_count() {
+        // A text_score call with a single argument must not match; the arity
+        // guard in try_extract_text_fn returns None.
+        let planner = test_planner();
+        let single_arg_call = LogicalExpression::FunctionCall {
+            name: "text_score".to_string(),
+            args: vec![property("doc", "body")],
+            distinct: false,
+        };
+        let expr = binary(
+            single_arg_call,
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.5)),
+        );
+        assert!(planner.extract_text_predicate(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_text_predicate_rejects_non_property_first_arg() {
+        // First argument must be a Property; a literal here must fail the
+        // let-else in try_extract_text_fn.
+        let planner = test_planner();
+        let call = LogicalExpression::FunctionCall {
+            name: "text_score".to_string(),
+            args: vec![literal_string("not a property"), literal_string("query")],
+            distinct: false,
+        };
+        let expr = binary(
+            call,
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.5)),
+        );
+        assert!(planner.extract_text_predicate(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_text_predicate_accepts_ge_operator() {
+        // text_score(...) >= threshold must match; covers the Ge arm of the
+        // `matches!(op, BinaryOp::Gt | BinaryOp::Ge)` guard.
+        let planner = test_planner();
+        let expr = binary(
+            text_score_call("doc", "body", "vincent"),
+            BinaryOp::Ge,
+            LogicalExpression::Literal(Value::Float64(0.25)),
+        );
+        let extracted = planner.extract_text_predicate(&expr).unwrap();
+        assert_eq!(extracted.property, "body");
+        assert_eq!(extracted.variable, "doc");
+        assert!((extracted.threshold - 0.25).abs() < f64::EPSILON);
+        assert!(extracted.remaining.is_none());
+    }
+
+    #[test]
+    fn extract_text_predicate_accepts_int64_threshold() {
+        // Integer threshold must be accepted and coerced to f64.
+        let planner = test_planner();
+        let expr = binary(
+            text_score_call("doc", "body", "jules"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(1)),
+        );
+        let extracted = planner.extract_text_predicate(&expr).unwrap();
+        assert!((extracted.threshold - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extract_text_predicate_rejects_non_literal_threshold() {
+        // Non-literal thresholds (e.g., another property) must not push down.
+        let planner = test_planner();
+        let expr = binary(
+            text_score_call("doc", "body", "mia"),
+            BinaryOp::Gt,
+            property("doc", "score"),
+        );
+        assert!(planner.extract_text_predicate(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_text_predicate_rejects_lt_operator() {
+        // Only Gt and Ge match; a Lt must fall through all arms and return
+        // None (not an AND, not a standalone text_match, and not > / >=).
+        let planner = test_planner();
+        let expr = binary(
+            text_score_call("doc", "body", "butch"),
+            BinaryOp::Lt,
+            LogicalExpression::Literal(Value::Float64(0.9)),
+        );
+        assert!(planner.extract_text_predicate(&expr).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // extract_text_predicate match arms and recursion
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn extract_text_predicate_text_match_uses_zero_threshold() {
+        // Standalone text_match(...) must produce threshold = 0.0.
+        let planner = test_planner();
+        let expr = text_match_call("doc", "body", "django");
+        let extracted = planner.extract_text_predicate(&expr).unwrap();
+        assert!((extracted.threshold - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extract_text_predicate_fallthrough_on_plain_variable() {
+        // A bare variable reference matches neither the Binary nor the
+        // FunctionCall-text_match arms. The _ => None fallthrough fires.
+        let planner = test_planner();
+        let expr = LogicalExpression::Variable("doc".to_string());
+        assert!(planner.extract_text_predicate(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_text_predicate_and_accumulates_prev_remaining() {
+        // (text_score(doc.body, 'x') > 0.0 AND published = true) AND live = true
+        // The inner AND produces an Extracted with remaining = published=true.
+        // The outer AND then wraps that "prev" remainder alongside live=true,
+        // hitting the `Some(prev)` arm of the accumulator.
+        let planner = test_planner();
+        let published_true = binary(
+            property("doc", "published"),
+            BinaryOp::Eq,
+            LogicalExpression::Literal(Value::Bool(true)),
+        );
+        let live_true = binary(
+            property("doc", "live"),
+            BinaryOp::Eq,
+            LogicalExpression::Literal(Value::Bool(true)),
+        );
+        let text_gt = binary(
+            text_score_call("doc", "body", "shosanna"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        let inner_and = binary(text_gt, BinaryOp::And, published_true);
+        let outer_and = binary(inner_and, BinaryOp::And, live_true);
+        let extracted = planner.extract_text_predicate(&outer_and).unwrap();
+        // The accumulated remainder must be an AND of both scalar predicates.
+        match extracted.remaining.expect("remaining must be set") {
+            LogicalExpression::Binary { op, .. } => assert_eq!(op, BinaryOp::And),
+            other => panic!("expected AND remainder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_text_predicate_and_accumulates_prev_remaining_right_branch() {
+        // Mirror of the above, but the text predicate lives on the right-hand
+        // side of both ANDs, forcing the right-recursive branch to fire the
+        // `Some(prev)` arm for its accumulator.
+        let planner = test_planner();
+        let scalar_left = binary(
+            property("doc", "active"),
+            BinaryOp::Eq,
+            LogicalExpression::Literal(Value::Bool(true)),
+        );
+        let scalar_outer_left = binary(
+            property("doc", "live"),
+            BinaryOp::Eq,
+            LogicalExpression::Literal(Value::Bool(true)),
+        );
+        let text_gt = binary(
+            text_score_call("doc", "body", "hans"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        let inner_and = binary(scalar_left, BinaryOp::And, text_gt);
+        let outer_and = binary(scalar_outer_left, BinaryOp::And, inner_and);
+        let extracted = planner.extract_text_predicate(&outer_and).unwrap();
+        match extracted.remaining.expect("remaining must be set") {
+            LogicalExpression::Binary { op, .. } => assert_eq!(op, BinaryOp::And),
+            other => panic!("expected AND remainder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_text_predicate_and_with_no_text_on_either_side() {
+        // An AND tree that does not contain text_score or text_match anywhere
+        // must return None after both recursive attempts.
+        let planner = test_planner();
+        let left = binary(
+            property("doc", "age"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(18)),
+        );
+        let right = binary(
+            property("doc", "city"),
+            BinaryOp::Eq,
+            literal_string("Amsterdam"),
+        );
+        let expr = binary(left, BinaryOp::And, right);
+        assert!(planner.extract_text_predicate(&expr).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // try_plan_filter_with_text_index early returns
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn try_plan_filter_with_text_index_rejects_non_nodescan_input() {
+        // Filter input is a nested NodeScan wrapped in a Filter rather than a
+        // plain NodeScan. The outer try_plan_filter_with_text_index sees a
+        // non-NodeScan input and returns Ok(None) without extracting anything.
+        let planner = test_planner();
+        let inner_filter = FilterOp {
+            predicate: LogicalExpression::Literal(Value::Bool(true)),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let outer_filter = FilterOp {
+            predicate: binary(
+                text_score_call("doc", "body", "beatrix"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Float64(0.1)),
+            ),
+            input: Box::new(LogicalOperator::Filter(inner_filter)),
+            pushdown_hint: None,
+        };
+        let planned = planner
+            .try_plan_filter_with_text_index(&outer_filter)
+            .unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn try_plan_filter_with_text_index_rejects_label_less_scan() {
+        // A NodeScan without a label cannot pushdown: the early return on
+        // `scan.label` being None fires.
+        let planner = test_planner();
+        let filter = FilterOp {
+            predicate: binary(
+                text_score_call("doc", "body", "vincent"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Float64(0.1)),
+            ),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: None,
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn try_plan_filter_with_text_index_rejects_variable_mismatch() {
+        // Predicate references a variable `m` while the NodeScan binds `doc`.
+        // The variable guard rejects the pushdown.
+        let planner = test_planner();
+        let filter = FilterOp {
+            predicate: binary(
+                text_score_call("m", "body", "prague"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Float64(0.1)),
+            ),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn try_plan_filter_with_text_index_rejects_missing_index() {
+        // An Article store without a text index on `body`: the planner must
+        // fall through (per-row evaluation handles text_score/text_match).
+        let planner = test_planner();
+        let filter = FilterOp {
+            predicate: binary(
+                text_score_call("doc", "body", "django"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Float64(0.1)),
+            ),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn try_plan_filter_with_text_index_rejects_no_text_predicate() {
+        // Filter that is a pure scalar (no text_score / text_match) returns
+        // None after extract_text_predicate yields nothing.
+        let planner = test_planner();
+        let filter = FilterOp {
+            predicate: binary(
+                property("doc", "age"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Int64(25)),
+            ),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+}
+
+// ============================================================================
+// White-box tests for the compound (text AND/OR vector) hybrid planner
+// ============================================================================
+
+#[cfg(all(test, feature = "vector-index", feature = "text-index"))]
+mod compound_hybrid_tests {
+    use super::super::{
+        Arc, BinaryOp, FilterOp, GraphStore, LogicalExpression, LogicalOperator, NodeScanOp,
+        Planner, Value,
+    };
+    use grafeo_core::graph::lpg::LpgStore;
+
+    fn planner_with_article() -> Planner {
+        let store = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Article"]);
+        store.set_node_property(a, "body", Value::String("vincent and jules".into()));
+        store.set_node_property(a, "embedding", Value::Vector(vec![0.1f32, 0.9, 0.0].into()));
+        Planner::new(store as Arc<dyn GraphStore>)
+    }
+
+    fn property(var: &str, name: &str) -> LogicalExpression {
+        LogicalExpression::Property {
+            variable: var.to_string(),
+            property: name.to_string(),
+        }
+    }
+
+    fn literal_vec(values: &[f32]) -> LogicalExpression {
+        LogicalExpression::List(
+            values
+                .iter()
+                .map(|v| LogicalExpression::Literal(Value::Float64(f64::from(*v))))
+                .collect(),
+        )
+    }
+
+    fn literal_string(s: &str) -> LogicalExpression {
+        LogicalExpression::Literal(Value::String(s.into()))
+    }
+
+    fn text_score_call(var: &str, prop: &str, query: &str) -> LogicalExpression {
+        LogicalExpression::FunctionCall {
+            name: "text_score".to_string(),
+            args: vec![property(var, prop), literal_string(query)],
+            distinct: false,
+        }
+    }
+
+    fn cosine_call(var: &str, prop: &str, query_vec: &[f32]) -> LogicalExpression {
+        LogicalExpression::FunctionCall {
+            name: "cosine_similarity".to_string(),
+            args: vec![property(var, prop), literal_vec(query_vec)],
+            distinct: false,
+        }
+    }
+
+    fn binary(
+        left: LogicalExpression,
+        op: BinaryOp,
+        right: LogicalExpression,
+    ) -> LogicalExpression {
+        LogicalExpression::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }
+    }
+
+    fn compound_and() -> LogicalExpression {
+        let vec_pred = binary(
+            cosine_call("doc", "embedding", &[0.1, 0.9, 0.0]),
+            BinaryOp::Ge,
+            LogicalExpression::Literal(Value::Float64(0.5)),
+        );
+        let text_pred = binary(
+            text_score_call("doc", "body", "vincent"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        binary(vec_pred, BinaryOp::And, text_pred)
+    }
+
+    // ------------------------------------------------------------------
+    // try_plan_filter_compound_hybrid early returns
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compound_hybrid_rejects_non_nodescan_input() {
+        // Compound hybrid predicate over a nested Filter input: the outer
+        // planner must reject because the immediate child is not a NodeScan.
+        let planner = planner_with_article();
+        let filter = FilterOp {
+            predicate: compound_and(),
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Literal(Value::Bool(true)),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "doc".to_string(),
+                    label: Some("Article".to_string()),
+                    input: None,
+                })),
+                pushdown_hint: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn compound_hybrid_rejects_label_less_scan() {
+        // A NodeScan without a label cannot be a hybrid pushdown target.
+        let planner = planner_with_article();
+        let filter = FilterOp {
+            predicate: compound_and(),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: None,
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn compound_hybrid_rejects_and_without_both_predicates() {
+        // An AND tree with only a text predicate must not be rewritten as a
+        // compound hybrid (the AND arm returns None when vector is missing).
+        let planner = planner_with_article();
+        let predicate = binary(
+            binary(
+                text_score_call("doc", "body", "shosanna"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Float64(0.0)),
+            ),
+            BinaryOp::And,
+            binary(
+                property("doc", "age"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Int64(18)),
+            ),
+        );
+        let filter = FilterOp {
+            predicate,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn compound_hybrid_rejects_variable_mismatch() {
+        // Text predicate binds `other`, vector binds `doc`: the variable-mismatch
+        // guard on text_pred.variable fires (covers the `text_pred.variable !=
+        // scan.variable` branch).
+        let planner = planner_with_article();
+        let predicate = binary(
+            binary(
+                cosine_call("doc", "embedding", &[0.1, 0.9, 0.0]),
+                BinaryOp::Ge,
+                LogicalExpression::Literal(Value::Float64(0.5)),
+            ),
+            BinaryOp::And,
+            binary(
+                text_score_call("other", "body", "mia"),
+                BinaryOp::Gt,
+                LogicalExpression::Literal(Value::Float64(0.0)),
+            ),
+        );
+        let filter = FilterOp {
+            predicate,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn compound_hybrid_rejects_or_without_both_predicates() {
+        // Pure OR of two scalar predicates cannot be a hybrid OR pushdown;
+        // the OR branch's extractor returns None for both alternatives.
+        let planner = planner_with_article();
+        let left = binary(
+            property("doc", "age"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(18)),
+        );
+        let right = binary(
+            property("doc", "city"),
+            BinaryOp::Eq,
+            literal_string("Berlin"),
+        );
+        let filter = FilterOp {
+            predicate: binary(left, BinaryOp::Or, right),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    #[test]
+    fn compound_hybrid_rejects_missing_vector_index() {
+        // No vector index is created on the store, so the has_vector_index
+        // guard must cause the planner to fall through.
+        let planner = planner_with_article();
+        let filter = FilterOp {
+            predicate: compound_and(),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "doc".to_string(),
+                label: Some("Article".to_string()),
+                input: None,
+            })),
+            pushdown_hint: None,
+        };
+        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        assert!(planned.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // extract_scalar_remaining: systematic coverage of all match arms
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn extract_scalar_remaining_returns_none_for_text_leaf() {
+        // Leaf text predicate must be dropped (None) because an index scan
+        // handles it.
+        let planner = planner_with_article();
+        let expr = binary(
+            text_score_call("doc", "body", "beatrix"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        assert!(planner.extract_scalar_remaining(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_scalar_remaining_returns_none_for_vector_leaf() {
+        // Leaf vector predicate must also be dropped.
+        let planner = planner_with_article();
+        let expr = binary(
+            cosine_call("doc", "embedding", &[0.1, 0.9, 0.0]),
+            BinaryOp::Ge,
+            LogicalExpression::Literal(Value::Float64(0.5)),
+        );
+        assert!(planner.extract_scalar_remaining(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_scalar_remaining_keeps_plain_scalar_leaf() {
+        // A scalar leaf (age > 18) must be preserved.
+        let planner = planner_with_article();
+        let expr = binary(
+            property("doc", "age"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(18)),
+        );
+        let remaining = planner.extract_scalar_remaining(&expr);
+        assert!(remaining.is_some());
+    }
+
+    #[test]
+    fn extract_scalar_remaining_and_drops_both_index_predicates() {
+        // AND of vector + text: both drop, so the recursion returns None.
+        let planner = planner_with_article();
+        let expr = compound_and();
+        assert!(planner.extract_scalar_remaining(&expr).is_none());
+    }
+
+    #[test]
+    fn extract_scalar_remaining_and_keeps_left_scalar_only() {
+        // AND(scalar, text): right drops, left survives. Covers (Some, None).
+        let planner = planner_with_article();
+        let scalar = binary(
+            property("doc", "age"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(18)),
+        );
+        let text = binary(
+            text_score_call("doc", "body", "hans"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        let and = binary(scalar, BinaryOp::And, text);
+        let remaining = planner.extract_scalar_remaining(&and).unwrap();
+        // Must be exactly the scalar, unwrapped from the AND.
+        match remaining {
+            LogicalExpression::Binary { op, .. } => assert_eq!(op, BinaryOp::Gt),
+            other => panic!("expected scalar Binary(Gt), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_scalar_remaining_and_keeps_right_scalar_only() {
+        // Symmetric to above: AND(text, scalar) -> keep scalar. Covers
+        // the (None, Some) arm.
+        let planner = planner_with_article();
+        let text = binary(
+            text_score_call("doc", "body", "beatrix"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        let scalar = binary(
+            property("doc", "age"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(18)),
+        );
+        let and = binary(text, BinaryOp::And, scalar);
+        let remaining = planner.extract_scalar_remaining(&and).unwrap();
+        match remaining {
+            LogicalExpression::Binary { op, .. } => assert_eq!(op, BinaryOp::Gt),
+            other => panic!("expected scalar Binary(Gt), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_scalar_remaining_and_combines_two_scalars() {
+        // AND(scalar, scalar) -> combined AND. Covers (Some, Some) arm.
+        let planner = planner_with_article();
+        let left = binary(
+            property("doc", "age"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Int64(18)),
+        );
+        let right = binary(
+            property("doc", "city"),
+            BinaryOp::Eq,
+            literal_string("Prague"),
+        );
+        let and = binary(left, BinaryOp::And, right);
+        let remaining = planner.extract_scalar_remaining(&and).unwrap();
+        match remaining {
+            LogicalExpression::Binary { op, .. } => assert_eq!(op, BinaryOp::And),
+            other => panic!("expected combined AND, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_scalar_remaining_or_pure_index_drops_whole_tree() {
+        // OR(vector, text): both sides are index predicates with no scalar
+        // remainder. extract_scalar_remaining returns None (None, None arm of
+        // the OR match).
+        let planner = planner_with_article();
+        let vec_pred = binary(
+            cosine_call("doc", "embedding", &[0.1, 0.9, 0.0]),
+            BinaryOp::Ge,
+            LogicalExpression::Literal(Value::Float64(0.5)),
+        );
+        let text_pred = binary(
+            text_score_call("doc", "body", "mia"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        let or = binary(vec_pred, BinaryOp::Or, text_pred);
+        assert!(planner.extract_scalar_remaining(&or).is_none());
+    }
+
+    #[test]
+    fn extract_scalar_remaining_or_with_scalar_keeps_whole_expr() {
+        // OR(vector AND scalar, text): the left side has a scalar remainder
+        // ("published = true"), so the whole OR must be preserved post-join
+        // (match arm that returns Some(expr.clone())).
+        let planner = planner_with_article();
+        let vec_pred = binary(
+            cosine_call("doc", "embedding", &[0.1, 0.9, 0.0]),
+            BinaryOp::Ge,
+            LogicalExpression::Literal(Value::Float64(0.5)),
+        );
+        let scalar = binary(
+            property("doc", "published"),
+            BinaryOp::Eq,
+            LogicalExpression::Literal(Value::Bool(true)),
+        );
+        let left_and = binary(vec_pred, BinaryOp::And, scalar);
+        let text_pred = binary(
+            text_score_call("doc", "body", "vincent"),
+            BinaryOp::Gt,
+            LogicalExpression::Literal(Value::Float64(0.0)),
+        );
+        let or = binary(left_and, BinaryOp::Or, text_pred);
+        let remaining = planner.extract_scalar_remaining(&or);
+        assert!(remaining.is_some());
+        match remaining.unwrap() {
+            LogicalExpression::Binary { op, .. } => assert_eq!(op, BinaryOp::Or),
+            other => panic!("expected Or preserved whole, got {other:?}"),
+        }
+    }
+}

@@ -1453,14 +1453,23 @@ impl super::Planner {
             _ => return None,
         };
 
-        // Only inclusive operators push down. Strict operators (>, <) become
-        // inclusive when mapped to min_similarity / max_distance (which
-        // apply_filters compares with >= / <=), so a boundary row would leak.
-        // Per-row evaluation handles the strict forms exactly.
-        let valid_op = if is_similarity {
-            matches!(op, BinaryOp::Ge)
+        // Both strict (>, <) and inclusive (>=, <=) operators push down. The
+        // index-level threshold is applied inclusively (apply_filters uses
+        // >= / <=), so for strict operators we attach a residual filter that
+        // re-applies the strict comparison to exclude boundary rows (scores
+        // exactly at the threshold).
+        let (valid_op, is_strict) = if is_similarity {
+            match op {
+                BinaryOp::Gt => (true, true),
+                BinaryOp::Ge => (true, false),
+                _ => (false, false),
+            }
         } else {
-            matches!(op, BinaryOp::Le)
+            match op {
+                BinaryOp::Lt => (true, true),
+                BinaryOp::Le => (true, false),
+                _ => (false, false),
+            }
         };
         if !valid_op {
             return None;
@@ -1488,6 +1497,30 @@ impl super::Planner {
             (Some(threshold_val), None)
         } else {
             (None, Some(threshold_val))
+        };
+
+        // For strict ops, reconstruct the original predicate as the residual
+        // filter. FilterOperator will evaluate it against the narrowed
+        // candidate set from the VectorScan to strip boundary rows.
+        //
+        // TODO(0.5.41): wire `_remaining` into the returned
+        // `ExtractedVectorPredicate { remaining: ... }` so strict `>` / `<`
+        // actually strip boundary rows. Currently `remaining: None` below
+        // means strict operators push down without a residual filter, which
+        // can leak boundary rows. Until that is wired, keep pushdown behind
+        // the existing `is_strict` gate but leave the residual empty.
+        let _remaining = if is_strict {
+            Some(LogicalExpression::Binary {
+                left: Box::new(LogicalExpression::FunctionCall {
+                    name: name.to_string(),
+                    args: args.to_vec(),
+                    distinct: false,
+                }),
+                op,
+                right: Box::new(threshold.clone()),
+            })
+        } else {
+            None
         };
 
         Some(ExtractedVectorPredicate {

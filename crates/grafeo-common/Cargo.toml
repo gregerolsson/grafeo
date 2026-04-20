@@ -49,6 +49,7 @@ tiered-storage = []
 temporal = []
 tracing = ["dep:tracing"]
 testing-crash-injection = []
+testing-statement-injection = []
 encryption = ["dep:aes-gcm", "dep:hkdf", "dep:argon2", "dep:zeroize", "dep:sha2", "dep:rand"]
 
 [dev-dependencies]

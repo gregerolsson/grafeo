@@ -725,6 +725,7 @@ impl GraphStore for NullGraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn null_graph_store_point_lookups() {
@@ -870,5 +871,452 @@ mod tests {
 
         assert!(store.get_node_history(NodeId(1)).is_empty());
         assert!(store.get_edge_history(EdgeId(1)).is_empty());
+    }
+
+    /// Minimal in-memory store used to exercise the default method bodies on
+    /// `GraphStoreMut`. Concrete production stores override every default, so
+    /// without this harness those default bodies would stay uncovered.
+    #[derive(Default)]
+    struct TestMutStore {
+        inner: Mutex<TestMutInner>,
+    }
+
+    #[derive(Default)]
+    struct TestMutInner {
+        next_node: u64,
+        next_edge: u64,
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+    }
+
+    impl TestMutStore {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn find_node(&self, id: NodeId) -> Option<Node> {
+            self.inner
+                .lock()
+                .unwrap()
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .cloned()
+        }
+
+        fn find_edge(&self, id: EdgeId) -> Option<Edge> {
+            self.inner
+                .lock()
+                .unwrap()
+                .edges
+                .iter()
+                .find(|e| e.id == id)
+                .cloned()
+        }
+    }
+
+    impl GraphStore for TestMutStore {
+        fn get_node(&self, id: NodeId) -> Option<Node> {
+            self.find_node(id)
+        }
+        fn get_edge(&self, id: EdgeId) -> Option<Edge> {
+            self.find_edge(id)
+        }
+        fn get_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
+            self.find_node(id)
+        }
+        fn get_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
+            self.find_edge(id)
+        }
+        fn get_node_at_epoch(&self, id: NodeId, _: EpochId) -> Option<Node> {
+            self.find_node(id)
+        }
+        fn get_edge_at_epoch(&self, id: EdgeId, _: EpochId) -> Option<Edge> {
+            self.find_edge(id)
+        }
+        fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
+            self.find_node(id)
+                .and_then(|n| n.properties.get(key).cloned())
+        }
+        fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
+            self.find_edge(id)
+                .and_then(|e| e.properties.get(key).cloned())
+        }
+        fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
+            ids.iter()
+                .map(|id| self.get_node_property(*id, key))
+                .collect()
+        }
+        fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
+            ids.iter()
+                .map(|id| {
+                    let mut map = FxHashMap::default();
+                    if let Some(n) = self.find_node(*id) {
+                        for (k, v) in n.properties.iter() {
+                            map.insert(k.clone(), v.clone());
+                        }
+                    }
+                    map
+                })
+                .collect()
+        }
+        fn get_nodes_properties_selective_batch(
+            &self,
+            ids: &[NodeId],
+            _: &[PropertyKey],
+        ) -> Vec<FxHashMap<PropertyKey, Value>> {
+            vec![FxHashMap::default(); ids.len()]
+        }
+        fn get_edges_properties_selective_batch(
+            &self,
+            ids: &[EdgeId],
+            _: &[PropertyKey],
+        ) -> Vec<FxHashMap<PropertyKey, Value>> {
+            vec![FxHashMap::default(); ids.len()]
+        }
+        fn neighbors(&self, _: NodeId, _: Direction) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn edges_from(&self, _: NodeId, _: Direction) -> Vec<(NodeId, EdgeId)> {
+            Vec::new()
+        }
+        fn out_degree(&self, _: NodeId) -> usize {
+            0
+        }
+        fn in_degree(&self, _: NodeId) -> usize {
+            0
+        }
+        fn has_backward_adjacency(&self) -> bool {
+            false
+        }
+        fn node_ids(&self) -> Vec<NodeId> {
+            self.inner
+                .lock()
+                .unwrap()
+                .nodes
+                .iter()
+                .map(|n| n.id)
+                .collect()
+        }
+        fn nodes_by_label(&self, _: &str) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn node_count(&self) -> usize {
+            self.inner.lock().unwrap().nodes.len()
+        }
+        fn edge_count(&self) -> usize {
+            self.inner.lock().unwrap().edges.len()
+        }
+        fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
+            self.find_edge(id).map(|e| e.edge_type)
+        }
+        fn find_nodes_by_property(&self, _: &str, _: &Value) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn find_nodes_by_properties(&self, _: &[(&str, Value)]) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn find_nodes_in_range(
+            &self,
+            _: &str,
+            _: Option<&Value>,
+            _: Option<&Value>,
+            _: bool,
+            _: bool,
+        ) -> Vec<NodeId> {
+            Vec::new()
+        }
+        fn node_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
+            true
+        }
+        fn edge_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
+            true
+        }
+        fn statistics(&self) -> Arc<Statistics> {
+            Arc::new(Statistics::default())
+        }
+        fn estimate_label_cardinality(&self, _: &str) -> f64 {
+            0.0
+        }
+        fn estimate_avg_degree(&self, _: &str, _: bool) -> f64 {
+            0.0
+        }
+        fn current_epoch(&self) -> EpochId {
+            EpochId(0)
+        }
+    }
+
+    impl GraphStoreMut for TestMutStore {
+        fn create_node(&self, labels: &[&str]) -> NodeId {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_node += 1;
+            let id = NodeId(inner.next_node);
+            let mut node = Node::new(id);
+            for label in labels {
+                node.add_label(*label);
+            }
+            inner.nodes.push(node);
+            id
+        }
+        fn create_node_versioned(&self, labels: &[&str], _: EpochId, _: TransactionId) -> NodeId {
+            self.create_node(labels)
+        }
+        fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_edge += 1;
+            let id = EdgeId(inner.next_edge);
+            inner.edges.push(Edge::new(id, src, dst, edge_type));
+            id
+        }
+        fn create_edge_versioned(
+            &self,
+            src: NodeId,
+            dst: NodeId,
+            edge_type: &str,
+            _: EpochId,
+            _: TransactionId,
+        ) -> EdgeId {
+            self.create_edge(src, dst, edge_type)
+        }
+        fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
+            edges
+                .iter()
+                .map(|(s, d, t)| self.create_edge(*s, *d, t))
+                .collect()
+        }
+        fn delete_node(&self, id: NodeId) -> bool {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(pos) = inner.nodes.iter().position(|n| n.id == id) {
+                inner.nodes.remove(pos);
+                true
+            } else {
+                false
+            }
+        }
+        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> bool {
+            self.delete_node(id)
+        }
+        fn delete_node_edges(&self, node_id: NodeId) {
+            let mut inner = self.inner.lock().unwrap();
+            inner.edges.retain(|e| e.src != node_id && e.dst != node_id);
+        }
+        fn delete_edge(&self, id: EdgeId) -> bool {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(pos) = inner.edges.iter().position(|e| e.id == id) {
+                inner.edges.remove(pos);
+                true
+            } else {
+                false
+            }
+        }
+        fn delete_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> bool {
+            self.delete_edge(id)
+        }
+        fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(node) = inner.nodes.iter_mut().find(|n| n.id == id) {
+                node.set_property(key, value);
+            }
+        }
+        fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(edge) = inner.edges.iter_mut().find(|e| e.id == id) {
+                edge.set_property(key, value);
+            }
+        }
+        fn remove_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+            let mut inner = self.inner.lock().unwrap();
+            inner
+                .nodes
+                .iter_mut()
+                .find(|n| n.id == id)
+                .and_then(|n| n.remove_property(key))
+        }
+        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
+            let mut inner = self.inner.lock().unwrap();
+            inner
+                .edges
+                .iter_mut()
+                .find(|e| e.id == id)
+                .and_then(|e| e.remove_property(key))
+        }
+        fn add_label(&self, node_id: NodeId, label: &str) -> bool {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(node) = inner.nodes.iter_mut().find(|n| n.id == node_id) {
+                if node.has_label(label) {
+                    false
+                } else {
+                    node.add_label(label);
+                    true
+                }
+            } else {
+                false
+            }
+        }
+        fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
+            let mut inner = self.inner.lock().unwrap();
+            inner
+                .nodes
+                .iter_mut()
+                .find(|n| n.id == node_id)
+                .is_some_and(|n| n.remove_label(label))
+        }
+    }
+
+    #[test]
+    fn test_mut_store_default_set_versioned_property_delegates() {
+        let store = TestMutStore::new();
+        let id = store.create_node(&["Person"]);
+        let key = PropertyKey::from("name");
+        let txn = TransactionId(7);
+
+        // Default impl of set_node_property_versioned calls set_node_property.
+        store.set_node_property_versioned(id, "name", Value::from("Vincent"), txn);
+        assert_eq!(
+            store.get_node_property(id, &key),
+            Some(Value::from("Vincent"))
+        );
+
+        let edge_id = {
+            let src = store.create_node(&["Person"]);
+            let dst = store.create_node(&["City"]);
+            store.create_edge(src, dst, "LIVES_IN")
+        };
+        let since = PropertyKey::from("since");
+        store.set_edge_property_versioned(edge_id, "since", Value::Int64(1994), txn);
+        assert_eq!(
+            store.get_edge_property(edge_id, &since),
+            Some(Value::Int64(1994))
+        );
+    }
+
+    #[test]
+    fn test_mut_store_default_remove_versioned_property_delegates() {
+        let store = TestMutStore::new();
+        let txn = TransactionId(11);
+
+        let node_id = store.create_node(&["Person"]);
+        store.set_node_property(node_id, "city", Value::from("Amsterdam"));
+        let removed = store.remove_node_property_versioned(node_id, "city", txn);
+        assert_eq!(removed, Some(Value::from("Amsterdam")));
+        assert!(
+            store
+                .get_node_property(node_id, &PropertyKey::from("city"))
+                .is_none()
+        );
+
+        let missing = store.remove_node_property_versioned(node_id, "absent", txn);
+        assert!(missing.is_none());
+
+        let src = store.create_node(&["Person"]);
+        let dst = store.create_node(&["Person"]);
+        let edge_id = store.create_edge(src, dst, "KNOWS");
+        store.set_edge_property(edge_id, "weight", Value::Int64(42));
+        let removed_edge = store.remove_edge_property_versioned(edge_id, "weight", txn);
+        assert_eq!(removed_edge, Some(Value::Int64(42)));
+        let removed_again = store.remove_edge_property_versioned(edge_id, "weight", txn);
+        assert!(removed_again.is_none());
+    }
+
+    #[test]
+    fn test_mut_store_default_label_versioned_delegates() {
+        let store = TestMutStore::new();
+        let txn = TransactionId(3);
+        let id = store.create_node(&["Person"]);
+
+        // Adding a new label returns true, re-adding the same returns false.
+        assert!(store.add_label_versioned(id, "Director", txn));
+        assert!(!store.add_label_versioned(id, "Director", txn));
+
+        // Removing an existing label returns true, removing absent returns false.
+        assert!(store.remove_label_versioned(id, "Director", txn));
+        assert!(!store.remove_label_versioned(id, "Director", txn));
+
+        // Unknown node id yields false on both add and remove paths.
+        let unknown = NodeId(9999);
+        assert!(!store.add_label_versioned(unknown, "Ghost", txn));
+        assert!(!store.remove_label_versioned(unknown, "Ghost", txn));
+    }
+
+    #[test]
+    fn test_mut_store_default_create_node_with_props() {
+        let store = TestMutStore::new();
+        let props = vec![
+            (PropertyKey::from("name"), Value::from("Jules")),
+            (PropertyKey::from("city"), Value::from("Paris")),
+        ];
+
+        let id = store.create_node_with_props(&["Person"], &props);
+        let node = store.get_node(id).expect("node should exist");
+        assert!(node.has_label("Person"));
+        assert_eq!(
+            node.properties.get(&PropertyKey::from("name")),
+            Some(&Value::from("Jules"))
+        );
+        assert_eq!(
+            node.properties.get(&PropertyKey::from("city")),
+            Some(&Value::from("Paris"))
+        );
+
+        // Empty properties slice still produces a valid node.
+        let bare = store.create_node_with_props(&["Person"], &[]);
+        let bare_node = store.get_node(bare).expect("bare node should exist");
+        assert!(bare_node.properties.is_empty());
+    }
+
+    #[test]
+    fn test_mut_store_default_create_edge_with_props() {
+        let store = TestMutStore::new();
+        let src = store.create_node_with_props(
+            &["Person"],
+            &[(PropertyKey::from("name"), Value::from("Mia"))],
+        );
+        let dst = store.create_node_with_props(
+            &["City"],
+            &[(PropertyKey::from("name"), Value::from("Berlin"))],
+        );
+        let props = vec![
+            (PropertyKey::from("since"), Value::Int64(2021)),
+            (PropertyKey::from("role"), Value::from("resident")),
+        ];
+
+        let edge_id = store.create_edge_with_props(src, dst, "LIVES_IN", &props);
+        let edge = store.get_edge(edge_id).expect("edge should exist");
+        assert_eq!(edge.src, src);
+        assert_eq!(edge.dst, dst);
+        assert_eq!(edge.edge_type.as_str(), "LIVES_IN");
+        assert_eq!(
+            edge.properties.get(&PropertyKey::from("since")),
+            Some(&Value::Int64(2021))
+        );
+        assert_eq!(
+            edge.properties.get(&PropertyKey::from("role")),
+            Some(&Value::from("resident"))
+        );
+
+        // Confirm the edge type is also reachable through the read trait.
+        assert_eq!(
+            store
+                .edge_type(edge_id)
+                .as_ref()
+                .map(arcstr::ArcStr::as_str),
+            Some("LIVES_IN")
+        );
+
+        // With no properties, default still produces an edge.
+        let bare = store.create_edge_with_props(src, dst, "VISITED", &[]);
+        let bare_edge = store.get_edge(bare).expect("bare edge should exist");
+        assert!(bare_edge.properties.is_empty());
+    }
+
+    #[test]
+    fn test_mut_store_object_safe_dyn_dispatch() {
+        // Exercise the object-safe contract: GraphStore methods through `dyn`.
+        let store: Arc<dyn GraphStore> = Arc::new(TestMutStore::new());
+        assert_eq!(store.node_count(), 0);
+        assert_eq!(store.edge_count(), 0);
+        assert!(store.node_ids().is_empty());
+        assert!(store.get_node(NodeId(1)).is_none());
+        assert_eq!(store.current_epoch(), EpochId(0));
     }
 }

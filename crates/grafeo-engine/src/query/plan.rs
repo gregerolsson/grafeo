@@ -2823,4 +2823,1513 @@ mod tests {
         assert_eq!(format!("{param}"), "$limit");
         assert!(literal == 42usize);
     }
+
+    // ==================== CountExpr ====================
+
+    #[test]
+    fn count_expr_literal_value() {
+        let count = CountExpr::Literal(42);
+        assert_eq!(count.value(), 42);
+        assert_eq!(count.try_value(), Ok(42));
+        assert!((count.estimate() - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn count_expr_parameter_try_value_errors() {
+        let count = CountExpr::Parameter("limit".into());
+        let err = count.try_value().unwrap_err();
+        assert!(err.contains("$limit"));
+        // Estimate falls back to default for unresolved parameters.
+        assert!((count.estimate() - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unresolved parameter: $rows")]
+    fn count_expr_parameter_value_panics() {
+        let count = CountExpr::Parameter("rows".into());
+        let _ = count.value();
+    }
+
+    #[test]
+    fn count_expr_display_and_conversions() {
+        assert_eq!(format!("{}", CountExpr::Literal(7)), "7");
+        assert_eq!(format!("{}", CountExpr::Parameter("n".into())), "$n");
+        let from_usize: CountExpr = 3usize.into();
+        assert_eq!(from_usize, CountExpr::Literal(3));
+        assert_eq!(CountExpr::Literal(5), 5usize);
+        assert!(CountExpr::Parameter("x".into()) != 5usize);
+    }
+
+    // ==================== LogicalPlan constructors ====================
+
+    #[test]
+    fn logical_plan_constructors() {
+        let leaf = || LogicalOperator::Empty;
+
+        let normal = LogicalPlan::new(leaf());
+        assert!(!normal.explain);
+        assert!(!normal.profile);
+        assert!(normal.default_params.is_empty());
+
+        let explained = LogicalPlan::explain(leaf());
+        assert!(explained.explain);
+        assert!(!explained.profile);
+
+        let profiled = LogicalPlan::profile(leaf());
+        assert!(!profiled.explain);
+        assert!(profiled.profile);
+    }
+
+    // ==================== Helpers for tests ====================
+
+    fn var(name: &str) -> LogicalExpression {
+        LogicalExpression::Variable(name.into())
+    }
+
+    fn leaf_empty() -> Box<LogicalOperator> {
+        Box::new(LogicalOperator::Empty)
+    }
+
+    fn leaf_node_scan(v: &str) -> Box<LogicalOperator> {
+        Box::new(LogicalOperator::NodeScan(NodeScanOp {
+            variable: v.into(),
+            label: None,
+            input: None,
+        }))
+    }
+
+    fn leaf_create_node(v: &str) -> Box<LogicalOperator> {
+        Box::new(LogicalOperator::CreateNode(CreateNodeOp {
+            variable: v.into(),
+            labels: vec!["Person".into()],
+            properties: vec![],
+            input: None,
+        }))
+    }
+
+    // ==================== has_mutations ====================
+
+    #[test]
+    fn has_mutations_direct_operators_are_mutating() {
+        // A representative direct mutation operator.
+        let op = LogicalOperator::CreateNode(CreateNodeOp {
+            variable: "vincent".into(),
+            labels: vec!["Person".into()],
+            properties: vec![],
+            input: None,
+        });
+        assert!(op.has_mutations());
+
+        let delete = LogicalOperator::DeleteNode(DeleteNodeOp {
+            variable: "vincent".into(),
+            detach: true,
+            input: leaf_node_scan("vincent"),
+        });
+        assert!(delete.has_mutations());
+
+        let set_prop = LogicalOperator::SetProperty(SetPropertyOp {
+            variable: "mia".into(),
+            properties: vec![("city".into(), LogicalExpression::Literal(Value::Null))],
+            replace: false,
+            is_edge: false,
+            input: leaf_node_scan("mia"),
+        });
+        assert!(set_prop.has_mutations());
+
+        let insert_triple = LogicalOperator::InsertTriple(InsertTripleOp {
+            subject: TripleComponent::Iri("s".into()),
+            predicate: TripleComponent::Iri("p".into()),
+            object: TripleComponent::Iri("o".into()),
+            graph: None,
+            input: None,
+        });
+        assert!(insert_triple.has_mutations());
+
+        let clear = LogicalOperator::ClearGraph(ClearGraphOp {
+            graph: None,
+            silent: false,
+        });
+        assert!(clear.has_mutations());
+
+        let ddl = LogicalOperator::CreatePropertyGraph(CreatePropertyGraphOp {
+            name: "g".into(),
+            node_tables: vec![],
+            edge_tables: vec![],
+        });
+        assert!(ddl.has_mutations());
+    }
+
+    #[test]
+    fn has_mutations_propagates_through_single_input_operators() {
+        let base = || {
+            LogicalOperator::SetProperty(SetPropertyOp {
+                variable: "butch".into(),
+                properties: vec![],
+                replace: false,
+                is_edge: false,
+                input: leaf_node_scan("butch"),
+            })
+        };
+
+        // Filter, Project, Limit, Skip, Sort, Distinct, Unwind, Bind, MapCollect,
+        // Return, HorizontalAggregate all wrap the input.
+        let filter = LogicalOperator::Filter(FilterOp {
+            predicate: var("x"),
+            input: Box::new(base()),
+            pushdown_hint: None,
+        });
+        assert!(filter.has_mutations());
+
+        let project = LogicalOperator::Project(ProjectOp {
+            projections: vec![],
+            input: Box::new(base()),
+            pass_through_input: false,
+        });
+        assert!(project.has_mutations());
+
+        let agg = LogicalOperator::Aggregate(AggregateOp {
+            group_by: vec![],
+            aggregates: vec![],
+            input: Box::new(base()),
+            having: None,
+        });
+        assert!(agg.has_mutations());
+
+        let limit = LogicalOperator::Limit(LimitOp {
+            count: CountExpr::Literal(10),
+            input: Box::new(base()),
+        });
+        assert!(limit.has_mutations());
+
+        let skip = LogicalOperator::Skip(SkipOp {
+            count: CountExpr::Literal(5),
+            input: Box::new(base()),
+        });
+        assert!(skip.has_mutations());
+
+        let sort = LogicalOperator::Sort(SortOp {
+            keys: vec![],
+            input: Box::new(base()),
+        });
+        assert!(sort.has_mutations());
+
+        let distinct = LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(base()),
+            columns: None,
+        });
+        assert!(distinct.has_mutations());
+
+        let unwind = LogicalOperator::Unwind(UnwindOp {
+            expression: var("xs"),
+            variable: "x".into(),
+            ordinality_var: None,
+            offset_var: None,
+            input: Box::new(base()),
+        });
+        assert!(unwind.has_mutations());
+
+        let bind = LogicalOperator::Bind(BindOp {
+            expression: var("x"),
+            variable: "y".into(),
+            input: Box::new(base()),
+        });
+        assert!(bind.has_mutations());
+
+        let map_collect = LogicalOperator::MapCollect(MapCollectOp {
+            key_var: "k".into(),
+            value_var: "v".into(),
+            alias: "m".into(),
+            input: Box::new(base()),
+        });
+        assert!(map_collect.has_mutations());
+
+        let ret = LogicalOperator::Return(ReturnOp {
+            items: vec![],
+            distinct: false,
+            input: Box::new(base()),
+        });
+        assert!(ret.has_mutations());
+
+        let hagg = LogicalOperator::HorizontalAggregate(HorizontalAggregateOp {
+            list_column: "_path".into(),
+            entity_kind: EntityKind::Edge,
+            function: AggregateFunction::Sum,
+            property: "weight".into(),
+            alias: "total".into(),
+            input: Box::new(base()),
+        });
+        assert!(hagg.has_mutations());
+
+        let construct = LogicalOperator::Construct(ConstructOp {
+            templates: vec![],
+            input: Box::new(base()),
+        });
+        assert!(construct.has_mutations());
+    }
+
+    #[test]
+    fn has_mutations_vector_operators_are_readonly() {
+        let vscan = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "m".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: None,
+            query_vector: LogicalExpression::Literal(Value::Null),
+            k: Some(5),
+            metric: Some(VectorMetric::Cosine),
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        });
+        assert!(!vscan.has_mutations());
+
+        let vjoin = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: leaf_node_scan("m"),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(Value::Null),
+            right_variable: "n".into(),
+            right_property: "embedding".into(),
+            right_label: None,
+            index_name: None,
+            k: 3,
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            score_variable: None,
+        });
+        assert!(!vjoin.has_mutations());
+    }
+
+    #[test]
+    fn has_mutations_two_children_and_union_apply() {
+        let mutating = || *leaf_create_node("jules");
+        let read = || *leaf_node_scan("jules");
+
+        let join_readonly = LogicalOperator::Join(JoinOp {
+            left: Box::new(read()),
+            right: Box::new(read()),
+            join_type: JoinType::Inner,
+            conditions: vec![],
+        });
+        assert!(!join_readonly.has_mutations());
+
+        let join_right_mutates = LogicalOperator::Join(JoinOp {
+            left: Box::new(read()),
+            right: Box::new(mutating()),
+            join_type: JoinType::Left,
+            conditions: vec![],
+        });
+        assert!(join_right_mutates.has_mutations());
+
+        let left_join = LogicalOperator::LeftJoin(LeftJoinOp {
+            left: Box::new(mutating()),
+            right: Box::new(read()),
+            condition: None,
+        });
+        assert!(left_join.has_mutations());
+
+        let anti_join = LogicalOperator::AntiJoin(AntiJoinOp {
+            left: Box::new(read()),
+            right: Box::new(mutating()),
+        });
+        assert!(anti_join.has_mutations());
+
+        let except = LogicalOperator::Except(ExceptOp {
+            left: Box::new(read()),
+            right: Box::new(read()),
+            all: true,
+        });
+        assert!(!except.has_mutations());
+
+        let intersect = LogicalOperator::Intersect(IntersectOp {
+            left: Box::new(mutating()),
+            right: Box::new(read()),
+            all: false,
+        });
+        assert!(intersect.has_mutations());
+
+        let otherwise = LogicalOperator::Otherwise(OtherwiseOp {
+            left: Box::new(read()),
+            right: Box::new(mutating()),
+        });
+        assert!(otherwise.has_mutations());
+
+        let union = LogicalOperator::Union(UnionOp {
+            inputs: vec![read(), mutating(), read()],
+        });
+        assert!(union.has_mutations());
+
+        let mwj = LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![read(), read()],
+            conditions: vec![],
+            shared_variables: vec!["a".into()],
+        });
+        assert!(!mwj.has_mutations());
+
+        let apply_readonly = LogicalOperator::Apply(ApplyOp {
+            input: Box::new(read()),
+            subplan: Box::new(read()),
+            shared_variables: vec![],
+            optional: false,
+        });
+        assert!(!apply_readonly.has_mutations());
+
+        let apply_inner_mutates = LogicalOperator::Apply(ApplyOp {
+            input: Box::new(read()),
+            subplan: Box::new(mutating()),
+            shared_variables: vec![],
+            optional: true,
+        });
+        assert!(apply_inner_mutates.has_mutations());
+    }
+
+    #[test]
+    fn has_mutations_leaf_operators_are_readonly() {
+        assert!(!LogicalOperator::Empty.has_mutations());
+        assert!(
+            !LogicalOperator::ParameterScan(ParameterScanOp {
+                columns: vec!["a".into()],
+            })
+            .has_mutations()
+        );
+        assert!(
+            !LogicalOperator::CallProcedure(CallProcedureOp {
+                name: vec!["grafeo".into(), "pagerank".into()],
+                arguments: vec![],
+                yield_items: None,
+            })
+            .has_mutations()
+        );
+        assert!(
+            !LogicalOperator::LoadData(LoadDataOp {
+                format: LoadDataFormat::Csv,
+                with_headers: true,
+                path: "/tmp/x.csv".into(),
+                variable: "row".into(),
+                field_terminator: None,
+            })
+            .has_mutations()
+        );
+        assert!(
+            !LogicalOperator::TripleScan(TripleScanOp {
+                subject: TripleComponent::Variable("s".into()),
+                predicate: TripleComponent::Variable("p".into()),
+                object: TripleComponent::Variable("o".into()),
+                graph: None,
+                input: None,
+                dataset: None,
+            })
+            .has_mutations()
+        );
+    }
+
+    // ==================== children() ====================
+
+    #[test]
+    fn children_of_leaf_operators() {
+        assert!(LogicalOperator::Empty.children().is_empty());
+        assert!(
+            LogicalOperator::CallProcedure(CallProcedureOp {
+                name: vec!["p".into()],
+                arguments: vec![],
+                yield_items: None,
+            })
+            .children()
+            .is_empty()
+        );
+        assert!(
+            LogicalOperator::CreateGraph(CreateGraphOp {
+                graph: "g".into(),
+                silent: false,
+            })
+            .children()
+            .is_empty()
+        );
+        assert!(
+            LogicalOperator::LoadData(LoadDataOp {
+                format: LoadDataFormat::Jsonl,
+                with_headers: false,
+                path: "x.jsonl".into(),
+                variable: "r".into(),
+                field_terminator: None,
+            })
+            .children()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn children_of_optional_input_operators() {
+        let ns_no_input = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "n".into(),
+            label: None,
+            input: None,
+        });
+        assert_eq!(ns_no_input.children().len(), 0);
+
+        let ns_with_input = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "n".into(),
+            label: None,
+            input: Some(leaf_empty()),
+        });
+        assert_eq!(ns_with_input.children().len(), 1);
+
+        let edge_scan_in = LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "e".into(),
+            edge_types: vec![],
+            input: Some(leaf_empty()),
+        });
+        assert_eq!(edge_scan_in.children().len(), 1);
+    }
+
+    #[test]
+    fn children_of_two_child_operators() {
+        let join = LogicalOperator::Join(JoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            join_type: JoinType::Cross,
+            conditions: vec![],
+        });
+        assert_eq!(join.children().len(), 2);
+
+        let apply = LogicalOperator::Apply(ApplyOp {
+            input: leaf_empty(),
+            subplan: leaf_empty(),
+            shared_variables: vec![],
+            optional: false,
+        });
+        assert_eq!(apply.children().len(), 2);
+
+        let union = LogicalOperator::Union(UnionOp {
+            inputs: vec![*leaf_empty(), *leaf_empty(), *leaf_empty()],
+        });
+        assert_eq!(union.children().len(), 3);
+    }
+
+    #[test]
+    fn children_of_modify_returns_where_clause() {
+        let modify = LogicalOperator::Modify(ModifyOp {
+            delete_templates: vec![],
+            insert_templates: vec![],
+            where_clause: leaf_empty(),
+            graph: None,
+        });
+        assert_eq!(modify.children().len(), 1);
+    }
+
+    // ==================== display_label ====================
+
+    #[test]
+    fn display_label_spot_checks() {
+        let ns = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "vincent".into(),
+            label: Some("Person".into()),
+            input: None,
+        });
+        assert_eq!(ns.display_label(), "vincent:Person");
+
+        let ns_no_label = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "mia".into(),
+            label: None,
+            input: None,
+        });
+        assert_eq!(ns_no_label.display_label(), "mia:*");
+
+        let edge_scan = LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "e".into(),
+            edge_types: vec!["KNOWS".into(), "LIKES".into()],
+            input: None,
+        });
+        assert_eq!(edge_scan.display_label(), "e:KNOWS|LIKES");
+
+        let edge_scan_any = LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "e".into(),
+            edge_types: vec![],
+            input: None,
+        });
+        assert_eq!(edge_scan_any.display_label(), "e:*");
+
+        let expand = LogicalOperator::Expand(ExpandOp {
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_variable: None,
+            direction: ExpandDirection::Outgoing,
+            edge_types: vec!["KNOWS".into()],
+            min_hops: 1,
+            max_hops: Some(1),
+            input: leaf_node_scan("a"),
+            path_alias: None,
+            path_mode: PathMode::Walk,
+        });
+        assert_eq!(expand.display_label(), "(a)->[:KNOWS]->(b)");
+
+        let expand_in = LogicalOperator::Expand(ExpandOp {
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_variable: None,
+            direction: ExpandDirection::Incoming,
+            edge_types: vec![],
+            min_hops: 1,
+            max_hops: Some(1),
+            input: leaf_node_scan("a"),
+            path_alias: None,
+            path_mode: PathMode::Walk,
+        });
+        assert_eq!(expand_in.display_label(), "(a)<-[:*]<-(b)");
+
+        let expand_both = LogicalOperator::Expand(ExpandOp {
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_variable: None,
+            direction: ExpandDirection::Both,
+            edge_types: vec![],
+            min_hops: 1,
+            max_hops: Some(1),
+            input: leaf_node_scan("a"),
+            path_alias: None,
+            path_mode: PathMode::Walk,
+        });
+        assert_eq!(expand_both.display_label(), "(a)--[:*]--(b)");
+    }
+
+    #[test]
+    fn display_label_filter_pushdown_hints() {
+        let make = |hint: Option<PushdownHint>| {
+            LogicalOperator::Filter(FilterOp {
+                predicate: var("x"),
+                input: leaf_empty(),
+                pushdown_hint: hint,
+            })
+        };
+
+        let f_none = make(None);
+        let s = f_none.display_label();
+        assert!(!s.contains('['));
+
+        let f_index = make(Some(PushdownHint::IndexLookup {
+            property: "name".into(),
+        }));
+        assert!(f_index.display_label().contains("[index: name]"));
+
+        let f_range = make(Some(PushdownHint::RangeScan {
+            property: "age".into(),
+        }));
+        assert!(f_range.display_label().contains("[range: age]"));
+
+        let f_label = make(Some(PushdownHint::LabelFirst));
+        assert!(f_label.display_label().contains("[label-first]"));
+    }
+
+    #[test]
+    fn display_label_projection_join_sort_return() {
+        let proj = LogicalOperator::Project(ProjectOp {
+            projections: vec![
+                Projection {
+                    expression: var("n"),
+                    alias: Some("person".into()),
+                },
+                Projection {
+                    expression: LogicalExpression::Property {
+                        variable: "n".into(),
+                        property: "city".into(),
+                    },
+                    alias: None,
+                },
+            ],
+            input: leaf_empty(),
+            pass_through_input: false,
+        });
+        let s = proj.display_label();
+        assert!(s.contains("person"));
+        assert!(s.contains("n.city"));
+
+        let join = LogicalOperator::Join(JoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            join_type: JoinType::Cross,
+            conditions: vec![],
+        });
+        assert_eq!(join.display_label(), "Cross");
+
+        let agg = LogicalOperator::Aggregate(AggregateOp {
+            group_by: vec![var("city")],
+            aggregates: vec![],
+            input: leaf_empty(),
+            having: None,
+        });
+        assert_eq!(agg.display_label(), "group: [city]");
+
+        let limit = LogicalOperator::Limit(LimitOp {
+            count: CountExpr::Literal(10),
+            input: leaf_empty(),
+        });
+        assert_eq!(limit.display_label(), "10");
+
+        let skip = LogicalOperator::Skip(SkipOp {
+            count: CountExpr::Parameter("off".into()),
+            input: leaf_empty(),
+        });
+        assert_eq!(skip.display_label(), "$off");
+
+        let sort = LogicalOperator::Sort(SortOp {
+            keys: vec![
+                SortKey {
+                    expression: var("a"),
+                    order: SortOrder::Ascending,
+                    nulls: None,
+                },
+                SortKey {
+                    expression: var("b"),
+                    order: SortOrder::Descending,
+                    nulls: None,
+                },
+            ],
+            input: leaf_empty(),
+        });
+        let s = sort.display_label();
+        assert!(s.contains("a ASC"));
+        assert!(s.contains("b DESC"));
+
+        let distinct = LogicalOperator::Distinct(DistinctOp {
+            input: leaf_empty(),
+            columns: None,
+        });
+        assert_eq!(distinct.display_label(), "");
+
+        let ret = LogicalOperator::Return(ReturnOp {
+            items: vec![
+                ReturnItem {
+                    expression: var("n"),
+                    alias: Some("node".into()),
+                },
+                ReturnItem {
+                    expression: var("m"),
+                    alias: None,
+                },
+            ],
+            distinct: true,
+            input: leaf_empty(),
+        });
+        let s = ret.display_label();
+        assert!(s.contains("node"));
+        assert!(s.contains('m'));
+    }
+
+    #[test]
+    fn display_label_remaining_operators() {
+        let union = LogicalOperator::Union(UnionOp {
+            inputs: vec![*leaf_empty(), *leaf_empty()],
+        });
+        assert_eq!(union.display_label(), "2 branches");
+
+        let mwj = LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![*leaf_empty(), *leaf_empty(), *leaf_empty()],
+            conditions: vec![],
+            shared_variables: vec![],
+        });
+        assert_eq!(mwj.display_label(), "3 inputs");
+
+        let lj = LogicalOperator::LeftJoin(LeftJoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            condition: None,
+        });
+        assert_eq!(lj.display_label(), "");
+
+        let aj = LogicalOperator::AntiJoin(AntiJoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+        });
+        assert_eq!(aj.display_label(), "");
+
+        let unwind = LogicalOperator::Unwind(UnwindOp {
+            expression: var("xs"),
+            variable: "item".into(),
+            ordinality_var: None,
+            offset_var: None,
+            input: leaf_empty(),
+        });
+        assert_eq!(unwind.display_label(), "item");
+
+        let bind = LogicalOperator::Bind(BindOp {
+            expression: var("x"),
+            variable: "y".into(),
+            input: leaf_empty(),
+        });
+        assert_eq!(bind.display_label(), "y");
+
+        let mapc = LogicalOperator::MapCollect(MapCollectOp {
+            key_var: "k".into(),
+            value_var: "v".into(),
+            alias: "counts".into(),
+            input: leaf_empty(),
+        });
+        assert_eq!(mapc.display_label(), "counts");
+
+        let sp = LogicalOperator::ShortestPath(ShortestPathOp {
+            input: leaf_empty(),
+            source_var: "a".into(),
+            target_var: "b".into(),
+            edge_types: vec![],
+            direction: ExpandDirection::Outgoing,
+            path_alias: "p".into(),
+            all_paths: false,
+        });
+        assert_eq!(sp.display_label(), "a -> b");
+
+        let merge = LogicalOperator::Merge(MergeOp {
+            variable: "django".into(),
+            labels: vec![],
+            match_properties: vec![],
+            on_create: vec![],
+            on_match: vec![],
+            input: leaf_empty(),
+        });
+        assert_eq!(merge.display_label(), "django");
+
+        let merge_rel = LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".into(),
+            source_variable: "a".into(),
+            target_variable: "b".into(),
+            edge_type: "KNOWS".into(),
+            match_properties: vec![],
+            on_create: vec![],
+            on_match: vec![],
+            input: leaf_empty(),
+        });
+        assert_eq!(merge_rel.display_label(), "r");
+
+        let cnode = LogicalOperator::CreateNode(CreateNodeOp {
+            variable: "shosanna".into(),
+            labels: vec!["Person".into(), "Hero".into()],
+            properties: vec![],
+            input: None,
+        });
+        assert_eq!(cnode.display_label(), "shosanna:Person:Hero");
+
+        let cedge_with = LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: Some("r".into()),
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_type: "KNOWS".into(),
+            properties: vec![],
+            input: leaf_empty(),
+        });
+        assert_eq!(cedge_with.display_label(), "[r:KNOWS]");
+
+        let cedge_without = LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: None,
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_type: "KNOWS".into(),
+            properties: vec![],
+            input: leaf_empty(),
+        });
+        assert_eq!(cedge_without.display_label(), "[?:KNOWS]");
+
+        let dnode = LogicalOperator::DeleteNode(DeleteNodeOp {
+            variable: "hans".into(),
+            detach: false,
+            input: leaf_empty(),
+        });
+        assert_eq!(dnode.display_label(), "hans");
+
+        let dedge = LogicalOperator::DeleteEdge(DeleteEdgeOp {
+            variable: "r".into(),
+            input: leaf_empty(),
+        });
+        assert_eq!(dedge.display_label(), "r");
+
+        let set_prop = LogicalOperator::SetProperty(SetPropertyOp {
+            variable: "beatrix".into(),
+            properties: vec![],
+            replace: false,
+            is_edge: false,
+            input: leaf_empty(),
+        });
+        assert_eq!(set_prop.display_label(), "beatrix");
+
+        let add_lbl = LogicalOperator::AddLabel(AddLabelOp {
+            variable: "n".into(),
+            labels: vec!["A".into(), "B".into()],
+            input: leaf_empty(),
+        });
+        assert_eq!(add_lbl.display_label(), "n:A:B");
+
+        let rm_lbl = LogicalOperator::RemoveLabel(RemoveLabelOp {
+            variable: "n".into(),
+            labels: vec!["A".into()],
+            input: leaf_empty(),
+        });
+        assert_eq!(rm_lbl.display_label(), "n:A");
+
+        let call = LogicalOperator::CallProcedure(CallProcedureOp {
+            name: vec!["grafeo".into(), "pagerank".into()],
+            arguments: vec![],
+            yield_items: None,
+        });
+        assert_eq!(call.display_label(), "grafeo.pagerank");
+
+        let load = LogicalOperator::LoadData(LoadDataOp {
+            format: LoadDataFormat::Csv,
+            with_headers: true,
+            path: "data.csv".into(),
+            variable: "r".into(),
+            field_terminator: None,
+        });
+        assert_eq!(load.display_label(), "data.csv AS r");
+
+        let apply = LogicalOperator::Apply(ApplyOp {
+            input: leaf_empty(),
+            subplan: leaf_empty(),
+            shared_variables: vec![],
+            optional: false,
+        });
+        assert_eq!(apply.display_label(), "");
+
+        let vscan = LogicalOperator::VectorScan(VectorScanOp {
+            variable: "m".into(),
+            index_name: None,
+            property: "embedding".into(),
+            label: None,
+            query_vector: LogicalExpression::Literal(Value::Null),
+            k: Some(5),
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            input: None,
+        });
+        assert_eq!(vscan.display_label(), "m");
+
+        let vjoin = LogicalOperator::VectorJoin(VectorJoinOp {
+            input: leaf_empty(),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(Value::Null),
+            right_variable: "t".into(),
+            right_property: "emb".into(),
+            right_label: None,
+            index_name: None,
+            k: 3,
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            score_variable: None,
+        });
+        assert_eq!(vjoin.display_label(), "t");
+
+        // Empty / catch-all branch.
+        assert_eq!(LogicalOperator::Empty.display_label(), "");
+    }
+
+    // ==================== explain_tree / fmt_tree ====================
+
+    #[test]
+    fn explain_tree_covers_all_common_arms() {
+        // Build a deeply nested tree that exercises many arms.
+        let ns = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "n".into(),
+            label: Some("Person".into()),
+            input: Some(Box::new(LogicalOperator::Empty)),
+        });
+        let out = ns.explain_tree();
+        assert!(out.contains("NodeScan (n:Person)"));
+        assert!(out.contains("Empty"));
+
+        let ns_star = LogicalOperator::NodeScan(NodeScanOp {
+            variable: "n".into(),
+            label: None,
+            input: None,
+        });
+        assert!(ns_star.explain_tree().contains("NodeScan (n:*)"));
+
+        let es = LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "e".into(),
+            edge_types: vec![],
+            input: None,
+        });
+        assert!(es.explain_tree().contains("EdgeScan (e:*)"));
+    }
+
+    #[test]
+    fn explain_tree_expand_variants() {
+        let mk = |min, max, dir| {
+            LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".into(),
+                to_variable: "b".into(),
+                edge_variable: None,
+                direction: dir,
+                edge_types: vec!["KNOWS".into()],
+                min_hops: min,
+                max_hops: max,
+                input: leaf_node_scan("a"),
+                path_alias: None,
+                path_mode: PathMode::Walk,
+            })
+            .explain_tree()
+        };
+
+        let s = mk(1, Some(1), ExpandDirection::Outgoing);
+        assert!(s.contains("(a)->[:KNOWS]->(b)"));
+        let s = mk(2, Some(2), ExpandDirection::Incoming);
+        assert!(s.contains("*2"));
+        assert!(s.contains("<-"));
+        let s = mk(1, Some(3), ExpandDirection::Both);
+        assert!(s.contains("*1..3"));
+        assert!(s.contains("--"));
+        let s = mk(2, None, ExpandDirection::Outgoing);
+        assert!(s.contains("*2.."));
+    }
+
+    #[test]
+    fn explain_tree_filter_with_all_hints() {
+        let base = || {
+            LogicalOperator::Filter(FilterOp {
+                predicate: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Property {
+                        variable: "n".into(),
+                        property: "age".into(),
+                    }),
+                    op: BinaryOp::Eq,
+                    right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
+                },
+                input: leaf_node_scan("n"),
+                pushdown_hint: None,
+            })
+        };
+        let mut f = base();
+        if let LogicalOperator::Filter(ref mut op) = f {
+            op.pushdown_hint = Some(PushdownHint::IndexLookup {
+                property: "age".into(),
+            });
+        }
+        assert!(f.explain_tree().contains("[index: age]"));
+
+        if let LogicalOperator::Filter(ref mut op) = f {
+            op.pushdown_hint = Some(PushdownHint::RangeScan {
+                property: "age".into(),
+            });
+        }
+        assert!(f.explain_tree().contains("[range: age]"));
+
+        if let LogicalOperator::Filter(ref mut op) = f {
+            op.pushdown_hint = Some(PushdownHint::LabelFirst);
+        }
+        assert!(f.explain_tree().contains("[label-first]"));
+    }
+
+    #[test]
+    fn explain_tree_projection_aggregate_sort_return() {
+        let proj = LogicalOperator::Project(ProjectOp {
+            projections: vec![
+                Projection {
+                    expression: var("n"),
+                    alias: Some("who".into()),
+                },
+                Projection {
+                    expression: var("m"),
+                    alias: None,
+                },
+            ],
+            input: leaf_empty(),
+            pass_through_input: true,
+        });
+        let s = proj.explain_tree();
+        assert!(s.contains("Project"));
+        assert!(s.contains("n AS who"));
+
+        let agg = LogicalOperator::Aggregate(AggregateOp {
+            group_by: vec![var("city")],
+            aggregates: vec![
+                AggregateExpr {
+                    function: AggregateFunction::Count,
+                    expression: None,
+                    expression2: None,
+                    distinct: false,
+                    alias: Some("c".into()),
+                    percentile: None,
+                    separator: None,
+                },
+                AggregateExpr {
+                    function: AggregateFunction::Sum,
+                    expression: Some(var("x")),
+                    expression2: None,
+                    distinct: false,
+                    alias: None,
+                    percentile: None,
+                    separator: None,
+                },
+            ],
+            input: leaf_empty(),
+            having: None,
+        });
+        let s = agg.explain_tree();
+        assert!(s.contains("Aggregate"));
+        assert!(s.contains("count(...) AS c"));
+        assert!(s.contains("sum(...)"));
+
+        let sort = LogicalOperator::Sort(SortOp {
+            keys: vec![SortKey {
+                expression: var("age"),
+                order: SortOrder::Descending,
+                nulls: None,
+            }],
+            input: leaf_empty(),
+        });
+        assert!(sort.explain_tree().contains("age DESC"));
+
+        let ret_distinct = LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: var("n"),
+                alias: Some("who".into()),
+            }],
+            distinct: true,
+            input: leaf_empty(),
+        });
+        let s = ret_distinct.explain_tree();
+        assert!(s.contains("Return DISTINCT"));
+        assert!(s.contains("n AS who"));
+
+        let limit = LogicalOperator::Limit(LimitOp {
+            count: CountExpr::Literal(5),
+            input: leaf_empty(),
+        });
+        assert!(limit.explain_tree().contains("Limit (5)"));
+
+        let skip = LogicalOperator::Skip(SkipOp {
+            count: CountExpr::Literal(2),
+            input: leaf_empty(),
+        });
+        assert!(skip.explain_tree().contains("Skip (2)"));
+
+        let distinct = LogicalOperator::Distinct(DistinctOp {
+            input: leaf_empty(),
+            columns: None,
+        });
+        assert!(distinct.explain_tree().contains("Distinct"));
+    }
+
+    #[test]
+    fn explain_tree_joins_and_set_ops() {
+        let join = LogicalOperator::Join(JoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            join_type: JoinType::Inner,
+            conditions: vec![],
+        });
+        assert!(join.explain_tree().contains("Join (Inner)"));
+
+        let left_join_cond = LogicalOperator::LeftJoin(LeftJoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            condition: Some(var("x")),
+        });
+        assert!(
+            left_join_cond
+                .explain_tree()
+                .contains("LeftJoin (condition:")
+        );
+
+        let left_join_none = LogicalOperator::LeftJoin(LeftJoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            condition: None,
+        });
+        let s = left_join_none.explain_tree();
+        assert!(s.contains("LeftJoin"));
+        assert!(!s.contains("condition:"));
+
+        let anti = LogicalOperator::AntiJoin(AntiJoinOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+        });
+        assert!(anti.explain_tree().contains("AntiJoin"));
+
+        let union = LogicalOperator::Union(UnionOp {
+            inputs: vec![*leaf_empty(), *leaf_empty()],
+        });
+        assert!(union.explain_tree().contains("Union (2 branches)"));
+
+        let mwj = LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![*leaf_empty(), *leaf_empty()],
+            conditions: vec![],
+            shared_variables: vec!["a".into(), "b".into()],
+        });
+        let s = mwj.explain_tree();
+        assert!(s.contains("MultiWayJoin"));
+        assert!(s.contains("shared: [a, b]"));
+
+        let except_all = LogicalOperator::Except(ExceptOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            all: true,
+        });
+        assert!(except_all.explain_tree().contains("Except ALL"));
+        let except = LogicalOperator::Except(ExceptOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            all: false,
+        });
+        assert!(except.explain_tree().contains("Except\n"));
+
+        let inter_all = LogicalOperator::Intersect(IntersectOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            all: true,
+        });
+        assert!(inter_all.explain_tree().contains("Intersect ALL"));
+        let inter = LogicalOperator::Intersect(IntersectOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+            all: false,
+        });
+        assert!(inter.explain_tree().contains("Intersect\n"));
+
+        let otherwise = LogicalOperator::Otherwise(OtherwiseOp {
+            left: leaf_empty(),
+            right: leaf_empty(),
+        });
+        assert!(otherwise.explain_tree().contains("Otherwise"));
+    }
+
+    #[test]
+    fn explain_tree_unwind_bind_mapcollect_apply_sp() {
+        let unwind = LogicalOperator::Unwind(UnwindOp {
+            expression: var("xs"),
+            variable: "item".into(),
+            ordinality_var: None,
+            offset_var: None,
+            input: leaf_empty(),
+        });
+        assert!(unwind.explain_tree().contains("Unwind (item)"));
+
+        let bind = LogicalOperator::Bind(BindOp {
+            expression: var("x"),
+            variable: "y".into(),
+            input: leaf_empty(),
+        });
+        assert!(bind.explain_tree().contains("Bind (y)"));
+
+        let mapc = LogicalOperator::MapCollect(MapCollectOp {
+            key_var: "k".into(),
+            value_var: "v".into(),
+            alias: "m".into(),
+            input: leaf_empty(),
+        });
+        let s = mapc.explain_tree();
+        assert!(s.contains("MapCollect"));
+        assert!(s.contains("k -> v AS m"));
+
+        let apply = LogicalOperator::Apply(ApplyOp {
+            input: leaf_empty(),
+            subplan: leaf_empty(),
+            shared_variables: vec!["a".into()],
+            optional: true,
+        });
+        assert!(apply.explain_tree().contains("Apply"));
+
+        let sp = LogicalOperator::ShortestPath(ShortestPathOp {
+            input: leaf_empty(),
+            source_var: "a".into(),
+            target_var: "b".into(),
+            edge_types: vec![],
+            direction: ExpandDirection::Outgoing,
+            path_alias: "p".into(),
+            all_paths: false,
+        });
+        assert!(sp.explain_tree().contains("ShortestPath (a -> b)"));
+    }
+
+    #[test]
+    fn explain_tree_mutations() {
+        let merge = LogicalOperator::Merge(MergeOp {
+            variable: "vincent".into(),
+            labels: vec!["Person".into()],
+            match_properties: vec![],
+            on_create: vec![],
+            on_match: vec![],
+            input: leaf_empty(),
+        });
+        assert!(merge.explain_tree().contains("Merge (vincent)"));
+
+        let merge_rel = LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".into(),
+            source_variable: "a".into(),
+            target_variable: "b".into(),
+            edge_type: "KNOWS".into(),
+            match_properties: vec![],
+            on_create: vec![],
+            on_match: vec![],
+            input: leaf_empty(),
+        });
+        assert!(merge_rel.explain_tree().contains("MergeRelationship (r)"));
+
+        let cnode = LogicalOperator::CreateNode(CreateNodeOp {
+            variable: "mia".into(),
+            labels: vec!["Person".into()],
+            properties: vec![],
+            input: Some(leaf_empty()),
+        });
+        let s = cnode.explain_tree();
+        assert!(s.contains("CreateNode (mia:Person)"));
+        assert!(s.contains("Empty"));
+
+        let cnode_no_input = LogicalOperator::CreateNode(CreateNodeOp {
+            variable: "mia".into(),
+            labels: vec![],
+            properties: vec![],
+            input: None,
+        });
+        assert!(cnode_no_input.explain_tree().contains("CreateNode (mia:)"));
+
+        let cedge = LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: Some("r".into()),
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_type: "KNOWS".into(),
+            properties: vec![],
+            input: leaf_empty(),
+        });
+        assert!(
+            cedge
+                .explain_tree()
+                .contains("CreateEdge (a)-[r:KNOWS]->(b)")
+        );
+
+        let cedge_anon = LogicalOperator::CreateEdge(CreateEdgeOp {
+            variable: None,
+            from_variable: "a".into(),
+            to_variable: "b".into(),
+            edge_type: "KNOWS".into(),
+            properties: vec![],
+            input: leaf_empty(),
+        });
+        assert!(cedge_anon.explain_tree().contains("[?:KNOWS]"));
+
+        let dnode = LogicalOperator::DeleteNode(DeleteNodeOp {
+            variable: "butch".into(),
+            detach: true,
+            input: leaf_empty(),
+        });
+        assert!(dnode.explain_tree().contains("DeleteNode (butch)"));
+
+        let dedge = LogicalOperator::DeleteEdge(DeleteEdgeOp {
+            variable: "r".into(),
+            input: leaf_empty(),
+        });
+        assert!(dedge.explain_tree().contains("DeleteEdge (r)"));
+
+        let set_prop = LogicalOperator::SetProperty(SetPropertyOp {
+            variable: "n".into(),
+            properties: vec![("name".into(), var("x")), ("age".into(), var("y"))],
+            replace: false,
+            is_edge: false,
+            input: leaf_empty(),
+        });
+        let s = set_prop.explain_tree();
+        assert!(s.contains("SetProperty"));
+        assert!(s.contains("n.name"));
+        assert!(s.contains("n.age"));
+
+        let add_lbl = LogicalOperator::AddLabel(AddLabelOp {
+            variable: "n".into(),
+            labels: vec!["A".into()],
+            input: leaf_empty(),
+        });
+        assert!(add_lbl.explain_tree().contains("AddLabel (n:A)"));
+
+        let rm_lbl = LogicalOperator::RemoveLabel(RemoveLabelOp {
+            variable: "n".into(),
+            labels: vec!["A".into(), "B".into()],
+            input: leaf_empty(),
+        });
+        assert!(rm_lbl.explain_tree().contains("RemoveLabel (n:A:B)"));
+    }
+
+    #[test]
+    fn explain_tree_call_and_load_data() {
+        let call = LogicalOperator::CallProcedure(CallProcedureOp {
+            name: vec!["grafeo".into(), "pagerank".into()],
+            arguments: vec![],
+            yield_items: None,
+        });
+        assert!(
+            call.explain_tree()
+                .contains("CallProcedure (grafeo.pagerank)")
+        );
+
+        let csv = LogicalOperator::LoadData(LoadDataOp {
+            format: LoadDataFormat::Csv,
+            with_headers: true,
+            path: "data.csv".into(),
+            variable: "row".into(),
+            field_terminator: None,
+        });
+        let s = csv.explain_tree();
+        assert!(s.contains("LoadCsv"));
+        assert!(s.contains("WITH HEADERS"));
+        assert!(s.contains("data.csv"));
+        assert!(s.contains("AS row"));
+
+        let csv_no_hdr = LogicalOperator::LoadData(LoadDataOp {
+            format: LoadDataFormat::Csv,
+            with_headers: false,
+            path: "data.csv".into(),
+            variable: "row".into(),
+            field_terminator: None,
+        });
+        assert!(!csv_no_hdr.explain_tree().contains("WITH HEADERS"));
+
+        let jsonl = LogicalOperator::LoadData(LoadDataOp {
+            format: LoadDataFormat::Jsonl,
+            with_headers: false,
+            path: "data.jsonl".into(),
+            variable: "r".into(),
+            field_terminator: None,
+        });
+        assert!(jsonl.explain_tree().contains("LoadJsonl"));
+
+        let parquet = LogicalOperator::LoadData(LoadDataOp {
+            format: LoadDataFormat::Parquet,
+            with_headers: false,
+            path: "data.parquet".into(),
+            variable: "r".into(),
+            field_terminator: None,
+        });
+        assert!(parquet.explain_tree().contains("LoadParquet"));
+    }
+
+    #[test]
+    fn explain_tree_triple_scan_and_fallback() {
+        let ts = LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".into()),
+            predicate: TripleComponent::Iri("http://ex/p".into()),
+            object: TripleComponent::Literal(Value::Int64(5)),
+            graph: None,
+            input: Some(leaf_empty()),
+            dataset: None,
+        });
+        let s = ts.explain_tree();
+        assert!(s.contains("TripleScan"));
+        assert!(s.contains("?s"));
+        assert!(s.contains("<http://ex/p>"));
+        assert!(s.contains("Empty"));
+
+        let ts_no_input = LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".into()),
+            predicate: TripleComponent::Variable("p".into()),
+            object: TripleComponent::Variable("o".into()),
+            graph: None,
+            input: None,
+            dataset: None,
+        });
+        assert!(ts_no_input.explain_tree().contains("TripleScan"));
+
+        // Fallback arm for operators without a specific formatter.
+        let graph_op = LogicalOperator::CreateGraph(CreateGraphOp {
+            graph: "g".into(),
+            silent: false,
+        });
+        let out = graph_op.explain_tree();
+        assert!(!out.is_empty());
+    }
+
+    // ==================== fmt_expr helper ====================
+
+    #[test]
+    fn fmt_expr_covers_common_variants() {
+        let v = var("n");
+        assert_eq!(fmt_expr(&v), "n");
+
+        let p = LogicalExpression::Property {
+            variable: "n".into(),
+            property: "age".into(),
+        };
+        assert_eq!(fmt_expr(&p), "n.age");
+
+        let lit = LogicalExpression::Literal(Value::Int64(42));
+        assert_eq!(fmt_expr(&lit), "42");
+
+        let bin = LogicalExpression::Binary {
+            left: Box::new(var("a")),
+            op: BinaryOp::Eq,
+            right: Box::new(LogicalExpression::Literal(Value::Int64(1))),
+        };
+        let s = fmt_expr(&bin);
+        assert!(s.contains("Eq"));
+        assert!(s.contains('a'));
+
+        let un = LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand: Box::new(var("a")),
+        };
+        let s = fmt_expr(&un);
+        assert!(s.contains("Not"));
+
+        let fc = LogicalExpression::FunctionCall {
+            name: "toLower".into(),
+            args: vec![var("name")],
+            distinct: false,
+        };
+        assert_eq!(fmt_expr(&fc), "toLower(name)");
+
+        // Fallback arm: non-common variant hits the `_ => format!("{expr:?}")` path.
+        let list = LogicalExpression::List(vec![var("a")]);
+        let out = fmt_expr(&list);
+        assert!(out.contains("List") || out.contains('['));
+    }
+
+    // ==================== fmt_triple_component helper ====================
+
+    #[test]
+    fn fmt_triple_component_variants() {
+        assert_eq!(
+            fmt_triple_component(&TripleComponent::Variable("s".into())),
+            "?s"
+        );
+        assert_eq!(
+            fmt_triple_component(&TripleComponent::Iri("http://ex/p".into())),
+            "<http://ex/p>"
+        );
+        assert!(fmt_triple_component(&TripleComponent::Literal(Value::Int64(10))).contains("10"));
+        assert_eq!(
+            fmt_triple_component(&TripleComponent::LangLiteral {
+                value: "hello".into(),
+                lang: "en".into(),
+            }),
+            "\"hello\"@en"
+        );
+        assert_eq!(
+            fmt_triple_component(&TripleComponent::BlankNode("b0".into())),
+            "_:b0"
+        );
+    }
+
+    // ==================== TripleComponent::as_variable ====================
+
+    #[test]
+    fn triple_component_as_variable() {
+        assert_eq!(
+            TripleComponent::Variable("s".into()).as_variable(),
+            Some("s")
+        );
+        assert_eq!(
+            TripleComponent::Iri("http://ex/p".into()).as_variable(),
+            None
+        );
+        assert_eq!(
+            TripleComponent::Literal(Value::Int64(1)).as_variable(),
+            None
+        );
+        assert_eq!(TripleComponent::BlankNode("b".into()).as_variable(), None);
+        assert_eq!(
+            TripleComponent::LangLiteral {
+                value: "v".into(),
+                lang: "en".into(),
+            }
+            .as_variable(),
+            None
+        );
+    }
 }

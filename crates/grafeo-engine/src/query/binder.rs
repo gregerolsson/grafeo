@@ -2739,4 +2739,1604 @@ mod tests {
             ctx.variable_names()
         );
     }
+
+    // ========================================================================
+    // Coverage tests: BindingContext helpers
+    // ========================================================================
+
+    #[test]
+    fn test_binding_context_len_and_is_empty_and_remove() {
+        let mut ctx = BindingContext::new();
+        assert!(ctx.is_empty());
+        assert_eq!(ctx.len(), 0);
+
+        ctx.add_variable(
+            "vincent".to_string(),
+            VariableInfo {
+                name: "vincent".to_string(),
+                data_type: LogicalType::Node,
+                is_node: true,
+                is_edge: false,
+            },
+        );
+        ctx.add_variable(
+            "jules".to_string(),
+            VariableInfo {
+                name: "jules".to_string(),
+                data_type: LogicalType::Node,
+                is_node: true,
+                is_edge: false,
+            },
+        );
+        assert!(!ctx.is_empty());
+        assert_eq!(ctx.len(), 2);
+        assert_eq!(
+            ctx.variable_names(),
+            vec!["vincent".to_string(), "jules".to_string()]
+        );
+
+        ctx.remove_variable("vincent");
+        assert_eq!(ctx.len(), 1);
+        assert!(!ctx.contains("vincent"));
+        assert!(ctx.contains("jules"));
+
+        // Removing nonexistent is a no-op.
+        ctx.remove_variable("nonexistent");
+        assert_eq!(ctx.len(), 1);
+    }
+
+    #[test]
+    fn test_binder_default_impl() {
+        let binder = Binder::default();
+        assert!(binder.context.is_empty());
+    }
+
+    // ========================================================================
+    // Coverage tests: simple leaf / passthrough operators
+    // ========================================================================
+
+    #[test]
+    fn test_bind_empty_operator_alone() {
+        let plan = LogicalPlan::new(LogicalOperator::Empty);
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_bind_limit_and_skip_delegate_to_input() {
+        use crate::query::plan::{CountExpr, LimitOp, SkipOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::Limit(LimitOp {
+            count: CountExpr::Literal(5),
+            input: Box::new(LogicalOperator::Skip(SkipOp {
+                count: CountExpr::Literal(1),
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "mia".to_string(),
+                    label: Some("Person".to_string()),
+                    input: None,
+                })),
+            })),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("mia"));
+    }
+
+    #[test]
+    fn test_bind_distinct_delegates_to_input() {
+        use crate::query::plan::DistinctOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "butch".to_string(),
+                label: None,
+                input: None,
+            })),
+            columns: None,
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("butch"));
+    }
+
+    #[test]
+    fn test_bind_edge_scan_with_input_binds_edge_variable() {
+        use crate::query::plan::EdgeScanOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "e".to_string(),
+            edge_types: vec!["KNOWS".to_string()],
+            input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "django".to_string(),
+                label: None,
+                input: None,
+            }))),
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("django"));
+        let edge_info = ctx.get("e").expect("edge variable bound");
+        assert!(edge_info.is_edge);
+        assert!(!edge_info.is_node);
+    }
+
+    #[test]
+    fn test_bind_edge_scan_without_input() {
+        use crate::query::plan::EdgeScanOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::EdgeScan(EdgeScanOp {
+            variable: "rel".to_string(),
+            edge_types: vec![],
+            input: None,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.get("rel").unwrap().is_edge);
+    }
+
+    // ========================================================================
+    // Coverage tests: SPARQL / RDF operators
+    // ========================================================================
+
+    #[test]
+    fn test_bind_triple_scan_registers_all_variable_components() {
+        use crate::query::plan::{TripleComponent, TripleScanOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Variable("p".to_string()),
+            object: TripleComponent::Variable("o".to_string()),
+            graph: Some(TripleComponent::Variable("g".to_string())),
+            input: None,
+            dataset: None,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("s"));
+        assert!(ctx.contains("p"));
+        assert!(ctx.contains("o"));
+        assert!(ctx.contains("g"));
+    }
+
+    #[test]
+    fn test_bind_triple_scan_skips_constant_components() {
+        use crate::query::plan::{TripleComponent, TripleScanOp};
+        use grafeo_common::types::Value;
+
+        let plan = LogicalPlan::new(LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Iri("http://example.org/s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Literal(Value::Int64(42)),
+            graph: None,
+            input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "existing".to_string(),
+                label: None,
+                input: None,
+            }))),
+            dataset: None,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        // Input was bound.
+        assert!(ctx.contains("existing"));
+        // No variable components registered.
+        assert_eq!(ctx.len(), 1);
+    }
+
+    #[test]
+    fn test_bind_triple_scan_does_not_rebind_existing_variable() {
+        use crate::query::plan::{TripleComponent, TripleScanOp};
+
+        // Use an input that already binds 's' as a node. The triple scan
+        // must not clobber it with the RDF-term type.
+        let plan = LogicalPlan::new(LogicalOperator::TripleScan(TripleScanOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Variable("p".to_string()),
+            object: TripleComponent::Variable("o".to_string()),
+            graph: None,
+            input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "s".to_string(),
+                label: None,
+                input: None,
+            }))),
+            dataset: None,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        // 's' retains its node status because the triple scan's branch is
+        // skipped once the variable is already present.
+        assert!(ctx.get("s").unwrap().is_node);
+        assert!(ctx.contains("p"));
+        assert!(ctx.contains("o"));
+    }
+
+    #[test]
+    fn test_bind_insert_triple_and_delete_triple_with_and_without_input() {
+        use crate::query::plan::{DeleteTripleOp, InsertTripleOp, TripleComponent};
+
+        // With input.
+        let plan = LogicalPlan::new(LogicalOperator::InsertTriple(InsertTripleOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Variable("o".to_string()),
+            graph: None,
+            input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "hans".to_string(),
+                label: None,
+                input: None,
+            }))),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("hans"));
+
+        // Without input.
+        let plan2 = LogicalPlan::new(LogicalOperator::InsertTriple(InsertTripleOp {
+            subject: TripleComponent::Iri("http://example.org/s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Iri("http://example.org/o".to_string()),
+            graph: None,
+            input: None,
+        }));
+        let mut binder2 = Binder::new();
+        assert!(binder2.bind(&plan2).is_ok());
+
+        // Delete with input.
+        let plan3 = LogicalPlan::new(LogicalOperator::DeleteTriple(DeleteTripleOp {
+            subject: TripleComponent::Variable("s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Variable("o".to_string()),
+            graph: None,
+            input: Some(Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "shosanna".to_string(),
+                label: None,
+                input: None,
+            }))),
+        }));
+        let mut binder3 = Binder::new();
+        let ctx3 = binder3.bind(&plan3).unwrap();
+        assert!(ctx3.contains("shosanna"));
+
+        // Delete without input.
+        let plan4 = LogicalPlan::new(LogicalOperator::DeleteTriple(DeleteTripleOp {
+            subject: TripleComponent::Iri("http://example.org/s".to_string()),
+            predicate: TripleComponent::Iri("http://example.org/p".to_string()),
+            object: TripleComponent::Iri("http://example.org/o".to_string()),
+            graph: None,
+            input: None,
+        }));
+        let mut binder4 = Binder::new();
+        assert!(binder4.bind(&plan4).is_ok());
+    }
+
+    #[test]
+    fn test_bind_modify_operator_walks_where_clause() {
+        use crate::query::plan::ModifyOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Modify(ModifyOp {
+            delete_templates: vec![],
+            insert_templates: vec![],
+            where_clause: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "beatrix".to_string(),
+                label: None,
+                input: None,
+            })),
+            graph: None,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("beatrix"));
+    }
+
+    #[test]
+    fn test_bind_construct_walks_input() {
+        use crate::query::plan::ConstructOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Construct(ConstructOp {
+            templates: vec![],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "node".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("node"));
+    }
+
+    #[test]
+    fn test_bind_graph_ddl_operators_succeed_without_input() {
+        use crate::query::plan::{
+            AddGraphOp, ClearGraphOp, CopyGraphOp, CreateGraphOp, DropGraphOp, LoadGraphOp,
+            MoveGraphOp,
+        };
+
+        // Each DDL operator should bind cleanly even without input. We cover
+        // every arm of the consolidated DDL match block.
+        let cases: Vec<LogicalOperator> = vec![
+            LogicalOperator::ClearGraph(ClearGraphOp {
+                graph: None,
+                silent: false,
+            }),
+            LogicalOperator::CreateGraph(CreateGraphOp {
+                graph: "http://example.org/g".to_string(),
+                silent: false,
+            }),
+            LogicalOperator::DropGraph(DropGraphOp {
+                graph: None,
+                silent: true,
+            }),
+            LogicalOperator::LoadGraph(LoadGraphOp {
+                source: "http://example.org/data".to_string(),
+                destination: None,
+                silent: false,
+            }),
+            LogicalOperator::CopyGraph(CopyGraphOp {
+                source: None,
+                destination: None,
+                silent: false,
+            }),
+            LogicalOperator::MoveGraph(MoveGraphOp {
+                source: None,
+                destination: None,
+                silent: false,
+            }),
+            LogicalOperator::AddGraph(AddGraphOp {
+                source: None,
+                destination: None,
+                silent: false,
+            }),
+        ];
+
+        for op in cases {
+            let plan = LogicalPlan::new(op);
+            let mut binder = Binder::new();
+            assert!(binder.bind(&plan).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_bind_create_property_graph_is_noop() {
+        use crate::query::plan::CreatePropertyGraphOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::CreatePropertyGraph(
+            CreatePropertyGraphOp {
+                name: "social".to_string(),
+                node_tables: vec![],
+                edge_tables: vec![],
+            },
+        ));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.is_empty());
+    }
+
+    // ========================================================================
+    // Coverage tests: joins, set ops, union, bind
+    // ========================================================================
+
+    #[test]
+    fn test_bind_union_walks_all_inputs() {
+        use crate::query::plan::UnionOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Union(UnionOp {
+            inputs: vec![
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "amsterdam".to_string(),
+                    label: None,
+                    input: None,
+                }),
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "berlin".to_string(),
+                    label: None,
+                    input: None,
+                }),
+            ],
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("amsterdam"));
+        assert!(ctx.contains("berlin"));
+    }
+
+    #[test]
+    fn test_bind_left_join_with_condition_validates_it() {
+        use crate::query::plan::LeftJoinOp;
+
+        // Left and right both bind variables; a condition referencing a
+        // defined variable validates, whereas an unknown variable fails.
+        let ok_plan = LogicalPlan::new(LogicalOperator::LeftJoin(LeftJoinOp {
+            left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "paris".to_string(),
+                label: None,
+                input: None,
+            })),
+            right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "prague".to_string(),
+                label: None,
+                input: None,
+            })),
+            condition: Some(LogicalExpression::Variable("paris".to_string())),
+        }));
+        let mut binder = Binder::new();
+        assert!(binder.bind(&ok_plan).is_ok());
+
+        // Missing condition is accepted too.
+        let plan_no_cond = LogicalPlan::new(LogicalOperator::LeftJoin(LeftJoinOp {
+            left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "paris".to_string(),
+                label: None,
+                input: None,
+            })),
+            right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "prague".to_string(),
+                label: None,
+                input: None,
+            })),
+            condition: None,
+        }));
+        assert!(Binder::new().bind(&plan_no_cond).is_ok());
+
+        // Condition referencing undefined variable rejects.
+        let bad_plan = LogicalPlan::new(LogicalOperator::LeftJoin(LeftJoinOp {
+            left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "paris".to_string(),
+                label: None,
+                input: None,
+            })),
+            right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "prague".to_string(),
+                label: None,
+                input: None,
+            })),
+            condition: Some(LogicalExpression::Variable("missing".to_string())),
+        }));
+        assert!(Binder::new().bind(&bad_plan).is_err());
+    }
+
+    #[test]
+    fn test_bind_anti_join_walks_both_sides() {
+        use crate::query::plan::AntiJoinOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::AntiJoin(AntiJoinOp {
+            left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "left_side".to_string(),
+                label: None,
+                input: None,
+            })),
+            right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "right_side".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("left_side"));
+        assert!(ctx.contains("right_side"));
+    }
+
+    #[test]
+    fn test_bind_bind_operator_adds_variable_and_validates_expression() {
+        use crate::query::plan::BindOp;
+
+        // Bind with a defined expression reference.
+        let plan = LogicalPlan::new(LogicalOperator::Bind(BindOp {
+            expression: LogicalExpression::Variable("n".to_string()),
+            variable: "x".to_string(),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("x"));
+
+        // BIND expression referencing undefined variable must fail.
+        let bad_plan = LogicalPlan::new(LogicalOperator::Bind(BindOp {
+            expression: LogicalExpression::Variable("ghost".to_string()),
+            variable: "x".to_string(),
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&bad_plan).is_err());
+    }
+
+    #[test]
+    fn test_bind_except_intersect_otherwise_walk_both_sides() {
+        use crate::query::plan::{ExceptOp, IntersectOp, OtherwiseOp};
+
+        for op in [
+            LogicalOperator::Except(ExceptOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "l".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "r".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                all: false,
+            }),
+            LogicalOperator::Intersect(IntersectOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "l".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "r".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                all: false,
+            }),
+            LogicalOperator::Otherwise(OtherwiseOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "l".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "r".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            }),
+        ] {
+            let plan = LogicalPlan::new(op);
+            let mut binder = Binder::new();
+            let ctx = binder.bind(&plan).unwrap();
+            assert!(ctx.contains("l"));
+            assert!(ctx.contains("r"));
+        }
+    }
+
+    #[test]
+    fn test_bind_multi_way_join_validates_conditions() {
+        use crate::query::plan::{JoinCondition, MultiWayJoinOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                }),
+                LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                }),
+            ],
+            conditions: vec![JoinCondition {
+                left: LogicalExpression::Variable("a".to_string()),
+                right: LogicalExpression::Variable("b".to_string()),
+            }],
+            shared_variables: vec![],
+        }));
+        let mut binder = Binder::new();
+        assert!(binder.bind(&plan).is_ok());
+
+        // Condition with undefined variable fails.
+        let bad_plan = LogicalPlan::new(LogicalOperator::MultiWayJoin(MultiWayJoinOp {
+            inputs: vec![LogicalOperator::NodeScan(NodeScanOp {
+                variable: "a".to_string(),
+                label: None,
+                input: None,
+            })],
+            conditions: vec![JoinCondition {
+                left: LogicalExpression::Variable("a".to_string()),
+                right: LogicalExpression::Variable("nope".to_string()),
+            }],
+            shared_variables: vec![],
+        }));
+        assert!(Binder::new().bind(&bad_plan).is_err());
+    }
+
+    // ========================================================================
+    // Coverage tests: Apply / parameter scan / subplan scoping
+    // ========================================================================
+
+    #[test]
+    fn test_bind_parameter_scan_registers_columns() {
+        use crate::query::plan::ParameterScanOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::ParameterScan(ParameterScanOp {
+            columns: vec!["vincent".to_string(), "jules".to_string()],
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("vincent"));
+        assert!(ctx.contains("jules"));
+    }
+
+    #[test]
+    fn test_bind_apply_removes_internal_variables_from_input_and_subplan() {
+        use crate::query::plan::ApplyOp;
+
+        // Outer input: a Return that exposes only an aliased column. The
+        // internal NodeScan variable "inner_scan" is bound by Return's input,
+        // then scoped out by Apply because Return registers explicit outputs.
+        let plan = LogicalPlan::new(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(LogicalOperator::Return(ReturnOp {
+                items: vec![ReturnItem {
+                    expression: LogicalExpression::Variable("inner_scan".to_string()),
+                    alias: Some("out_col".to_string()),
+                }],
+                distinct: false,
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "inner_scan".to_string(),
+                    label: None,
+                    input: None,
+                })),
+            })),
+            subplan: Box::new(LogicalOperator::Return(ReturnOp {
+                items: vec![ReturnItem {
+                    expression: LogicalExpression::Literal(grafeo_common::types::Value::Int64(1)),
+                    alias: Some("sub_col".to_string()),
+                }],
+                distinct: false,
+                input: Box::new(LogicalOperator::Empty),
+            })),
+            shared_variables: vec![],
+            optional: false,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+
+        // Output of the Apply should include projected columns from both
+        // sides but not the internal node-scan variable.
+        assert!(ctx.contains("out_col"), "input projection exposed");
+        assert!(ctx.contains("sub_col"), "subplan output registered");
+        assert!(
+            !ctx.contains("inner_scan"),
+            "internal scan variable should be scoped out"
+        );
+    }
+
+    #[test]
+    fn test_bind_apply_without_explicit_projection_keeps_input_variables() {
+        use crate::query::plan::ApplyOp;
+
+        // When the outer input has no projection, the scoping branch is
+        // skipped and input variables stay visible.
+        let plan = LogicalPlan::new(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "outer".to_string(),
+                label: None,
+                input: None,
+            })),
+            subplan: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "inner".to_string(),
+                label: None,
+                input: None,
+            })),
+            shared_variables: vec![],
+            optional: false,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("outer"));
+    }
+
+    // ========================================================================
+    // Coverage tests: MERGE relationship
+    // ========================================================================
+
+    #[test]
+    fn test_merge_relationship_rejects_undefined_source_and_target() {
+        use crate::query::plan::MergeRelationshipOp;
+
+        // Undefined source.
+        let plan = LogicalPlan::new(LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".to_string(),
+            source_variable: "phantom".to_string(),
+            target_variable: "b".to_string(),
+            edge_type: "KNOWS".to_string(),
+            match_properties: vec![],
+            on_create: vec![],
+            on_match: vec![],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "b".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        let err = Binder::new().bind(&plan).unwrap_err();
+        assert!(err.to_string().contains("MERGE relationship source"));
+
+        // Undefined target.
+        let plan2 = LogicalPlan::new(LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".to_string(),
+            source_variable: "a".to_string(),
+            target_variable: "phantom".to_string(),
+            edge_type: "KNOWS".to_string(),
+            match_properties: vec![],
+            on_create: vec![],
+            on_match: vec![],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "a".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        let err2 = Binder::new().bind(&plan2).unwrap_err();
+        assert!(err2.to_string().contains("MERGE relationship target"));
+    }
+
+    #[test]
+    fn test_merge_relationship_happy_path_binds_edge_variable() {
+        use crate::query::plan::{JoinOp, JoinType, MergeRelationshipOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::MergeRelationship(MergeRelationshipOp {
+            variable: "r".to_string(),
+            source_variable: "a".to_string(),
+            target_variable: "b".to_string(),
+            edge_type: "KNOWS".to_string(),
+            match_properties: vec![(
+                "since".to_string(),
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(2020)),
+            )],
+            on_create: vec![(
+                "created_at".to_string(),
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(1)),
+            )],
+            on_match: vec![(
+                "updated_at".to_string(),
+                LogicalExpression::Literal(grafeo_common::types::Value::Int64(2)),
+            )],
+            input: Box::new(LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "a".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "b".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                join_type: JoinType::Cross,
+                conditions: vec![],
+            })),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        let edge = ctx.get("r").expect("edge variable bound");
+        assert!(edge.is_edge);
+        assert!(!edge.is_node);
+    }
+
+    // ========================================================================
+    // Coverage tests: UNWIND, CallProcedure, LoadData, MapCollect, VectorJoin
+    // ========================================================================
+
+    #[test]
+    fn test_unwind_ordinality_and_offset_variables() {
+        use crate::query::plan::UnwindOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::Unwind(UnwindOp {
+            expression: LogicalExpression::List(vec![LogicalExpression::Literal(
+                grafeo_common::types::Value::Int64(1),
+            )]),
+            variable: "item".to_string(),
+            ordinality_var: Some("ord".to_string()),
+            offset_var: Some("off".to_string()),
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert_eq!(ctx.get("ord").unwrap().data_type, LogicalType::Int64);
+        assert_eq!(ctx.get("off").unwrap().data_type, LogicalType::Int64);
+    }
+
+    #[test]
+    fn test_call_procedure_with_and_without_yields() {
+        use crate::query::plan::{CallProcedureOp, ProcedureYield};
+
+        // With yield items including an alias.
+        let plan = LogicalPlan::new(LogicalOperator::CallProcedure(CallProcedureOp {
+            name: vec!["grafeo".to_string(), "pagerank".to_string()],
+            arguments: vec![],
+            yield_items: Some(vec![
+                ProcedureYield {
+                    field_name: "nodeId".to_string(),
+                    alias: None,
+                },
+                ProcedureYield {
+                    field_name: "score".to_string(),
+                    alias: Some("rank".to_string()),
+                },
+            ]),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("nodeId"));
+        assert!(ctx.contains("rank"));
+        assert!(!ctx.contains("score"), "aliased yield hides raw name");
+
+        // Without yields: nothing to register.
+        let plan2 = LogicalPlan::new(LogicalOperator::CallProcedure(CallProcedureOp {
+            name: vec!["grafeo".to_string(), "noop".to_string()],
+            arguments: vec![],
+            yield_items: None,
+        }));
+        let mut binder2 = Binder::new();
+        let ctx2 = binder2.bind(&plan2).unwrap();
+        assert!(ctx2.is_empty());
+    }
+
+    #[test]
+    fn test_load_data_binds_row_variable() {
+        use crate::query::plan::{LoadDataFormat, LoadDataOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::LoadData(LoadDataOp {
+            format: LoadDataFormat::Csv,
+            with_headers: true,
+            path: "/tmp/data.csv".to_string(),
+            variable: "row".to_string(),
+            field_terminator: None,
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("row"));
+        assert_eq!(ctx.get("row").unwrap().data_type, LogicalType::Any);
+    }
+
+    #[test]
+    fn test_map_collect_registers_alias() {
+        use crate::query::plan::MapCollectOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::MapCollect(MapCollectOp {
+            key_var: "k".to_string(),
+            value_var: "v".to_string(),
+            alias: "grouped".to_string(),
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("grouped"));
+    }
+
+    #[test]
+    fn test_vector_join_registers_right_and_score_variables() {
+        use crate::query::plan::VectorJoinOp;
+
+        let plan = LogicalPlan::new(LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "a".to_string(),
+                label: None,
+                input: None,
+            })),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Literal(grafeo_common::types::Value::Int64(0)),
+            right_variable: "b".to_string(),
+            right_property: "embedding".to_string(),
+            right_label: None,
+            index_name: None,
+            k: 5,
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            score_variable: Some("score".to_string()),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.get("b").unwrap().is_node);
+        assert_eq!(ctx.get("score").unwrap().data_type, LogicalType::Float64);
+
+        // VectorJoin with undefined query_vector reference should fail.
+        let bad_plan = LogicalPlan::new(LogicalOperator::VectorJoin(VectorJoinOp {
+            input: Box::new(LogicalOperator::Empty),
+            left_vector_variable: None,
+            left_property: None,
+            query_vector: LogicalExpression::Variable("undef_vec".to_string()),
+            right_variable: "b".to_string(),
+            right_property: "embedding".to_string(),
+            right_label: None,
+            index_name: None,
+            k: 5,
+            metric: None,
+            min_similarity: None,
+            max_distance: None,
+            score_variable: None,
+        }));
+        assert!(Binder::new().bind(&bad_plan).is_err());
+    }
+
+    // ========================================================================
+    // Coverage tests: expression validation edge cases
+    // ========================================================================
+
+    #[test]
+    fn test_expression_validation_unary_index_map_projection() {
+        use crate::query::plan::{MapProjectionEntry, UnaryOp};
+
+        // Unary with undefined operand fails.
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(LogicalExpression::Variable("ghost".to_string())),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan).is_err());
+
+        // IndexAccess validates both base and index.
+        let plan2 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::IndexAccess {
+                    base: Box::new(LogicalExpression::Variable("xs".to_string())),
+                    index: Box::new(LogicalExpression::Variable("idx_ghost".to_string())),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "xs".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        let err = Binder::new().bind(&plan2).unwrap_err();
+        assert!(err.to_string().contains("idx_ghost"));
+
+        // MapProjection validates literal entries.
+        let plan3 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::MapProjection {
+                    base: "n".to_string(),
+                    entries: vec![
+                        MapProjectionEntry::PropertySelector("name".to_string()),
+                        MapProjectionEntry::AllProperties,
+                        MapProjectionEntry::LiteralEntry(
+                            "extra".to_string(),
+                            LogicalExpression::Variable("missing".to_string()),
+                        ),
+                    ],
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+        }));
+        assert!(Binder::new().bind(&plan3).is_err());
+
+        // MapProjection base undefined fails.
+        let plan4 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::MapProjection {
+                    base: "unknown".to_string(),
+                    entries: vec![MapProjectionEntry::AllProperties],
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        let err4 = Binder::new().bind(&plan4).unwrap_err();
+        assert!(err4.to_string().contains("map projection"));
+    }
+
+    #[test]
+    fn test_expression_validation_list_and_parameter_and_subquery() {
+        // Parameter is always valid.
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Parameter("p".to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan).is_ok());
+
+        // List with undefined element.
+        let plan2 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::List(vec![LogicalExpression::Variable(
+                    "no_such".to_string(),
+                )]),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan2).is_err());
+
+        // Subquery expressions are accepted without recursive binding.
+        let plan3 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::ExistsSubquery(Box::new(LogicalOperator::Empty)),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan3).is_ok());
+
+        let plan4 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::CountSubquery(Box::new(LogicalOperator::Empty)),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan4).is_ok());
+
+        let plan5 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::ValueSubquery(Box::new(LogicalOperator::Empty)),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan5).is_ok());
+    }
+
+    #[test]
+    fn test_expression_validation_list_predicate_and_pattern_comprehension() {
+        use crate::query::plan::ListPredicateKind;
+
+        // ListPredicate validates source list.
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::ListPredicate {
+                    kind: ListPredicateKind::All,
+                    variable: "x".to_string(),
+                    list_expr: Box::new(LogicalExpression::Variable("missing_list".to_string())),
+                    predicate: Box::new(LogicalExpression::Literal(
+                        grafeo_common::types::Value::Bool(true),
+                    )),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan).is_err());
+
+        // PatternComprehension binds its subplan and then validates projection.
+        let plan2 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::PatternComprehension {
+                    subplan: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "f".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                    projection: Box::new(LogicalExpression::Property {
+                        variable: "f".to_string(),
+                        property: "name".to_string(),
+                    }),
+                },
+                alias: Some("names".to_string()),
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan2).is_ok());
+
+        // Pattern comprehension with a bad projection.
+        let plan3 = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::PatternComprehension {
+                    subplan: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "f".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                    projection: Box::new(LogicalExpression::Variable("ghost".to_string())),
+                },
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Empty),
+        }));
+        assert!(Binder::new().bind(&plan3).is_err());
+    }
+
+    #[test]
+    fn test_expression_validation_reduce_adds_and_removes_locals() {
+        // reduce() adds accumulator and iteration variable during validation.
+        // After the call, they should not remain in outer scope.
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Reduce {
+                    accumulator: "acc".to_string(),
+                    initial: Box::new(LogicalExpression::Literal(
+                        grafeo_common::types::Value::Int64(0),
+                    )),
+                    variable: "x".to_string(),
+                    list: Box::new(LogicalExpression::Variable("xs".to_string())),
+                    expression: Box::new(LogicalExpression::Binary {
+                        left: Box::new(LogicalExpression::Variable("acc".to_string())),
+                        op: crate::query::plan::BinaryOp::Add,
+                        right: Box::new(LogicalExpression::Variable("x".to_string())),
+                    }),
+                },
+                alias: Some("sum".to_string()),
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Project(crate::query::plan::ProjectOp {
+                projections: vec![crate::query::plan::Projection {
+                    expression: LogicalExpression::List(vec![LogicalExpression::Literal(
+                        grafeo_common::types::Value::Int64(1),
+                    )]),
+                    alias: Some("xs".to_string()),
+                }],
+                input: Box::new(LogicalOperator::Empty),
+                pass_through_input: false,
+            })),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        // 'acc' and 'x' must not leak to outer scope.
+        assert!(!ctx.contains("acc"));
+        assert!(!ctx.contains("x"));
+        // Alias 'sum' is registered.
+        assert!(ctx.contains("sum"));
+    }
+
+    #[test]
+    fn test_expression_validation_reduce_preserves_preexisting_locals() {
+        // If accumulator or variable name already exists in scope, the reduce
+        // branch should leave them intact when it finishes.
+        let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Reduce {
+                    accumulator: "acc".to_string(),
+                    initial: Box::new(LogicalExpression::Literal(
+                        grafeo_common::types::Value::Int64(0),
+                    )),
+                    variable: "x".to_string(),
+                    list: Box::new(LogicalExpression::Variable("acc".to_string())),
+                    expression: Box::new(LogicalExpression::Variable("acc".to_string())),
+                },
+                alias: Some("r".to_string()),
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Project(crate::query::plan::ProjectOp {
+                projections: vec![
+                    crate::query::plan::Projection {
+                        expression: LogicalExpression::List(vec![]),
+                        alias: Some("acc".to_string()),
+                    },
+                    crate::query::plan::Projection {
+                        expression: LogicalExpression::Literal(grafeo_common::types::Value::Int64(
+                            0,
+                        )),
+                        alias: Some("x".to_string()),
+                    },
+                ],
+                input: Box::new(LogicalOperator::Empty),
+                pass_through_input: false,
+            })),
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        // Pre-existing bindings survive.
+        assert!(ctx.contains("acc"));
+        assert!(ctx.contains("x"));
+    }
+
+    // ========================================================================
+    // Coverage tests: type inference and entity status propagation
+    // ========================================================================
+
+    #[test]
+    fn test_infer_expression_type_for_literals_and_functions() {
+        use crate::query::plan::{ProjectOp, Projection};
+        use grafeo_common::types::Value;
+
+        // Wrap a series of projections with typed aliases.
+        let projections = vec![
+            Projection {
+                expression: LogicalExpression::Literal(Value::Bool(true)),
+                alias: Some("b".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Literal(Value::Int64(1)),
+                alias: Some("i".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Literal(Value::Float64(1.5)),
+                alias: Some("f".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Literal(Value::String("s".into())),
+                alias: Some("s".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Literal(Value::List(std::sync::Arc::from(Vec::<
+                    Value,
+                >::new(
+                )))),
+                alias: Some("l".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Literal(Value::Map(std::sync::Arc::new(
+                    std::collections::BTreeMap::new(),
+                ))),
+                alias: Some("m".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Literal(Value::Null),
+                alias: Some("n".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::FunctionCall {
+                    name: "count".to_string(),
+                    args: vec![LogicalExpression::Literal(Value::Int64(1))],
+                    distinct: false,
+                },
+                alias: Some("cnt".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::FunctionCall {
+                    name: "AVG".to_string(),
+                    args: vec![LogicalExpression::Literal(Value::Int64(1))],
+                    distinct: false,
+                },
+                alias: Some("avg_val".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::FunctionCall {
+                    name: "type".to_string(),
+                    args: vec![],
+                    distinct: false,
+                },
+                alias: Some("tname".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::FunctionCall {
+                    name: "labels".to_string(),
+                    args: vec![],
+                    distinct: false,
+                },
+                alias: Some("lbls".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::FunctionCall {
+                    name: "unknown_fn".to_string(),
+                    args: vec![],
+                    distinct: false,
+                },
+                alias: Some("u".to_string()),
+            },
+            // List and Map expressions are Any.
+            Projection {
+                expression: LogicalExpression::List(vec![]),
+                alias: Some("lit_list".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Map(vec![]),
+                alias: Some("lit_map".to_string()),
+            },
+            // Unary / Binary / Property fall through to Any.
+            Projection {
+                expression: LogicalExpression::Unary {
+                    op: crate::query::plan::UnaryOp::Not,
+                    operand: Box::new(LogicalExpression::Literal(Value::Bool(true))),
+                },
+                alias: Some("unary_ty".to_string()),
+            },
+            Projection {
+                expression: LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Literal(Value::Int64(1))),
+                    op: crate::query::plan::BinaryOp::Add,
+                    right: Box::new(LogicalExpression::Literal(Value::Int64(2))),
+                },
+                alias: Some("bin_ty".to_string()),
+            },
+        ];
+
+        let plan = LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+            projections,
+            input: Box::new(LogicalOperator::Empty),
+            pass_through_input: false,
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+
+        assert_eq!(ctx.get("b").unwrap().data_type, LogicalType::Bool);
+        assert_eq!(ctx.get("i").unwrap().data_type, LogicalType::Int64);
+        assert_eq!(ctx.get("f").unwrap().data_type, LogicalType::Float64);
+        assert_eq!(ctx.get("s").unwrap().data_type, LogicalType::String);
+        assert_eq!(ctx.get("l").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("m").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("n").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("cnt").unwrap().data_type, LogicalType::Int64);
+        assert_eq!(ctx.get("avg_val").unwrap().data_type, LogicalType::Float64);
+        assert_eq!(ctx.get("tname").unwrap().data_type, LogicalType::String);
+        assert_eq!(ctx.get("lbls").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("u").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("lit_list").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("lit_map").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("unary_ty").unwrap().data_type, LogicalType::Any);
+        assert_eq!(ctx.get("bin_ty").unwrap().data_type, LogicalType::Any);
+    }
+
+    #[test]
+    fn test_infer_entity_status_for_case_projection() {
+        use crate::query::plan::{ProjectOp, Projection};
+
+        // Case with both branches selecting node variables should propagate
+        // node status. The planner uses this for optional()/union() rewrites.
+        let plan = LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+            projections: vec![
+                Projection {
+                    expression: LogicalExpression::Variable("n".to_string()),
+                    alias: Some("original".to_string()),
+                },
+                Projection {
+                    expression: LogicalExpression::Case {
+                        operand: None,
+                        when_clauses: vec![(
+                            LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+                            LogicalExpression::Variable("n".to_string()),
+                        )],
+                        else_clause: Some(Box::new(LogicalExpression::Variable("n".to_string()))),
+                    },
+                    alias: Some("case_node".to_string()),
+                },
+                Projection {
+                    // Empty Case (should produce neither node nor edge).
+                    expression: LogicalExpression::Case {
+                        operand: None,
+                        when_clauses: vec![],
+                        else_clause: None,
+                    },
+                    alias: Some("empty_case".to_string()),
+                },
+                Projection {
+                    // Case mixing node var and literal should lose node-ness.
+                    expression: LogicalExpression::Case {
+                        operand: None,
+                        when_clauses: vec![(
+                            LogicalExpression::Literal(grafeo_common::types::Value::Bool(true)),
+                            LogicalExpression::Variable("n".to_string()),
+                        )],
+                        else_clause: Some(Box::new(LogicalExpression::Literal(
+                            grafeo_common::types::Value::Int64(0),
+                        ))),
+                    },
+                    alias: Some("mixed_case".to_string()),
+                },
+            ],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            pass_through_input: false,
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+
+        assert!(ctx.get("original").unwrap().is_node);
+        assert!(ctx.get("case_node").unwrap().is_node);
+        let empty = ctx.get("empty_case").unwrap();
+        assert!(!empty.is_node && !empty.is_edge);
+        let mixed = ctx.get("mixed_case").unwrap();
+        assert!(
+            !mixed.is_node && !mixed.is_edge,
+            "mixed Case branches lose entity status"
+        );
+    }
+
+    // ========================================================================
+    // Coverage tests: aggregate, register_subplan_columns
+    // ========================================================================
+
+    #[test]
+    fn test_bind_aggregate_registers_group_by_column_and_alias() {
+        use crate::query::plan::{AggregateExpr, AggregateFunction, AggregateOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
+            group_by: vec![LogicalExpression::Property {
+                variable: "n".to_string(),
+                property: "city".to_string(),
+            }],
+            aggregates: vec![AggregateExpr {
+                function: AggregateFunction::Count,
+                expression: Some(LogicalExpression::Variable("n".to_string())),
+                expression2: None,
+                distinct: false,
+                alias: Some("c".to_string()),
+                percentile: None,
+                separator: None,
+            }],
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "n".to_string(),
+                label: None,
+                input: None,
+            })),
+            having: None,
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("c"), "aggregate alias registered");
+        assert!(ctx.contains("n.city"), "group-by column name registered");
+    }
+
+    #[test]
+    fn test_apply_registers_aggregate_subplan_columns() {
+        use crate::query::plan::{
+            AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, DistinctOp,
+        };
+
+        // Apply whose subplan is Distinct(Aggregate(...)). This exercises the
+        // Distinct -> Aggregate recursion inside register_subplan_columns.
+        let subplan = LogicalOperator::Distinct(DistinctOp {
+            input: Box::new(LogicalOperator::Aggregate(AggregateOp {
+                group_by: vec![],
+                aggregates: vec![AggregateExpr {
+                    function: AggregateFunction::Count,
+                    expression: None,
+                    expression2: None,
+                    distinct: false,
+                    alias: Some("total".to_string()),
+                    percentile: None,
+                    separator: None,
+                }],
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: "n".to_string(),
+                    label: None,
+                    input: None,
+                })),
+                having: None,
+            })),
+            columns: None,
+        });
+
+        let plan = LogicalPlan::new(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(LogicalOperator::Empty),
+            subplan: Box::new(subplan),
+            shared_variables: vec![],
+            optional: false,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(
+            ctx.contains("total"),
+            "aggregate alias surfaces through Distinct wrapper"
+        );
+    }
+
+    #[test]
+    fn test_apply_registers_sort_and_limit_wrapped_return_columns() {
+        use crate::query::plan::{ApplyOp, CountExpr, LimitOp, SortKey, SortOp, SortOrder};
+
+        // Apply(subplan = Limit(Sort(Return(var, property))))
+        let subplan = LogicalOperator::Limit(LimitOp {
+            count: CountExpr::Literal(10),
+            input: Box::new(LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Variable("n".to_string()),
+                    order: SortOrder::Ascending,
+                    nulls: None,
+                }],
+                input: Box::new(LogicalOperator::Return(ReturnOp {
+                    items: vec![
+                        ReturnItem {
+                            expression: LogicalExpression::Variable("n".to_string()),
+                            alias: None,
+                        },
+                        ReturnItem {
+                            expression: LogicalExpression::Property {
+                                variable: "n".to_string(),
+                                property: "name".to_string(),
+                            },
+                            alias: None,
+                        },
+                        ReturnItem {
+                            // Literal with no alias hits the `_ => continue` branch.
+                            expression: LogicalExpression::Literal(
+                                grafeo_common::types::Value::Int64(1),
+                            ),
+                            alias: None,
+                        },
+                    ],
+                    distinct: false,
+                    input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                        variable: "n".to_string(),
+                        label: None,
+                        input: None,
+                    })),
+                })),
+            })),
+        });
+
+        let plan = LogicalPlan::new(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(LogicalOperator::Empty),
+            subplan: Box::new(subplan),
+            shared_variables: vec![],
+            optional: false,
+        }));
+
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        // Unaliased Variable registers under the variable name itself.
+        assert!(ctx.contains("n"));
+        // Unaliased Property registers as "variable.property".
+        assert!(ctx.contains("n.name"));
+    }
+
+    #[test]
+    fn test_horizontal_aggregate_is_noop_in_binder() {
+        use crate::query::plan::{AggregateFunction, EntityKind, HorizontalAggregateOp};
+
+        let plan = LogicalPlan::new(LogicalOperator::HorizontalAggregate(
+            HorizontalAggregateOp {
+                list_column: "_path_edges_p".to_string(),
+                entity_kind: EntityKind::Edge,
+                function: AggregateFunction::Sum,
+                property: "weight".to_string(),
+                alias: "total".to_string(),
+                input: Box::new(LogicalOperator::Empty),
+            },
+        ));
+        let mut binder = Binder::new();
+        assert!(binder.bind(&plan).is_ok());
+    }
+
+    // ========================================================================
+    // Coverage tests: expand path alias (variable-length paths)
+    // ========================================================================
+
+    #[test]
+    fn test_expand_with_path_alias_registers_auxiliary_variables() {
+        use crate::query::plan::{ExpandDirection, ExpandOp, PathMode};
+
+        let plan = LogicalPlan::new(LogicalOperator::Expand(ExpandOp {
+            from_variable: "a".to_string(),
+            to_variable: "b".to_string(),
+            edge_variable: None,
+            direction: ExpandDirection::Outgoing,
+            edge_types: vec!["ROAD".to_string()],
+            min_hops: 1,
+            max_hops: Some(5),
+            input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                variable: "a".to_string(),
+                label: None,
+                input: None,
+            })),
+            path_alias: Some("p".to_string()),
+            path_mode: PathMode::Walk,
+        }));
+        let mut binder = Binder::new();
+        let ctx = binder.bind(&plan).unwrap();
+        assert!(ctx.contains("p"));
+        assert!(ctx.contains("_path_length_p"));
+        assert!(ctx.contains("_path_nodes_p"));
+        assert!(ctx.contains("_path_edges_p"));
+    }
 }
