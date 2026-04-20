@@ -89,20 +89,7 @@ impl super::Planner {
 
         // If there are remaining predicates (AND with non-text conditions), wrap in filter
         if let Some(remaining) = &extracted.remaining {
-            let variable_columns: HashMap<String, usize> = scan_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            let filter_op = Box::new(FilterOperator::new(scan_op, Box::new(predicate)));
+            let filter_op = self.wrap_with_remaining_filter(scan_op, &scan_columns, remaining)?;
             Ok(Some((filter_op, scan_columns)))
         } else {
             Ok(Some((scan_op, scan_columns)))
@@ -189,6 +176,35 @@ impl super::Planner {
             threshold,
             remaining: None,
         })
+    }
+
+    /// Wraps `op` in a `FilterOperator` that evaluates `remaining` over `columns`.
+    ///
+    /// Shared across every hybrid pushdown path where an index scan consumes the
+    /// bulk of the predicate and a residual scalar condition has to be re-applied
+    /// above it. Centralizes column indexing, transaction/session context
+    /// attachment, and the `FilterOperator` boxing so the call sites stay terse
+    /// and any future change to `ExpressionPredicate` wiring lands in one place.
+    fn wrap_with_remaining_filter(
+        &self,
+        op: Box<dyn Operator>,
+        columns: &[String],
+        remaining: &LogicalExpression,
+    ) -> Result<Box<dyn Operator>> {
+        let variable_columns: HashMap<String, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        let filter_expr = self.convert_expression(remaining)?;
+        let predicate = ExpressionPredicate::new(
+            filter_expr,
+            variable_columns,
+            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        )
+        .with_transaction_context(self.viewing_epoch, self.transaction_id)
+        .with_session_context(self.session_context.clone());
+        Ok(Box::new(FilterOperator::new(op, Box::new(predicate))))
     }
 }
 
@@ -308,39 +324,13 @@ impl super::Planner {
         //   cosine_similarity(...) > 0.8 OR (text_match(...) AND published = true)
         // the text branch gets a Filter(published = true) around its TextScan.
         let left_op = if let Some(remaining) = &vector_pred.remaining {
-            let variable_columns: HashMap<String, usize> = left_cols
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            Box::new(FilterOperator::new(left_op, Box::new(predicate))) as Box<dyn Operator>
+            self.wrap_with_remaining_filter(left_op, &left_cols, remaining)?
         } else {
             left_op
         };
 
         let right_op = if let Some(remaining) = &text_pred.remaining {
-            let variable_columns: HashMap<String, usize> = right_cols
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            Box::new(FilterOperator::new(right_op, Box::new(predicate))) as Box<dyn Operator>
+            self.wrap_with_remaining_filter(right_op, &right_cols, remaining)?
         } else {
             right_op
         };
@@ -410,23 +400,8 @@ impl super::Planner {
         // neither vector nor text, e.g. an extra AND condition)
         let scalar_remaining = self.extract_scalar_remaining(&filter.predicate);
         if let Some(remaining) = scalar_remaining {
-            let variable_columns: HashMap<String, usize> = output_cols
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-            let filter_expr = self.convert_expression(&remaining)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-            )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_session_context(self.session_context.clone());
-            Ok(Some((
-                Box::new(FilterOperator::new(proj_op, Box::new(predicate))),
-                output_cols,
-            )))
+            let filter_op = self.wrap_with_remaining_filter(proj_op, &output_cols, &remaining)?;
+            Ok(Some((filter_op, output_cols)))
         } else {
             Ok(Some((proj_op, output_cols)))
         }
