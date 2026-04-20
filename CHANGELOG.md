@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.5.40] - Unreleased
+## [0.5.40] - 2026-04-20
 
 Unified hybrid queries (graph + vector + text), lazy streaming results, structured Python errors, catalog hierarchy hardening, and compact-store fixes.
 
@@ -27,7 +27,7 @@ Unified hybrid queries (graph + vector + text), lazy streaming results, structur
 - **Commit failure auto-rollback**: a failed COMMIT now discards pending writes and returns the session to a clean state, instead of leaving the transaction in-flight with uncommitted writes still visible.
 - **Parser keyword anti-pattern**: `try_accept_keyword` helpers fix four `CREATE CONSTRAINT ... FOR`, `ON REPLACE`, and similar sites where identifier-fallback tokenization accepted the wrong keyword.
 - **Vector strict pushdown boundary leak**: `euclidean_distance(...) < t` and `manhattan_distance(...) < t` now correctly exclude rows at exactly the threshold; strict comparisons attach a residual filter above the vector scan, which was previously dropped.
-- **MERGE index lookup**: `MERGE (n:Label {prop: value})` now uses property indexes when available, eliminating O(n) scan on large graphs. (#288)
+- **MERGE index lookup**: `MERGE (n:Label {prop: value})` now uses property indexes when available, eliminating O(n) scan on large graphs. ([#288](https://github.com/GrafeoDB/grafeo/issues/286))
 - **Index and search after `compact()`**: ~26 vector/text index methods no longer panic with "no built-in LpgStore" or silently return empty results. ([#286](https://github.com/GrafeoDB/grafeo/pull/286), [@temporaryfix](https://github.com/temporaryfix))
 - **`LayeredStore` new-node visibility**: `get_node` / `get_node_property` fall back to the overlay for nodes added after `compact()`. ([#286](https://github.com/GrafeoDB/grafeo/pull/286))
 - **Named graphs across `compact()` / `recompact()`**: graphs existing before compaction are carried into the new overlay; `list_graphs`, `drop_graph`, `create_graph`, `set_current_graph` see them.
