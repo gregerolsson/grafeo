@@ -93,6 +93,10 @@ pub struct Planner {
     pub(super) validator: Option<Arc<dyn ConstraintValidator>>,
     /// Catalog for user-defined procedure lookup.
     pub(super) catalog: Option<Arc<crate::catalog::Catalog>>,
+    /// LPG store handle for procedures that need direct index access (vector
+    /// and text search reach HNSW / BM25 indexes owned by the LPG store).
+    #[cfg(feature = "lpg")]
+    pub(super) lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
     /// Shared parameter state for the currently planning correlated Apply.
     /// Set by `plan_apply` before planning the inner operator, consumed by
     /// `plan_operator` when encountering `ParameterScan`.
@@ -135,6 +139,8 @@ impl Planner {
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
             catalog: None,
+            #[cfg(feature = "lpg")]
+            lpg_store: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -178,6 +184,8 @@ impl Planner {
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
             catalog: None,
+            #[cfg(feature = "lpg")]
+            lpg_store: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -242,6 +250,15 @@ impl Planner {
     #[must_use]
     pub fn with_catalog(mut self, catalog: Arc<crate::catalog::Catalog>) -> Self {
         self.catalog = Some(catalog);
+        self
+    }
+
+    /// Attaches an LPG store handle so `CALL grafeo.search.*` procedures can
+    /// reach the vector and text indexes.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
+        self.lpg_store = Some(lpg_store);
         self
     }
 

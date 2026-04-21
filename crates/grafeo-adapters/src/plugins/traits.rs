@@ -77,6 +77,8 @@ pub enum ParameterType {
     Boolean,
     /// Node ID parameter.
     NodeId,
+    /// List of arbitrary values (for vector queries, multi-value filters, etc.).
+    List,
 }
 
 /// Parameters passed to an algorithm.
@@ -117,6 +119,11 @@ impl Parameters {
             .insert(name.into(), ParameterValue::Boolean(value));
     }
 
+    /// Sets a list parameter.
+    pub fn set_list(&mut self, name: impl Into<String>, value: Vec<grafeo_common::types::Value>) {
+        self.values.insert(name.into(), ParameterValue::List(value));
+    }
+
     /// Gets an integer parameter.
     pub fn get_int(&self, name: &str) -> Option<i64> {
         match self.values.get(name) {
@@ -148,6 +155,14 @@ impl Parameters {
             _ => None,
         }
     }
+
+    /// Gets a list parameter.
+    pub fn get_list(&self, name: &str) -> Option<&[grafeo_common::types::Value]> {
+        match self.values.get(name) {
+            Some(ParameterValue::List(v)) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Parameters {
@@ -163,6 +178,7 @@ enum ParameterValue {
     Float(f64),
     String(String),
     Boolean(bool),
+    List(Vec<grafeo_common::types::Value>),
 }
 
 /// Result of an algorithm execution.

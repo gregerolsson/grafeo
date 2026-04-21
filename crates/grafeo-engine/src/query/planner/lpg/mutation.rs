@@ -736,11 +736,6 @@ impl super::Planner {
             return self.plan_static_result(result, &call.yield_items);
         }
 
-        // Catalog introspection procedures
-        if let Some(result) = self.plan_catalog_procedure(&resolved_name) {
-            return self.plan_static_result(result, &call.yield_items);
-        }
-
         // Check user-defined procedures first (requires GQL for body re-parsing)
         #[cfg(feature = "gql")]
         if let Some(catalog) = &self.catalog {
@@ -755,8 +750,8 @@ impl super::Planner {
             }
         }
 
-        // Look up the algorithm
-        let algorithm = registry.get(&call.name).ok_or_else(|| {
+        // Look up the procedure
+        let procedure = registry.get(&call.name).ok_or_else(|| {
             Error::Internal(format!(
                 "Unknown procedure: '{}'. Use CALL grafeo.procedures() to list available procedures.",
                 call.name.join(".")
@@ -764,12 +759,12 @@ impl super::Planner {
         })?;
 
         // Evaluate arguments to Parameters
-        let params = procedures::evaluate_arguments(&call.arguments, algorithm.parameters());
+        let params = procedures::evaluate_arguments(&call.arguments, procedure.parameters());
 
-        // Canonical column names for this algorithm (user-facing names)
-        let canonical_columns = procedures::output_columns_for_name(algorithm.as_ref());
+        // Canonical column names for this procedure (user-facing names)
+        let canonical_columns = procedure.output_columns();
 
-        // Determine output columns from YIELD or algorithm defaults
+        // Determine output columns from YIELD or procedure defaults
         let yield_columns = call.yield_items.as_ref().map(|items| {
             items
                 .iter()
@@ -786,15 +781,18 @@ impl super::Planner {
             canonical_columns.clone()
         };
 
-        let operator = Box::new(
-            crate::query::executor::procedure_call::ProcedureCallOperator::new(
-                Arc::clone(&self.store),
-                algorithm,
-                params,
-                yield_columns,
-                canonical_columns,
-            ),
+        let mut op = crate::query::executor::procedure_call::ProcedureCallOperator::new(
+            Arc::clone(&self.store),
+            procedure,
+            params,
+            yield_columns,
+            canonical_columns,
         );
+        #[cfg(feature = "lpg")]
+        if let Some(lpg_store) = self.lpg_store.as_ref() {
+            op = op.with_lpg_store(Arc::clone(lpg_store));
+        }
+        let operator: Box<dyn Operator> = Box::new(op);
 
         // Procedure outputs are scalar values, not node/edge IDs
         for col in &output_columns {
@@ -930,47 +928,6 @@ impl super::Planner {
         }
 
         Ok((operator, output_columns))
-    }
-
-    /// Resolves a catalog introspection procedure by name.
-    ///
-    /// Supports `db.labels`, `db.relationshipTypes`, `db.propertyKeys`,
-    /// `db.schema`, and `db.indexes` (also with `grafeo.` prefix).
-    #[cfg(feature = "algos")]
-    fn plan_catalog_procedure(
-        &self,
-        name: &str,
-    ) -> Option<grafeo_adapters::plugins::AlgorithmResult> {
-        use grafeo_adapters::plugins::AlgorithmResult;
-        use grafeo_common::types::Value;
-
-        match name {
-            "db.labels" | "grafeo.labels" => {
-                let labels = self.store.all_labels();
-                let mut result = AlgorithmResult::new(vec!["label".to_string()]);
-                for label in labels {
-                    result.rows.push(vec![Value::String(label.into())]);
-                }
-                Some(result)
-            }
-            "db.relationshipTypes" | "grafeo.relationshipTypes" => {
-                let types = self.store.all_edge_types();
-                let mut result = AlgorithmResult::new(vec!["relationshipType".to_string()]);
-                for t in types {
-                    result.rows.push(vec![Value::String(t.into())]);
-                }
-                Some(result)
-            }
-            "db.propertyKeys" | "grafeo.propertyKeys" => {
-                let keys = self.store.all_property_keys();
-                let mut result = AlgorithmResult::new(vec!["propertyKey".to_string()]);
-                for key in keys {
-                    result.rows.push(vec![Value::String(key.into())]);
-                }
-                Some(result)
-            }
-            _ => None,
-        }
     }
 
     /// Plans an ADD LABEL operator.

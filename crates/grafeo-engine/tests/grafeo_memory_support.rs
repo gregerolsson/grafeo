@@ -7,7 +7,9 @@
 //! cargo test -p grafeo-engine --all-features --test grafeo_memory_support
 //! ```
 
-use grafeo_common::types::{NodeId, PropertyKey, Value};
+#[cfg(feature = "temporal")]
+use grafeo_common::types::NodeId;
+use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
