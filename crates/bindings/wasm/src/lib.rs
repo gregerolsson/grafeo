@@ -17,9 +17,11 @@
 // On 64-bit (clippy host), these are flagged but the code only runs on WASM.
 #![allow(clippy::cast_possible_truncation)]
 
+mod signed_snapshot;
 mod types;
 mod utils;
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use js_sys::Array;
@@ -28,6 +30,7 @@ use wasm_bindgen::prelude::*;
 use grafeo_bindings_common::json::{json_params_to_map, json_to_value};
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
+use grafeo_engine::session::Session;
 
 /// A Grafeo graph database instance running in WebAssembly.
 ///
@@ -37,6 +40,13 @@ use grafeo_engine::GrafeoDB;
 #[wasm_bindgen]
 pub struct Database {
     inner: GrafeoDB,
+    /// Active transaction session, set by `beginTransaction()` and cleared by
+    /// `commitTransaction()` / `rollbackTransaction()` / `close()`.
+    /// When present, `execute*` methods route through this session so
+    /// uncommitted writes are visible only to the transaction.
+    tx: RefCell<Option<Session>>,
+    /// Once set by `close()`, every subsequent method call errors.
+    closed: Cell<bool>,
 }
 
 #[wasm_bindgen]
@@ -51,7 +61,150 @@ impl Database {
         utils::set_panic_hook();
         Ok(Database {
             inner: GrafeoDB::new_in_memory(),
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
         })
+    }
+
+    /// Begins a new transaction.
+    ///
+    /// Subsequent `execute*` calls see each other's uncommitted writes but
+    /// remain invisible to other sessions until `commitTransaction()`. Only
+    /// one transaction may be active at a time.
+    ///
+    /// ```js
+    /// db.beginTransaction();
+    /// db.execute("INSERT (:Person {name: 'Alix'})");
+    /// db.commitTransaction();
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the database is closed, a transaction is already
+    /// active, or the engine fails to start one.
+    #[wasm_bindgen(js_name = "beginTransaction")]
+    pub fn begin_transaction(&self) -> Result<(), JsError> {
+        self.check_open()?;
+        if self.tx.borrow().is_some() {
+            return Err(JsError::new(
+                "Transaction already active. Commit or rollback before starting a new one.",
+            ));
+        }
+        let mut session = self.inner.session();
+        session
+            .begin_transaction()
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        *self.tx.borrow_mut() = Some(session);
+        Ok(())
+    }
+
+    /// Commits the active transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the database is closed, no transaction is active,
+    /// or the commit fails (e.g., serializable-isolation conflict).
+    #[wasm_bindgen(js_name = "commitTransaction")]
+    pub fn commit_transaction(&self) -> Result<(), JsError> {
+        self.check_open()?;
+        let mut tx_slot = self.tx.borrow_mut();
+        let session = tx_slot
+            .as_mut()
+            .ok_or_else(|| JsError::new("No active transaction to commit."))?;
+        session.commit().map_err(|e| JsError::new(&e.to_string()))?;
+        *tx_slot = None;
+        Ok(())
+    }
+
+    /// Rolls back the active transaction, discarding all pending writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the database is closed, no transaction is active,
+    /// or the rollback fails.
+    #[wasm_bindgen(js_name = "rollbackTransaction")]
+    pub fn rollback_transaction(&self) -> Result<(), JsError> {
+        self.check_open()?;
+        let mut tx_slot = self.tx.borrow_mut();
+        let session = tx_slot
+            .as_mut()
+            .ok_or_else(|| JsError::new("No active transaction to roll back."))?;
+        session
+            .rollback()
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        *tx_slot = None;
+        Ok(())
+    }
+
+    /// Returns `true` while a transaction started by `beginTransaction()` is
+    /// still active (not yet committed or rolled back).
+    #[wasm_bindgen(js_name = "isTransactionActive")]
+    pub fn is_transaction_active(&self) -> bool {
+        !self.closed.get() && self.tx.borrow().is_some()
+    }
+
+    /// Closes the database, rolling back any active transaction and
+    /// clearing the query plan cache. Subsequent method calls return an
+    /// error. Calling `close()` more than once is a no-op.
+    ///
+    /// Because WASM keeps all data in memory, `close()` does not persist
+    /// anything: call `exportSnapshot()` first if you need persistence.
+    pub fn close(&self) {
+        if self.closed.get() {
+            return;
+        }
+        if let Some(mut session) = self.tx.borrow_mut().take() {
+            let _ = session.rollback();
+        }
+        self.inner.clear_plan_cache();
+        self.closed.set(true);
+    }
+
+    fn check_open(&self) -> Result<(), JsError> {
+        if self.closed.get() {
+            return Err(JsError::new(
+                "Database is closed. Create a new instance with `new Database()` or \
+                 `Database.importSnapshot()` to continue.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Runs a GQL query, routing through the active transaction session when
+    /// one exists so uncommitted writes remain visible to the caller.
+    fn run_query(&self, query: &str) -> Result<grafeo_engine::database::QueryResult, JsError> {
+        let tx_slot = self.tx.borrow();
+        if let Some(session) = tx_slot.as_ref() {
+            session
+                .execute(query)
+                .map_err(|e| JsError::new(&e.to_string()))
+        } else {
+            drop(tx_slot);
+            self.inner
+                .execute(query)
+                .map_err(|e| JsError::new(&e.to_string()))
+        }
+    }
+
+    /// Runs a query with an explicit language, routing through the active
+    /// transaction session when one exists.
+    fn run_language_query(
+        &self,
+        query: &str,
+        language: &str,
+        params: Option<HashMap<String, Value>>,
+    ) -> Result<grafeo_engine::database::QueryResult, JsError> {
+        let tx_slot = self.tx.borrow();
+        if let Some(session) = tx_slot.as_ref() {
+            session
+                .execute_language(query, language, params)
+                .map_err(|e| JsError::new(&e.to_string()))
+        } else {
+            drop(tx_slot);
+            self.inner
+                .execute_language(query, language, params)
+                .map_err(|e| JsError::new(&e.to_string()))
+        }
     }
 
     /// Executes a GQL query and returns results as an array of objects.
@@ -67,10 +220,8 @@ impl Database {
     ///
     /// Returns `JsError` if the query fails to parse or execute.
     pub fn execute(&self, query: &str) -> Result<JsValue, JsError> {
-        let result = self
-            .inner
-            .execute(query)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.check_open()?;
+        let result = self.run_query(query)?;
 
         let rows = Array::new_with_length(result.rows().len() as u32);
         for (i, row) in result.rows().iter().enumerate() {
@@ -88,10 +239,8 @@ impl Database {
     /// Returns `JsError` if the query fails to parse or execute.
     #[wasm_bindgen(js_name = "executeRaw")]
     pub fn execute_raw(&self, query: &str) -> Result<JsValue, JsError> {
-        let result = self
-            .inner
-            .execute(query)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.check_open()?;
+        let result = self.run_query(query)?;
 
         let obj = js_sys::Object::new();
 
@@ -180,9 +329,51 @@ impl Database {
     /// Returns `JsError` if snapshot serialisation fails.
     #[wasm_bindgen(js_name = "exportSnapshot")]
     pub fn export_snapshot(&self) -> Result<Vec<u8>, JsError> {
+        self.check_open()?;
         self.inner
             .export_snapshot()
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Exports the database to a tamper-evident binary snapshot.
+    ///
+    /// Prefixes the bytes with a `GSN1` magic header and appends an
+    /// HMAC-SHA256 tag keyed by `key`. The same `key` passed to
+    /// `importSnapshotSigned()` verifies integrity before deserialisation;
+    /// mismatched or truncated snapshots are rejected.
+    ///
+    /// Use this form whenever snapshots are stored in locations the user
+    /// cannot fully trust (IndexedDB, server-side storage, shared URLs).
+    /// For ephemeral in-memory snapshots, `exportSnapshot()` is still fine.
+    ///
+    /// Key management: the browser has no built-in key store, so the caller
+    /// owns key generation, storage, and rotation. Derive from a user
+    /// password with `PBKDF2`/`HKDF` in JS, or generate a random 32-byte
+    /// key and store it in an IndexedDB record the application controls.
+    ///
+    /// ```js
+    /// const key = crypto.getRandomValues(new Uint8Array(32));
+    /// const signed = db.exportSnapshotSigned(key);
+    /// // ... later
+    /// const restored = Database.importSnapshotSigned(signed, key);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the key is empty or snapshot serialisation fails.
+    #[wasm_bindgen(js_name = "exportSnapshotSigned")]
+    pub fn export_snapshot_signed(&self, key: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.check_open()?;
+        if key.is_empty() {
+            return Err(JsError::new(
+                "exportSnapshotSigned: key must not be empty (recommended: 32 random bytes)",
+            ));
+        }
+        let payload = self
+            .inner
+            .export_snapshot()
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(signed_snapshot::wrap(key, &payload))
     }
 
     /// Creates a database from a binary snapshot.
@@ -199,8 +390,60 @@ impl Database {
     #[wasm_bindgen(js_name = "importSnapshot")]
     pub fn import_snapshot(data: &[u8]) -> Result<Database, JsError> {
         utils::set_panic_hook();
+        if data.len() > signed_snapshot::MAX_SNAPSHOT_BYTES {
+            return Err(JsError::new(&format!(
+                "importSnapshot: snapshot exceeds {} MiB limit",
+                signed_snapshot::MAX_SNAPSHOT_BYTES / (1024 * 1024)
+            )));
+        }
+        if signed_snapshot::looks_signed(data) {
+            return Err(JsError::new(
+                "importSnapshot: this snapshot was produced by exportSnapshotSigned. \
+                 Use importSnapshotSigned(data, key) to verify and restore it.",
+            ));
+        }
         let inner = GrafeoDB::import_snapshot(data).map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Database { inner })
+        Ok(Database {
+            inner,
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
+    }
+
+    /// Creates a database from a tamper-evident binary snapshot.
+    ///
+    /// Verifies the HMAC-SHA256 tag produced by `exportSnapshotSigned()` in
+    /// constant time before deserialising. Rejects snapshots that are
+    /// truncated, tagged with a different key, or missing the `GSN1` header.
+    ///
+    /// ```js
+    /// const restored = Database.importSnapshotSigned(signed, key);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the key is empty, the data exceeds the size
+    /// limit, the header is missing, the MAC does not verify, or
+    /// deserialisation fails.
+    #[wasm_bindgen(js_name = "importSnapshotSigned")]
+    pub fn import_snapshot_signed(data: &[u8], key: &[u8]) -> Result<Database, JsError> {
+        utils::set_panic_hook();
+        if key.is_empty() {
+            return Err(JsError::new("importSnapshotSigned: key must not be empty"));
+        }
+        if data.len() > signed_snapshot::MAX_SNAPSHOT_BYTES {
+            return Err(JsError::new(&format!(
+                "importSnapshotSigned: snapshot exceeds {} MiB limit",
+                signed_snapshot::MAX_SNAPSHOT_BYTES / (1024 * 1024)
+            )));
+        }
+        let payload = signed_snapshot::unwrap(key, data).map_err(|msg| JsError::new(&msg))?;
+        let inner = GrafeoDB::import_snapshot(payload).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Database {
+            inner,
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Returns schema information about the database.
@@ -1141,12 +1384,9 @@ impl Database {
         language: &str,
         params: Option<JsValue>,
     ) -> Result<JsValue, JsError> {
+        self.check_open()?;
         let param_map = Self::convert_params(params)?;
-
-        let result = self
-            .inner
-            .execute_language(query, language, param_map)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let result = self.run_language_query(query, language, param_map)?;
 
         let rows = Array::new_with_length(result.rows().len() as u32);
         for (i, row) in result.rows().iter().enumerate() {
