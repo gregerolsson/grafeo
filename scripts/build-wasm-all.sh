@@ -2,7 +2,7 @@
 # Build all WASM variants for grafeo-web.
 #
 # Produces four binaries:
-#   pkg/       - AI variant (GQL + vector/text/hybrid search) for main export
+#   pkg/       - Full variant (all query languages + AI search) for main export
 #   pkg-lite/  - Browser variant (GQL only) for /lite export
 #   pkg-lpg/   - Full LPG (all query languages + AI search)
 #   pkg-rdf/   - RDF variant (GQL + SPARQL/RDF)
@@ -28,8 +28,8 @@ write_package_json() {
 EOF
 }
 
-echo "=== Building WASM AI variant (main export) ==="
-./scripts/build-wasm.sh --features ai
+echo "=== Building WASM full variant (main export) ==="
+./scripts/build-wasm.sh --features full
 write_package_json "$WASM_DIR/pkg" "@grafeo-db/wasm"
 
 echo ""
@@ -49,7 +49,7 @@ write_package_json "$WASM_DIR/pkg-rdf" "@grafeo-db/wasm-rdf"
 
 echo ""
 echo "All variants built successfully."
-echo "  AI variant:   $WASM_DIR/pkg/       (used by @grafeo-db/web)"
+echo "  Full variant: $WASM_DIR/pkg/       (used by @grafeo-db/web)"
 echo "  Lite variant: $WASM_DIR/pkg-lite/  (used by @grafeo-db/web/lite)"
 echo "  LPG variant:  $WASM_DIR/pkg-lpg/   (used by @grafeo-db/web/lpg)"
 echo "  RDF variant:  $WASM_DIR/pkg-rdf/   (used by @grafeo-db/web/rdf)"

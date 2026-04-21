@@ -1,7 +1,7 @@
 # Build all WASM variants for grafeo-web.
 #
 # Produces four binaries:
-#   pkg\       - AI variant (GQL + vector/text/hybrid search) for main export
+#   pkg\       - Full variant (all query languages + AI search) for main export
 #   pkg-lite\  - Browser variant (GQL only) for /lite export
 #   pkg-lpg\   - Full LPG (all query languages + AI search)
 #   pkg-rdf\   - RDF variant (GQL + SPARQL/RDF)
@@ -26,8 +26,8 @@ function Write-PackageJson($Dir, $Name) {
 "@ | Set-Content -Path "$Dir\package.json" -Encoding utf8
 }
 
-Write-Host "=== Building WASM AI variant (main export) ==="
-& .\scripts\build-wasm.ps1 -Features ai
+Write-Host "=== Building WASM full variant (main export) ==="
+& .\scripts\build-wasm.ps1 -Features full
 Write-PackageJson "$WasmDir\pkg" "@grafeo-db/wasm"
 
 Write-Host ""
@@ -47,7 +47,7 @@ Write-PackageJson "$WasmDir\pkg-rdf" "@grafeo-db/wasm-rdf"
 
 Write-Host ""
 Write-Host "All variants built successfully."
-Write-Host "  AI variant:   $WasmDir\pkg\       (used by @grafeo-db/web)"
+Write-Host "  Full variant: $WasmDir\pkg\       (used by @grafeo-db/web)"
 Write-Host "  Lite variant: $WasmDir\pkg-lite\  (used by @grafeo-db/web/lite)"
 Write-Host "  LPG variant:  $WasmDir\pkg-lpg\   (used by @grafeo-db/web/lpg)"
 Write-Host "  RDF variant:  $WasmDir\pkg-rdf\   (used by @grafeo-db/web/rdf)"
