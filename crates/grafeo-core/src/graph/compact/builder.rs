@@ -582,6 +582,7 @@ fn infer_column_type(codec: &ColumnCodec) -> ColumnType {
         ColumnCodec::Float32Vector { dimensions, .. } => ColumnType::Float32Vector {
             dimensions: *dimensions,
         },
+        ColumnCodec::RawI64(_) => ColumnType::Int64,
     }
 }
 
@@ -608,6 +609,23 @@ fn compute_zone_map_u64(values: &[u64]) -> ZoneMap {
     ZoneMap {
         min: Some(Value::Int64(min as i64)),
         max: Some(Value::Int64(max as i64)),
+        null_count: 0,
+        row_count: values.len(),
+    }
+}
+
+/// Computes a zone map from signed i64 values (RawI64 column).
+///
+/// Produces `Value::Int64` min/max, which flows naturally into `compare_values`
+/// and yields correct signed ordering in predicate pushdown.
+fn compute_zone_map_i64(values: &[i64]) -> ZoneMap {
+    let Some(&min) = values.iter().min() else {
+        return ZoneMap::new();
+    };
+    let max = *values.iter().max().expect("non-empty after min check");
+    ZoneMap {
+        min: Some(Value::Int64(min)),
+        max: Some(Value::Int64(max)),
         null_count: 0,
         row_count: values.len(),
     }
@@ -653,6 +671,11 @@ fn compute_zone_map_bool(values: &[bool]) -> ZoneMap {
 enum InferredType {
     /// All non-null values are `Value::Int64` with value >= 0.
     BitPacked,
+    /// All non-null values are `Value::Int64`, with at least one negative.
+    /// Uses the `ColumnCodec::RawI64` encoding so signed ordering works in
+    /// `find_eq`, `find_in_range`, and zone-map comparisons, and the
+    /// `Int64` type is preserved on decode.
+    RawI64,
     /// All non-null values are `Value::Float64`, or mixed `Int64`+`Float64`.
     Float64,
     /// All non-null values are `Value::Bool`.
@@ -796,6 +819,20 @@ pub fn from_graph_store(
                         t.zone_maps.push((key.clone(), zone_map));
                         t.columns.push((key.clone(), ColumnCodec::BitPacked(bp)));
                         t.record_len(u64_values.len());
+                    }
+                    InferredType::RawI64 => {
+                        let i64_values: Vec<i64> = values
+                            .iter()
+                            .map(|v| match v {
+                                Value::Int64(n) => *n,
+                                _ => 0,
+                            })
+                            .collect();
+                        let zone_map = compute_zone_map_i64(&i64_values);
+                        t.zone_maps.push((key.clone(), zone_map));
+                        t.columns
+                            .push((key.clone(), ColumnCodec::RawI64(i64_values.clone())));
+                        t.record_len(i64_values.len());
                     }
                     InferredType::Float64 => {
                         let f64_values: Vec<f64> = values
@@ -952,6 +989,17 @@ pub fn from_graph_store(
                                     .collect();
                                 let bp = BitPackedInts::pack(&u64_values);
                                 r.properties.push((key.clone(), ColumnCodec::BitPacked(bp)));
+                            }
+                            InferredType::RawI64 => {
+                                let i64_values: Vec<i64> = values
+                                    .iter()
+                                    .map(|v| match v {
+                                        Value::Int64(n) => *n,
+                                        _ => 0,
+                                    })
+                                    .collect();
+                                r.properties
+                                    .push((key.clone(), ColumnCodec::RawI64(i64_values)));
                             }
                             InferredType::Float64 => {
                                 let f64_values: Vec<f64> = values
@@ -1177,7 +1225,8 @@ pub fn from_graph_store_preserving_ids(
 /// - If all non-null values are `Bool`, returns `Bitmap`.
 /// - Otherwise returns `Dict` (string fallback).
 fn infer_type_from_values(values: &[Value]) -> InferredType {
-    let mut saw_int = false;
+    let mut saw_unsigned_int = false; // Value::Int64 with n >= 0
+    let mut saw_signed_int = false; // Value::Int64 with n < 0
     let mut saw_float = false;
     let mut saw_bool = false;
     let mut saw_vector = false;
@@ -1187,7 +1236,8 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
     for v in values {
         match v {
             Value::Null => {} // skip nulls
-            Value::Int64(n) if *n >= 0 => saw_int = true,
+            Value::Int64(n) if *n >= 0 => saw_unsigned_int = true,
+            Value::Int64(_) => saw_signed_int = true,
             Value::Float64(_) => saw_float = true,
             Value::Bool(_) => saw_bool = true,
             Value::Vector(vec) => {
@@ -1208,13 +1258,15 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
         }
     }
 
+    let saw_any_int = saw_unsigned_int || saw_signed_int;
+
     // Vectors are exclusive; mixed with other types falls back to Dict.
     // Zero-dimension vectors cannot be round-tripped through the Float32Vector
     // codec (stride=0 means no row can be decoded), so those fall back to Dict
     // as well.
     if saw_vector
         && !saw_other
-        && !saw_int
+        && !saw_any_int
         && !saw_float
         && !saw_bool
         && let Some(dims) = vector_dims
@@ -1225,11 +1277,16 @@ fn infer_type_from_values(values: &[Value]) -> InferredType {
 
     // Mixed Int64+Float64 coalesces to Float64.
     // Vectors mixed with any other type fall back to Dict.
-    if saw_other || saw_vector || ((saw_int || saw_float) && saw_bool) {
+    if saw_other || saw_vector || (saw_any_int && saw_bool) || (saw_float && saw_bool) {
         InferredType::Dict
     } else if saw_float {
         InferredType::Float64
-    } else if saw_int {
+    } else if saw_signed_int {
+        // Any negative value routes the whole column to RawI64, which uses
+        // native i64 ordering. Non-negative-only columns still use the
+        // more compact BitPacked encoding.
+        InferredType::RawI64
+    } else if saw_unsigned_int {
         InferredType::BitPacked
     } else if saw_bool {
         InferredType::Bitmap
@@ -1505,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_graph_store_negative_int_falls_back_to_dict() {
+    fn test_from_graph_store_negative_int_preserves_int64_type() {
         use crate::graph::lpg::LpgStore;
 
         let store = LpgStore::new().unwrap();
@@ -1518,19 +1575,22 @@ mod tests {
 
         let compact = from_graph_store(&store).unwrap();
 
-        // Negative Int64 falls back to Dict encoding (serialized as string).
+        // Signed Int64 columns round-trip as Value::Int64 via the RawI64 codec.
+        // Prior behaviour (<=0.5.40) stringified them into a Dict column,
+        // breaking WHERE matches and promoting sum() to Float64.
         let ids = compact.nodes_by_label("Item");
         assert_eq!(ids.len(), 2);
-        let mut temps: Vec<String> = ids
+        let mut temps: Vec<i64> = ids
             .iter()
             .filter_map(|&id| {
-                compact
-                    .get_node_property(id, &PropertyKey::new("temp"))
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                match compact.get_node_property(id, &PropertyKey::new("temp")) {
+                    Some(Value::Int64(n)) => Some(n),
+                    _ => None,
+                }
             })
             .collect();
-        temps.sort();
-        assert_eq!(temps, vec!["-10", "5"]);
+        temps.sort_unstable();
+        assert_eq!(temps, vec![-10, 5]);
     }
 
     #[test]
@@ -1716,9 +1776,21 @@ mod tests {
 
     #[test]
     fn test_infer_type_negative_int() {
+        // Any negative Int64 routes the whole column to RawI64 (prior
+        // behaviour fell back to Dict, which broke type round-trip and
+        // ordered operations).
         assert_eq!(
             infer_type_from_values(&[Value::Int64(-5), Value::Int64(10)]),
-            InferredType::Dict
+            InferredType::RawI64
+        );
+        assert_eq!(
+            infer_type_from_values(&[Value::Int64(-5)]),
+            InferredType::RawI64
+        );
+        // Non-negative-only columns still use BitPacked for compression.
+        assert_eq!(
+            infer_type_from_values(&[Value::Int64(5), Value::Int64(10)]),
+            InferredType::BitPacked
         );
     }
 

@@ -21,6 +21,9 @@ use crate::codec::{BitPackedInts, BitVector, DictionaryEncoding};
 #[non_exhaustive]
 pub enum ColumnCodec {
     /// Fixed-width bit-packed unsigned integers.
+    ///
+    /// Used for `Value::Int64` columns whose values are all `>= 0`. Preserves
+    /// the `Int64` type on decode via `v as i64`.
     BitPacked(BitPackedInts),
     /// Dictionary-encoded strings.
     Dict(DictionaryEncoding),
@@ -42,6 +45,14 @@ pub enum ColumnCodec {
         /// Number of dimensions per vector.
         dimensions: u16,
     },
+    /// Native signed 64-bit integers.
+    ///
+    /// Used for `Value::Int64` columns when at least one value is negative.
+    /// `BitPacked` can't represent negatives correctly in its ordered
+    /// operations (`find_eq`, `find_in_range`, zone maps) because it operates
+    /// on `u64`; `RawI64` stores the values natively to preserve both the
+    /// GQL type and signed ordering semantics on round-trip.
+    RawI64(Vec<i64>),
 }
 
 impl ColumnCodec {
@@ -52,6 +63,7 @@ impl ColumnCodec {
     /// - [`Bitmap`](Self::Bitmap) → `Value::Bool(b)`
     /// - [`Int8Vector`](Self::Int8Vector) → `Value::List(...)` of `Int64` values
     /// - [`Float64`](Self::Float64) → `Value::Float64(f)`
+    /// - [`RawI64`](Self::RawI64) → `Value::Int64(n)`
     ///
     /// Returns `None` when `index` is out of bounds.
     #[inline]
@@ -85,6 +97,7 @@ impl ColumnCodec {
                 Some(Value::List(Arc::from(values)))
             }
             Self::Float64(vec) => vec.get(index).copied().map(Value::Float64),
+            Self::RawI64(vec) => vec.get(index).copied().map(Value::Int64),
             Self::Float32Vector { data, dimensions } => {
                 let dims = *dimensions as usize;
                 if dims == 0 {
@@ -152,6 +165,7 @@ impl ColumnCodec {
                 let dims = *dimensions as usize;
                 data.len().checked_div(dims).unwrap_or(0)
             }
+            Self::RawI64(vec) => vec.len(),
         }
     }
 
@@ -194,6 +208,12 @@ impl ColumnCodec {
                 .filter(|&i| bv.get(i) == Some(target_bool))
                 .collect(),
             (Self::Float64(vec), &Value::Float64(target)) => vec
+                .iter()
+                .enumerate()
+                .filter(|&(_, v)| *v == target)
+                .map(|(i, _)| i)
+                .collect(),
+            (Self::RawI64(vec), &Value::Int64(target)) => vec
                 .iter()
                 .enumerate()
                 .filter(|&(_, v)| *v == target)
@@ -252,6 +272,39 @@ impl ColumnCodec {
                         false
                     }
                 })
+                .collect();
+        }
+
+        if let Self::RawI64(values) = self {
+            // Native i64 comparison — signed ordering semantics "for free".
+            let min_i64 = match min {
+                Some(&Value::Int64(v)) => Some(v),
+                None => None,
+                _ => return self.find_in_range_fallback(min, max, min_inclusive, max_inclusive),
+            };
+            let max_i64 = match max {
+                Some(&Value::Int64(v)) => Some(v),
+                None => None,
+                _ => return self.find_in_range_fallback(min, max, min_inclusive, max_inclusive),
+            };
+
+            return values
+                .iter()
+                .enumerate()
+                .filter(|&(_, &v)| {
+                    let above_min = match min_i64 {
+                        Some(lo) if min_inclusive => v >= lo,
+                        Some(lo) => v > lo,
+                        None => true,
+                    };
+                    let below_max = match max_i64 {
+                        Some(hi) if max_inclusive => v <= hi,
+                        Some(hi) => v < hi,
+                        None => true,
+                    };
+                    above_min && below_max
+                })
+                .map(|(i, _)| i)
                 .collect();
         }
 
@@ -355,6 +408,13 @@ impl ColumnCodec {
                 buf.extend_from_slice(&dimensions.to_le_bytes());
                 write_usize_as_u32(buf, data.len());
                 for &v in data {
+                    buf.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            Self::RawI64(vec) => {
+                buf.push(6); // discriminant
+                write_usize_as_u32(buf, vec.len());
+                for &v in vec {
                     buf.extend_from_slice(&v.to_le_bytes());
                 }
             }
@@ -465,6 +525,15 @@ impl ColumnCodec {
                     dimensions,
                 })
             }
+            6 => {
+                // RawI64
+                let count = read_u32_le(data, pos)? as usize;
+                let mut vec = Vec::with_capacity(count);
+                for _ in 0..count {
+                    vec.push(read_i64_le(data, pos)?);
+                }
+                Ok(Self::RawI64(vec))
+            }
             _ => Err("unknown codec discriminant"),
         }
     }
@@ -483,6 +552,7 @@ impl ColumnCodec {
             Self::Int8Vector { data, .. } => data.len(),
             Self::Float64(vec) => vec.len() * std::mem::size_of::<f64>(),
             Self::Float32Vector { data, .. } => data.len() * std::mem::size_of::<f32>(),
+            Self::RawI64(vec) => vec.len() * std::mem::size_of::<i64>(),
         }
     }
 }
@@ -527,6 +597,15 @@ fn read_f64_le(data: &[u8], pos: &mut usize) -> Result<f64, &'static str> {
         return Err("truncated f64");
     }
     let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+    *pos += 8;
+    Ok(v)
+}
+
+fn read_i64_le(data: &[u8], pos: &mut usize) -> Result<i64, &'static str> {
+    if *pos + 8 > data.len() {
+        return Err("truncated i64");
+    }
+    let v = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
     *pos += 8;
     Ok(v)
 }
@@ -1835,5 +1914,93 @@ mod tests {
         let mut pos = 0;
         let decoded = ColumnCodec::read_from(&buf, &mut pos).expect("decode should succeed");
         assert_eq!(decoded.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // RawI64 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_raw_i64_get_decodes_as_int64() {
+        let col = ColumnCodec::RawI64(vec![-100, 0, 42, i64::MIN, i64::MAX]);
+        assert_eq!(col.len(), 5);
+        assert_eq!(col.get(0), Some(Value::Int64(-100)));
+        assert_eq!(col.get(1), Some(Value::Int64(0)));
+        assert_eq!(col.get(2), Some(Value::Int64(42)));
+        assert_eq!(col.get(3), Some(Value::Int64(i64::MIN)));
+        assert_eq!(col.get(4), Some(Value::Int64(i64::MAX)));
+        assert_eq!(col.get(5), None);
+    }
+
+    #[test]
+    fn test_raw_i64_find_eq() {
+        let col = ColumnCodec::RawI64(vec![-50, 10, -50, 20, 0, -50]);
+        assert_eq!(col.find_eq(&Value::Int64(-50)), vec![0, 2, 5]);
+        assert_eq!(col.find_eq(&Value::Int64(10)), vec![1]);
+        assert_eq!(col.find_eq(&Value::Int64(0)), vec![4]);
+        assert_eq!(col.find_eq(&Value::Int64(999)), Vec::<usize>::new());
+        // Cross-type matches are not supported: a Float64 target should
+        // not match any i64 row via the fast path. Fallback may coerce,
+        // but for now the equality predicate is type-strict.
+        assert_eq!(col.find_eq(&Value::Float64(10.0)), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn test_raw_i64_find_in_range_signed_ordering() {
+        // Values span the sign boundary; native i64 ordering must apply.
+        let col = ColumnCodec::RawI64(vec![-10, -5, 0, 5, 10, -100, 100]);
+
+        // [-5, 5] inclusive
+        let result =
+            col.find_in_range(Some(&Value::Int64(-5)), Some(&Value::Int64(5)), true, true);
+        assert_eq!(result, vec![1, 2, 3]);
+
+        // (-5, 5) exclusive
+        let result =
+            col.find_in_range(Some(&Value::Int64(-5)), Some(&Value::Int64(5)), false, false);
+        assert_eq!(result, vec![2]);
+
+        // < 0 (no lower bound)
+        let result = col.find_in_range(None, Some(&Value::Int64(0)), false, false);
+        assert_eq!(result, vec![0, 1, 5]);
+
+        // >= 10 (no upper bound)
+        let result = col.find_in_range(Some(&Value::Int64(10)), None, true, true);
+        assert_eq!(result, vec![4, 6]);
+    }
+
+    #[test]
+    fn test_write_to_read_from_raw_i64_round_trip() {
+        let col = ColumnCodec::RawI64(vec![-42, 0, 1, i64::MIN, i64::MAX, -1_000_000_000]);
+
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).expect("decode should succeed");
+        assert_eq!(pos, buf.len());
+        assert_eq!(decoded.len(), col.len());
+        for i in 0..col.len() {
+            assert_eq!(decoded.get(i), col.get(i));
+        }
+    }
+
+    #[test]
+    fn test_write_to_read_from_empty_raw_i64() {
+        let col = ColumnCodec::RawI64(Vec::new());
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let decoded = ColumnCodec::read_from(&buf, &mut pos).expect("decode should succeed");
+        assert_eq!(decoded.len(), 0);
+    }
+
+    #[test]
+    fn test_raw_i64_heap_bytes() {
+        let col = ColumnCodec::RawI64(vec![-1, 2, -3]);
+        assert_eq!(col.heap_bytes(), 3 * std::mem::size_of::<i64>());
+
+        let empty = ColumnCodec::RawI64(Vec::new());
+        assert_eq!(empty.heap_bytes(), 0);
     }
 }
