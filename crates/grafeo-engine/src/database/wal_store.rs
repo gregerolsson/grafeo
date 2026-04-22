@@ -321,7 +321,78 @@ impl GraphStore for WalGraphStore {
     }
 }
 
-impl GraphStoreSearch for WalGraphStore {}
+// Pure delegation: the WAL wrapper logs mutations but owns no index state,
+// so every text/vector lookup has to fall through to the underlying
+// `LpgStore`. A stub impl silently turns into "no index exists" at every
+// call site (has_text_index → false, text_search → [], etc.), which
+// regressed hybrid queries on persistent DBs until it was caught by the
+// `_persistent` spec variants — see issue #308.
+impl GraphStoreSearch for WalGraphStore {
+    #[cfg(feature = "text-index")]
+    fn has_text_index(&self, label: &str, property: &str) -> bool {
+        self.inner.has_text_index(label, property)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn score_text(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        property: &str,
+        query: &str,
+    ) -> Option<f64> {
+        self.inner.score_text(node_id, label, property, query)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner.text_search(label, property, query, k)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        threshold: f64,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner
+            .text_search_with_threshold(label, property, query, threshold)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.inner.has_vector_index(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_index_metric(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<grafeo_core::index::vector::DistanceMetric> {
+        self.inner.vector_index_metric(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_search(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        metric: grafeo_core::index::vector::DistanceMetric,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner.vector_search(label, property, query, k, metric)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GraphStoreMut: delegate + WAL log

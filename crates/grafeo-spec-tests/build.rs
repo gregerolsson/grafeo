@@ -734,6 +734,16 @@ fn generate_tests(
     writeln!(output, "    use super::*;").unwrap();
     writeln!(output).unwrap();
 
+    // Cases in text-index or vector-index spec files get an extra `_persistent`
+    // variant so the WAL-wrapped store path (the one every `GrafeoDB::open()`
+    // goes through) is exercised alongside the in-memory one. Index-aware
+    // operators have historically diverged between the two paths (see #308).
+    let file_needs_persistent = file
+        .meta
+        .requires
+        .iter()
+        .any(|r| r == "text-index" || r == "vector-index");
+
     for tc in &file.tests {
         // Skip tests with skip field
         if tc.skip.is_some() {
@@ -746,6 +756,12 @@ fn generate_tests(
             count += 1;
             continue;
         }
+
+        let case_needs_persistent = file_needs_persistent
+            || tc
+                .requires
+                .iter()
+                .any(|r| r == "text-index" || r == "vector-index");
 
         // Handle rosetta variants
         if !tc.variants.is_empty() {
@@ -763,20 +779,49 @@ fn generate_tests(
                     Some(query),
                     Some(lang),
                     rel_path,
+                    DbSource::InMemory,
                 );
                 count += 1;
+                if case_needs_persistent {
+                    generate_single_test(
+                        output,
+                        &format!("{fn_name}_persistent"),
+                        file,
+                        tc,
+                        Some(query),
+                        Some(lang),
+                        rel_path,
+                        DbSource::Persistent,
+                    );
+                    count += 1;
+                }
             }
         } else {
+            let base = sanitize_test_name(&tc.name);
             generate_single_test(
                 output,
-                &sanitize_test_name(&tc.name),
+                &base,
                 file,
                 tc,
                 None,
                 None,
                 rel_path,
+                DbSource::InMemory,
             );
             count += 1;
+            if case_needs_persistent {
+                generate_single_test(
+                    output,
+                    &format!("{base}_persistent"),
+                    file,
+                    tc,
+                    None,
+                    None,
+                    rel_path,
+                    DbSource::Persistent,
+                );
+                count += 1;
+            }
         }
     }
 
@@ -784,6 +829,12 @@ fn generate_tests(
     writeln!(output).unwrap();
 
     count
+}
+
+#[derive(Clone, Copy)]
+enum DbSource {
+    InMemory,
+    Persistent,
 }
 
 fn generate_single_test(
@@ -794,6 +845,7 @@ fn generate_single_test(
     query_override: Option<&str>,
     lang_override: Option<&str>,
     rel_path: &str,
+    db_source: DbSource,
 ) {
     let language = lang_override
         .or(tc.language.as_deref())
@@ -872,8 +924,27 @@ fn generate_single_test(
     writeln!(output, "    #[test]").unwrap();
     writeln!(output, "    fn {fn_name}() {{").unwrap();
 
-    // Create DB and load dataset
-    writeln!(output, "        let db = GrafeoDB::new_in_memory();").unwrap();
+    // Create DB and load dataset. The persistent variant exercises the
+    // WAL-wrapped store path that `GrafeoDB::open()` always produces, so
+    // regressions in wrapper delegation (e.g. #308) fail here instead of
+    // slipping past the in-memory-only suite.
+    match db_source {
+        DbSource::InMemory => {
+            writeln!(output, "        let db = GrafeoDB::new_in_memory();").unwrap();
+        }
+        DbSource::Persistent => {
+            writeln!(
+                output,
+                "        let _tmp = tempfile::tempdir().expect(\"tempdir for persistent spec test\");"
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "        let db = GrafeoDB::open(_tmp.path().join(\"spec.grafeo\")).expect(\"open persistent GrafeoDB for spec test\");"
+            )
+            .unwrap();
+        }
+    }
 
     let effective_dataset = tc.dataset.as_deref().unwrap_or(&file.meta.dataset);
     if effective_dataset != "empty" {
