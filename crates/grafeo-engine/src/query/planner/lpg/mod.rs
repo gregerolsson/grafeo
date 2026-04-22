@@ -835,7 +835,16 @@ impl Planner {
             VectorMetric::Manhattan => DistanceMetric::Manhattan,
         });
 
-        let k = scan.k.unwrap_or(usize::MAX);
+        // Top-k mode uses HNSW when available; threshold/unbounded mode
+        // bounds k to the label's node count so we don't feed usize::MAX
+        // into HNSW (which degrades to full traversal and risks overflow
+        // in quantized rescore paths even with saturating_mul).
+        let k = scan.k.unwrap_or_else(|| {
+            scan.label
+                .as_ref()
+                .map(|l| self.store.nodes_by_label(l).len())
+                .unwrap_or(self.store.node_count())
+        });
 
         // Pick the metric we'll execute under. When the user asked for a
         // specific one, honor it. Otherwise inherit the index's metric (so a
