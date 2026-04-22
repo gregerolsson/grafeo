@@ -102,6 +102,7 @@ unicode-normalization = "0.1"
 # Testing
 proptest = "1"
 criterion = "0.8"
+codspeed-criterion-compat = "3"
 tempfile = "3"
 
 # Allocators (platform-optimized)

@@ -1,8 +1,11 @@
 //! Benchmarks for memory allocators.
+// reason: criterion_group! expansion from codspeed-criterion-compat does not
+// carry doc comments on the generated wrapper functions.
+#![allow(missing_docs)]
 
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use codspeed_criterion_compat::{Criterion, criterion_group, criterion_main};
 
 use grafeo_common::memory::arena::Arena;
 use grafeo_common::memory::bump::BumpAllocator;

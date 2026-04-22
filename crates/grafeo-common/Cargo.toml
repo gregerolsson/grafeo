@@ -54,6 +54,7 @@ encryption = ["dep:aes-gcm", "dep:hkdf", "dep:argon2", "dep:zeroize", "dep:sha2"
 
 [dev-dependencies]
 criterion.workspace = true
+codspeed-criterion-compat.workspace = true
 
 [lints]
 workspace = true

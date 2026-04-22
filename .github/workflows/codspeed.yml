@@ -1,0 +1,74 @@
+name: CodSpeed
+
+# Callgrind-based microbenchmark regression tracking on every PR.
+# Requires the CODSPEED_TOKEN repository secret (set up at
+# https://codspeed.io/new).
+#
+# Covers all six bench suites across the workspace:
+#   - grafeo-core:    index_bench     (adjacency, HNSW, distance, quantization,
+#                                      CompactStore point queries)
+#   - grafeo-common:  arena_bench     (epoch arena, bump, object pool)
+#   - grafeo-storage: wal_bench       (WAL write + recovery replay)
+#   - grafeo-engine:  query_bench           (end-to-end GQL / SPARQL)
+#                     serialization_bench   (snapshot + value encode/decode)
+#                     regression_bench      (multi-hop, repeated, edge filter)
+#                     memory_bench          (memory footprint snapshot)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmarks:
+    name: CodSpeed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Skip on forks where the token is unavailable.
+    if: github.repository == 'GrafeoDB/grafeo'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-codspeed-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-codspeed-
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          # Pinned to a known-good version. Bump with care; the
+          # codspeed-criterion-compat dev-dep should move in lock-step.
+          tool: cargo-codspeed@4.5.0
+
+      - name: Build instrumented benchmarks
+        run: |
+          cargo codspeed build --package grafeo-common --bench arena_bench
+          cargo codspeed build --package grafeo-storage --features wal --bench wal_bench
+          cargo codspeed build --package grafeo-core \
+            --features "vector-index compact-store" --bench index_bench
+          cargo codspeed build --package grafeo-engine --features full \
+            --bench query_bench \
+            --bench serialization_bench \
+            --bench regression_bench \
+            --bench memory_bench
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v4
+        with:
+          run: cargo codspeed run
+          token: ${{ secrets.CODSPEED_TOKEN }}

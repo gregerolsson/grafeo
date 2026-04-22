@@ -1,10 +1,18 @@
 //! Benchmarks for index structures.
+//!
+//! Uses `codspeed-criterion-compat` in place of `criterion` directly so the
+//! same bench file runs under plain `cargo bench` (pass-through to criterion)
+//! and under `cargo codspeed build && cargo codspeed run` (instrumented via
+//! Callgrind for commit-level regression tracking on CodSpeed).
 // reason: bench code uses small known constants
 #![allow(clippy::cast_possible_truncation)]
+// reason: criterion_group! expansion from codspeed-criterion-compat does not
+// carry doc comments on the generated wrapper functions.
+#![allow(missing_docs)]
 
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use codspeed_criterion_compat::{Criterion, criterion_group, criterion_main};
 
 use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_core::index::adjacency::ChunkedAdjacency;

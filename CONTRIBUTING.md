@@ -153,6 +153,46 @@ These companion projects live in separate repositories under the [GrafeoDB](http
 | [graph-bench](https://github.com/GrafeoDB/graph-bench) | Benchmark suite |
 | [ann-benchmarks](https://github.com/GrafeoDB/ann-benchmarks) | Vector search benchmarking |
 
+## Benchmarks and Performance Regressions
+
+Every PR is benchmarked on [CodSpeed](https://codspeed.io/), which runs the
+Criterion microbenchmarks under Callgrind for <1% variance. Results post as a
+PR comment with a diff vs `main`.
+
+The following suites are tracked:
+
+- `grafeo-core/benches/index_bench.rs` — adjacency, HashIndex, HNSW
+  insert/search, distance kernels, quantisation, CompactStore point queries
+- `grafeo-common/benches/arena_bench.rs` — epoch arena, bump allocator,
+  object pool
+- `grafeo-storage/benches/wal_bench.rs` — WAL write throughput, recovery
+  replay
+- `grafeo-engine/benches/query_bench.rs` — end-to-end GQL + SPARQL
+- `grafeo-engine/benches/serialization_bench.rs` — snapshot + Value codecs
+- `grafeo-engine/benches/regression_bench.rs` — multi-hop, repeated-parse,
+  edge-type filter
+- `grafeo-engine/benches/memory_bench.rs` — memory footprint snapshot
+
+Reproduce locally:
+
+```bash
+cargo install cargo-codspeed
+cargo codspeed build --package grafeo-core \
+    --features "vector-index compact-store" --bench index_bench
+cargo codspeed run --package grafeo-core
+```
+
+If a PR flags a >5% regression on a hot path, include a brief explanation in
+the PR description — the trade-off is often acceptable (e.g. a correctness
+fix that costs some throughput), but the maintainer should know it was
+deliberate rather than accidental.
+
+Adding a new Criterion bench: use `codspeed_criterion_compat` in place of
+`criterion` as the import, add a `[[bench]]` entry and any features in the
+owning crate's `Cargo.toml`, and add the suite to `.github/workflows/codspeed.yml`
+so it lands in the PR comment. The adapter is a drop-in replacement — plain
+`cargo bench` continues to work unchanged.
+
 ## Pre-commit Hooks (Optional)
 
 ```bash

@@ -10,11 +10,14 @@
 //!
 //! Run with: cargo bench -p grafeo-engine --bench regression_bench
 //! All features: cargo bench --all-features --bench regression_bench
+// reason: criterion_group! expansion from codspeed-criterion-compat does not
+// carry doc comments on the generated wrapper functions.
+#![allow(missing_docs)]
 
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use codspeed_criterion_compat::{Criterion, criterion_group, criterion_main};
 
 use grafeo_engine::GrafeoDB;
 
