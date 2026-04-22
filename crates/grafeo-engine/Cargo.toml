@@ -63,6 +63,7 @@ criterion.workspace = true
 tempfile.workspace = true
 serde_json = "1"
 tokio.workspace = true
+proptest.workspace = true
 
 [features]
 default = ["lpg", "gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
