@@ -392,6 +392,19 @@ impl GraphStoreSearch for WalGraphStore {
     ) -> Vec<(NodeId, f64)> {
         self.inner.vector_search(label, property, query, k, metric)
     }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_search_with_threshold(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        threshold: f64,
+        metric: grafeo_core::index::vector::DistanceMetric,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner
+            .vector_search_with_threshold(label, property, query, threshold, metric)
+    }
 }
 
 // ---------------------------------------------------------------------------
