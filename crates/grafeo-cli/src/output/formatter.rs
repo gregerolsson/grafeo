@@ -10,32 +10,36 @@ use grafeo_engine::memory_usage::MemoryUsage;
 /// default embedded builds stay terse.
 pub fn format_memory(usage: &MemoryUsage) {
     println!("Total:           {}", format_bytes(usage.total_bytes));
-    println!();
-    println!("Store:           {}", format_bytes(usage.store.total_bytes));
-    if usage.store.nodes_bytes > 0 {
-        println!("  nodes:         {}", format_bytes(usage.store.nodes_bytes));
+
+    if usage.store.total_bytes > 0 {
+        println!();
+        println!("Store:           {}", format_bytes(usage.store.total_bytes));
+        if usage.store.nodes_bytes > 0 {
+            println!("  nodes:         {}", format_bytes(usage.store.nodes_bytes));
+        }
+        if usage.store.edges_bytes > 0 {
+            println!("  edges:         {}", format_bytes(usage.store.edges_bytes));
+        }
+        if usage.store.node_properties_bytes > 0 {
+            println!(
+                "  node props:    {}",
+                format_bytes(usage.store.node_properties_bytes)
+            );
+        }
+        if usage.store.edge_properties_bytes > 0 {
+            println!(
+                "  edge props:    {}",
+                format_bytes(usage.store.edge_properties_bytes)
+            );
+        }
     }
-    if usage.store.edges_bytes > 0 {
-        println!("  edges:         {}", format_bytes(usage.store.edges_bytes));
-    }
-    if usage.store.node_properties_bytes > 0 {
+
+    if usage.indexes.total_bytes > 0 {
+        println!();
         println!(
-            "  node props:    {}",
-            format_bytes(usage.store.node_properties_bytes)
+            "Indexes:         {}",
+            format_bytes(usage.indexes.total_bytes)
         );
-    }
-    if usage.store.edge_properties_bytes > 0 {
-        println!(
-            "  edge props:    {}",
-            format_bytes(usage.store.edge_properties_bytes)
-        );
-    }
-    println!();
-    println!(
-        "Indexes:         {}",
-        format_bytes(usage.indexes.total_bytes)
-    );
-    if !usage.indexes.vector_indexes.is_empty() {
         for idx in &usage.indexes.vector_indexes {
             println!(
                 "  vector[{}]: {} ({} items)",
@@ -44,8 +48,6 @@ pub fn format_memory(usage: &MemoryUsage) {
                 idx.item_count
             );
         }
-    }
-    if !usage.indexes.text_indexes.is_empty() {
         for idx in &usage.indexes.text_indexes {
             println!(
                 "  text[{}]: {} ({} items)",
@@ -55,26 +57,41 @@ pub fn format_memory(usage: &MemoryUsage) {
             );
         }
     }
-    println!();
-    println!("MVCC:            {}", format_bytes(usage.mvcc.total_bytes));
-    if usage.mvcc.average_chain_depth > 0.0 {
-        println!("  avg chain:     {:.2}", usage.mvcc.average_chain_depth);
+
+    if usage.mvcc.total_bytes > 0 {
+        println!();
+        println!("MVCC:            {}", format_bytes(usage.mvcc.total_bytes));
+        if usage.mvcc.average_chain_depth > 0.0 {
+            println!("  avg chain:     {:.2}", usage.mvcc.average_chain_depth);
+        }
     }
-    println!();
-    println!(
-        "Caches:          {} ({} plans)",
-        format_bytes(usage.caches.total_bytes),
-        usage.caches.cached_plan_count
-    );
-    println!(
-        "String pool:     {}",
-        format_bytes(usage.string_pool.total_bytes)
-    );
-    println!(
-        "Buffer manager:  {} / {} budget",
-        format_bytes(usage.buffer_manager.allocated_bytes),
-        format_bytes(usage.buffer_manager.budget_bytes)
-    );
+
+    if usage.caches.total_bytes > 0 || usage.caches.cached_plan_count > 0 {
+        println!();
+        println!(
+            "Caches:          {} ({} plans)",
+            format_bytes(usage.caches.total_bytes),
+            usage.caches.cached_plan_count
+        );
+    }
+
+    if usage.string_pool.total_bytes > 0 {
+        println!();
+        println!(
+            "String pool:     {}",
+            format_bytes(usage.string_pool.total_bytes)
+        );
+    }
+
+    if usage.buffer_manager.allocated_bytes > 0 || usage.buffer_manager.budget_bytes > 0 {
+        println!();
+        println!(
+            "Buffer manager:  {} / {} budget",
+            format_bytes(usage.buffer_manager.allocated_bytes),
+            format_bytes(usage.buffer_manager.budget_bytes)
+        );
+    }
+
     if !usage.rdf.is_empty() {
         println!();
         println!(
@@ -96,6 +113,7 @@ pub fn format_memory(usage: &MemoryUsage) {
             );
         }
     }
+
     if !usage.cdc.is_empty() {
         println!();
         println!(

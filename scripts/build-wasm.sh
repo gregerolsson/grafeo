@@ -71,16 +71,24 @@ wasm-bindgen --target "$TARGET" --out-dir "$OUT_DIR" "$WASM_FILE"
 PKG_VERSION=$(awk '/^\[workspace\.package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)
 PKG_VERSION="${PKG_VERSION:-0.0.0}"
 
-# wasm-bindgen emits CommonJS for --target nodejs and ESM for web/bundler/deno/esm.
+# wasm-bindgen emits different module formats per target:
+#   nodejs     -> CommonJS
+#   no-modules -> plain script that defines a global (no module system)
+#   web/bundler/deno -> ESM
 # The package.json "type" field must match the module format of the generated .js shim.
 case "$TARGET" in
-    nodejs)
+    nodejs|no-modules)
         PKG_TYPE="commonjs"
         PKG_MODULE_FIELD=""
         ;;
-    *)
+    web|bundler|deno)
         PKG_TYPE="module"
         PKG_MODULE_FIELD='  "module": "grafeo_wasm.js",'$'\n'
+        ;;
+    *)
+        echo "Error: unsupported wasm-bindgen target: $TARGET" >&2
+        echo "       expected one of: web, bundler, nodejs, no-modules, deno" >&2
+        exit 1
         ;;
 esac
 
