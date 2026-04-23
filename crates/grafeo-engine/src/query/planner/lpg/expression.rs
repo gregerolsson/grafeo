@@ -1,4 +1,20 @@
 //! Expression conversion from logical to physical representations.
+//!
+//! `convert_expression` is a recursive walk that mirrors
+//! `LogicalExpression` to `FilterExpression`. The walk is *not* a pure
+//! translation: a few match arms recognise patterns that deserve a
+//! specialised physical shape rather than the straight equivalent.
+//!
+//! The most load-bearing case is `LogicalExpression::Exists`: the fast
+//! path invokes `extract_exists_pattern` to turn a single-hop EXISTS
+//! into an inline predicate that can evaluate during the scan, avoiding
+//! a semi-join for the common `EXISTS { (n)-[:R]->() }` shape. Multi-hop
+//! or otherwise complex EXISTS instead falls through and is rewritten
+//! at the filter layer via `extract_complex_exists` (see
+//! [`super::filter`]). The two entry points are coupled: `plan_filter`
+//! checks for the complex form *before* calling `convert_expression`
+//! so the fast path here only ever sees shapes it can actually handle
+//! inline.
 
 use super::{
     Direction, Error, ExpandDirection, ExpandOp, FilterExpression, LogicalExpression,

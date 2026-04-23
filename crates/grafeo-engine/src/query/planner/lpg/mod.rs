@@ -2,6 +2,94 @@
 //!
 //! Converts logical plans with LPG operators (NodeScan, Expand, etc.) to
 //! physical operators that execute against an LPG store.
+//!
+//! # Structure
+//!
+//! Logical operators are consumed by `plan_operator`, dispatched to
+//! per-operator submodules that share the crate-private `Planner`
+//! struct:
+//!
+//! | Submodule    | Owns                                                         |
+//! |--------------|--------------------------------------------------------------|
+//! | `scan`       | `plan_node_scan`: label, property, and index-seek scans      |
+//! | `expand`     | single-hop and multi-hop expansion (factorized chain)        |
+//! | `filter`     | predicate rewriting, zone maps, index pushdown, EXISTS/COUNT |
+//! | `expression` | `LogicalExpression` -> `FilterExpression` conversion         |
+//! | `join`       | hash, nested-loop, leapfrog, multi-way, semi/anti            |
+//! | `aggregate`, `project`, `mutation` | the rest of the pipeline               |
+//!
+//! # Rewrites applied during planning
+//!
+//! The planner is not a pure tree walker: it performs several shape
+//! transforms up-front because they decide which *physical* operator is
+//! legal, not just which is faster. Each rewrite lives in the submodule
+//! that owns the corresponding logical operator.
+//!
+//! 1. **Factorized expand chains** (`expand::plan_expand_chain`):
+//!    two or more consecutive `Expand`s are collapsed into a single
+//!    `LazyFactorizedChainOperator`. A hand-rolled tree of `Expand`
+//!    operators would materialise the Cartesian product between hops
+//!    (O(d^k) rows for a k-hop query with average degree d); factorisation
+//!    represents each hop as a set per row and evaluates upward filters
+//!    lazily, which is asymptotically better *and* preserves filter
+//!    semantics (filters apply to the flattened view). Disabled when
+//!    `factorized_execution` is false on the planner, used as an escape
+//!    hatch for operators that need materialised intermediate state.
+//!
+//! 2. **EXISTS / NOT EXISTS as semi/anti joins** (`filter::extract_complex_exists`):
+//!    anything more than a trivial single-hop EXISTS is rewritten to a
+//!    semi-join (EXISTS) or anti-join (NOT EXISTS) before the filter is
+//!    planned. A literal nested re-execution would re-scan the subquery
+//!    per outer row; the join form piggy-backs on the regular hash-join
+//!    infrastructure. The fast path in `expression::convert_expression`
+//!    keeps trivial single-hop EXISTS as inline predicates so small
+//!    queries stay scan-local.
+//!
+//! 3. **EXISTS inside OR** (`filter::extract_exists_from_or`):
+//!    semi-joins filter rows and therefore compose incorrectly with the
+//!    disjunctive scalar side of an OR. The rewrite splits the OR into a
+//!    semi-join branch and a regular filter branch, UNIONNs them, and
+//!    deduplicates. Without the split, rows satisfied only by the scalar
+//!    side would be dropped.
+//!
+//! 4. **COUNT subquery comparisons** (`filter::extract_count_comparison`):
+//!    `COUNT { ... } op N` rewrites into Apply + Aggregate + Filter.
+//!    Evaluating the COUNT inline per row would be a correlated
+//!    subquery; Apply + Aggregate reuses the hash-aggregate physical
+//!    operator.
+//!
+//! # Filter pushdown and index selection
+//!
+//! `filter::plan_filter` is the central point. It tries a sequence of
+//! optimisations before falling back to a generic `FilterOperator`; the
+//! ordering is load-bearing:
+//!
+//! 1. **Complex EXISTS / OR / COUNT rewrites** (above). These must run
+//!    first because later steps assume a pure-scalar predicate.
+//! 2. **Zone-map short-circuit**: if the column's zone summary proves the
+//!    predicate cannot match any row group, plan an `EmptyOperator`.
+//! 3. **Property index seek**: equality on an indexed property becomes an
+//!    index scan (O(1) per lookup) instead of a filtered full scan.
+//! 4. **Range index lookup**: `>`, `<`, `>=`, `<=` on an indexed
+//!    property becomes a range scan.
+//! 5. **Hybrid vector+text pushdown** (feature-gated): compound
+//!    AND/OR predicates over `vector_match` / `text_match` are folded
+//!    into a single fused scan.
+//! 6. **Generic `FilterOperator`**: the residual predicate wraps the
+//!    input scan.
+//!
+//! Whatever *remains* after a pushdown (e.g. the non-index-backed half
+//! of an AND) is planned as a residual filter on top of the chosen scan,
+//! so the returned tree is always semantically equivalent to the
+//! input plan.
+//!
+//! # Transaction context
+//!
+//! Every operator inherits the planner's `viewing_epoch` and
+//! `transaction_id`. Factorised chains and mutations carry them
+//! through `with_transaction_context()` so MVCC visibility is applied
+//! at every hop: see [`crate::transaction`] for the epoch/visibility
+//! rules.
 
 mod aggregate;
 mod expand;
@@ -605,6 +693,11 @@ impl Planner {
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
             LogicalOperator::Expand(expand) => {
+                // Factorized chain kicks in only when it actually helps:
+                // chain_len >= 2 means at least two consecutive Expands, where
+                // separate plans would Cartesian-product per hop. For a single
+                // hop, the plain `plan_expand` path is cheaper and integrates
+                // more naturally with adjacent operators.
                 if self.factorized_execution {
                     let (chain_len, _base) = Self::count_expand_chain(op);
                     if chain_len >= 2 {
