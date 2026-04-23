@@ -1,3 +1,4 @@
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/GrafeoDB/grafeo?utm_source=badge)
 [![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml)
 [![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg)](https://grafeo.dev)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
@@ -22,7 +23,7 @@ Grafeo is a graph database built in Rust from the ground up for speed and low me
 
 In our [graph-bench](https://github.com/GrafeoDB/graph-bench) suite (which includes workloads inspired by the [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/)), Grafeo is the fastest tested graph database in both embedded and server configurations, while using a fraction of the memory of some of the alternatives.
 
-[![Grafeo Playground](docs/assets/playground.png)](https://grafeo.ai)
+[![Grafeo Playground](docs/assets/playground.png)](https://playground.grafeo.dev)
 
 Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description Framework (RDF)** data models and all major query languages.
 

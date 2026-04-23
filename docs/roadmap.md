@@ -138,7 +138,7 @@ The beta series focuses on correctness, completeness and real-world durability. 
 
 | Version    | Focus                                                                                                                                                               |
 |------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **0.5.41** | API stability and developer experience: stable/beta/experimental tier annotations, cursor-based streaming results, memory introspection, contributor documentation  |
+| **0.5.41** | API stability and developer experience: stable/beta/experimental tier annotations, contributor documentation                                                        |
 | **0.5.42** | Improved temporal queries: temporal indexes, GQL temporal syntax extensions, async storage server integration                                                       |
 | **0.5.43** | Offline-first sync protocol, cross-language query translation, final 0.6.x blocker audit                                                                            |
 | **0.5.44** | Flutter/mobile builds (Android NDK, iOS xcframework), final feature profile audit and doc sweep                                                                     |

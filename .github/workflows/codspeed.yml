@@ -1,78 +1,45 @@
 name: CodSpeed
 
-# Callgrind-based microbenchmark regression tracking on every PR.
-# Requires the CODSPEED_TOKEN repository secret (set up at
-# https://codspeed.io/new).
-#
-# Covers all six bench suites across the workspace:
-#   - grafeo-core:    index_bench     (adjacency, HNSW, distance, quantization,
-#                                      CompactStore point queries)
-#   - grafeo-common:  arena_bench     (epoch arena, bump, object pool)
-#   - grafeo-storage: wal_bench       (WAL write + recovery replay)
-#   - grafeo-engine:  query_bench           (end-to-end GQL / SPARQL)
-#                     serialization_bench   (snapshot + value encode/decode)
-#                     regression_bench      (multi-hop, repeated, edge filter)
-#                     memory_bench          (memory footprint snapshot)
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  # Allow CodSpeed to trigger backtest performance analysis
+  workflow_dispatch:
 
-concurrency:
-  group: codspeed-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  benchmarks:
-    name: CodSpeed
+  codspeed:
+    name: Run benchmarks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Skip PRs from forks: `pull_request` events run in the base-repo context
-    # (so `github.repository` alone would still match), but the CODSPEED_TOKEN
-    # secret isn't exposed to fork PRs. Gate on head-repo equality instead.
-    if: >-
-      github.event_name != 'pull_request'
-      || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Setup rust toolchain, cache and cargo-codspeed binary
+        uses: moonrepo/setup-rust@v0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-codspeed-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-codspeed-
+          channel: stable
+          cache-target: release
+          bins: cargo-codspeed
 
-      - name: Install cargo-codspeed
-        uses: taiki-e/install-action@v2
-        with:
-          # Pinned to a known-good version. Bump with care; the
-          # codspeed-criterion-compat dev-dep should move in lock-step.
-          tool: cargo-codspeed@4.5.0
-
-      - name: Build instrumented benchmarks
+      - name: Build the benchmark targets
         run: |
-          cargo codspeed build --package grafeo-common --bench arena_bench
-          cargo codspeed build --package grafeo-storage --features wal --bench wal_bench
-          cargo codspeed build --package grafeo-core \
-            --features "vector-index compact-store" --bench index_bench
-          cargo codspeed build --package grafeo-engine --features full \
-            --bench query_bench \
-            --bench serialization_bench \
-            --bench regression_bench \
-            --bench memory_bench
+          cargo codspeed build --all-features \
+            -p grafeo-common --bench arena_bench \
+            -p grafeo-core --bench index_bench \
+            -p grafeo-engine --bench query_bench \
+                             --bench serialization_bench \
+                             --bench regression_bench
 
-      - name: Run benchmarks
+      - name: Run the benchmarks
         uses: CodSpeedHQ/action@v4
         with:
+          mode: simulation
           run: cargo codspeed run
-          token: ${{ secrets.CODSPEED_TOKEN }}
