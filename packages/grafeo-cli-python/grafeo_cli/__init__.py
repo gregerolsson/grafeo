@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-__version__ = "0.5.40"
+__version__ = "0.5.41"
 
 # GitHub release download URL template
 _GITHUB_RELEASE = "https://github.com/GrafeoDB/grafeo/releases/download"
