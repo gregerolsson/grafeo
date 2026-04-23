@@ -14,7 +14,7 @@
 //!   `db.propertyKeys`): implemented directly.
 //! - Vector and text search (`grafeo.search.vector`, `grafeo.search.mmr`,
 //!   `grafeo.search.text`): implemented directly, require
-//!   [`ProcedureContext::database`].
+//!   [`ProcedureContext::lpg_store`].
 
 use std::sync::Arc;
 

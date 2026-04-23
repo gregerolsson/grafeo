@@ -27,6 +27,8 @@ pub(crate) mod catalog_section;
 pub(crate) mod cdc_store;
 #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
 mod checkpoint_timer;
+#[cfg(all(feature = "compact-store", feature = "mmap"))]
+pub mod compact_tiered;
 #[cfg(feature = "lpg")]
 mod crud;
 #[cfg(feature = "embed")]

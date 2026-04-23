@@ -1555,6 +1555,7 @@ dependencies = [
  "hf-hub",
  "indexmap",
  "md5",
+ "memmap2",
  "ort",
  "parking_lot",
  "proptest",
