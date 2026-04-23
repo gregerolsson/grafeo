@@ -2,6 +2,43 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.41] - Unreleased
+
+Compact-store correctness (post-`compact()` read path, signed integer round-trip), search procedures, silent-hybrid-on-persistent-DB fix, and test-infrastructure hardening (proptest, persistent spec variants, CodSpeed CI).
+
+### Added
+
+- **`CALL grafeo.search.*` procedures**: first-class procedure entry points for text and vector search, with scalar similarity available as an expression in projections. Routes through the existing `GraphStoreSearch` surface so WAL/CDC wrappers and `LayeredStore` all work.
+- **WASM transactions + `close()`**: explicit transaction API for the browser bindings, plus `close()` to release handles deterministically instead of waiting for GC.
+- **Property-based round-trip coverage for `compact()`** (#303): generates arbitrary LPG graphs (1 to 20 nodes, 0 to 30 edges, 3 labels, 2 edge types, optional signed `num` / `[a-z]{1,8} name`), applies them to two fresh in-memory DBs, compacts one, and asserts equivalence across 28 GQL queries per case. 128 cases by default; `PROPTEST_CASES=1024` for local investigation. Surfaced the two compact-store bugs fixed in this release (#301, #302).
+- **Persistent spec-test variants** (#309): every `.gtest` case requiring `text-index` or `vector-index` now auto-generates a `_persistent` sibling that opens `GrafeoDB::open(tempdir)`, exercising the WAL-wrapped read path that every on-disk session uses. 49 persistent variants land with this release.
+- **CodSpeed continuous benchmark regression** (#304): all seven Criterion suites (`index_bench`, `arena_bench`, `wal_bench`, `query_bench`, `serialization_bench`, `regression_bench`, `memory_bench`) run under Callgrind on every PR via `cargo codspeed`, posting a diff vs `main` as a PR comment. Fork PRs skip cleanly (token isn't exposed). Plain `cargo bench` continues to work unchanged.
+- **`ColumnCodec::RawI64`** (#306): native signed 64-bit codec for columns containing at least one negative value. Supports native i64 comparison in `find_eq` / `find_in_range` and signed zone maps. Non-negative columns continue to use the more compact `BitPacked` encoding.
+
+### Changed
+
+- **On-disk codec format extended**: databases written by 0.5.41+ may contain columns under the new `RawI64` discriminant (6). Earlier 0.5.4x binaries reject these with `unknown codec discriminant`. One-way format break, in line with the 0.5.35 precedent.
+
+### Fixed
+
+- **Post-`compact()` writes invisible to `MATCH`** (#307, closes #302): `LayeredStore::get_edge`, `get_*_versioned`, `get_*_at_epoch`, `get_edge_property`, `edge_type`, and the four `is_*_visible_*` methods now fall through to the overlay when the base doesn't recognise the id. `edges_from` / `neighbors` always consult the overlay (dropping the `overlay.get_node(node).is_some()` gate) so cross-layer edges surface. Results deduplicated by `EdgeId` to handle promoted edges.
+- **Signed Int64 columns stringified after `compact()`** (#306, closes #301): any `Int64` column with at least one negative value was being routed to `InferredType::Dict`, stringifying the values for storage and decoding them back as `Value::String`. `WHERE n.num = 100` returned zero rows; `sum(n.num)` promoted to `Float64`. Fix routes signed columns to the new `RawI64` codec, preserving the `Int64` type and signed ordering through compaction.
+- **Silent text/vector search on file-backed DBs** (#309, closes #308): `WalGraphStore` and `CdcGraphStore` had empty `impl GraphStoreSearch` blocks that relied on the trait's default methods, all of which are no-ops (`has_text_index` -> `false`, `text_search` -> `[]`, etc.). `GrafeoDB::open()` wraps the overlay in `WalGraphStore`, so every index lookup through a persistent session was silently reporting "no index," while `new_in_memory()` bypassed both wrappers and worked. Both wrappers now delegate every `GraphStoreSearch` method to `self.inner`.
+- **Cypher aggregate substitution inside CASE WHEN** (#300): aggregates wrapped in `CASE WHEN ... THEN sum(...) ...` expressions now substitute the reduced value post-aggregation instead of leaving an unresolved reference.
+- **VectorScan `k=None` risked HNSW overflow** (#299 follow-up): unbounded k was being passed through as `usize::MAX`, degrading HNSW to full traversal and risking overflow in quantized rescore even with saturating multiplication. The planner now bounds k to the label's node count (or the global node count when no label is specified) via the new `nodes_by_label_count` trait method.
+- **Native SIMD kernels read past `b` on mismatched slice lengths** (#312, closes #311): the unsafe AVX2, SSE, and NEON kernels drive their main loop from `a.len()` and raw-pointer-load `b` with `_mm256_loadu_ps(b.as_ptr().add(i))` and equivalents. A `debug_assert_eq!` caught this in debug only, so release builds could read past `b` on a caller mistake. The four public `*_simd` dispatchers (dot product, squared Euclidean, cosine, Manhattan) now assert length equality in release.
+- **`rustls-webpki` 0.103.13**: clears RUSTSEC-2026-0104 (reachable panic in CRL parsing). Pulled transitively via `hf-hub -> ureq -> rustls`; not reachable from our code paths, but `cargo-deny` flagged the advisory.
+
+### Dependencies
+
+- `proptest` 1.x added as workspace dev-dep and enabled on `grafeo-engine` for property-based tests.
+- `codspeed-criterion-compat` 3.x added as workspace dev-dep and enabled on `grafeo-common`, `grafeo-core`, `grafeo-storage`, `grafeo-engine`. Drop-in for Criterion; pass-through outside `cargo codspeed run`.
+- `tempfile` added as a dev-dep on `grafeo-spec-tests` for the `_persistent` variants.
+
+---
+
+Thanks to [@temporaryfix](https://github.com/temporaryfix) for substantial work this cycle: the two compact-store correctness fixes (#306, #307) and the property-based suite that surfaced them (#303), the hybrid-on-persistent fix (#309), the Cypher CASE aggregate fix (#300), the VectorScan k bounding follow-up to #299, the native SIMD safety assert (#312, closes #311), and CodSpeed benchmark CI (#304).
+
 ## [0.5.40] - 2026-04-20
 
 Unified hybrid queries (graph + vector + text), lazy streaming results, structured Python errors, catalog hierarchy hardening, and compact-store fixes.
