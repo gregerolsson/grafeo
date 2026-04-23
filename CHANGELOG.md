@@ -15,6 +15,7 @@ Compact-store correctness (post-`compact()` read path, signed integer round-trip
 - **Persistent spec-test variants** (#309): every `.gtest` case requiring `text-index` or `vector-index` now auto-generates a `_persistent` sibling that opens `GrafeoDB::open(tempdir)`, exercising the WAL-wrapped read path that every on-disk session uses. 49 persistent variants land with this release.
 - **CodSpeed continuous benchmark regression** (#304): all seven Criterion suites (`index_bench`, `arena_bench`, `wal_bench`, `query_bench`, `serialization_bench`, `regression_bench`, `memory_bench`) run under Callgrind on every PR via `cargo codspeed`, posting a diff vs `main` as a PR comment. Fork PRs skip cleanly (token isn't exposed). Plain `cargo bench` continues to work unchanged.
 - **`ColumnCodec::RawI64`** (#306): native signed 64-bit codec for columns containing at least one negative value. Supports native i64 comparison in `find_eq` / `find_in_range` and signed zone maps. Non-negative columns continue to use the more compact `BitPacked` encoding.
+- **wasm32 simd128 distance kernels** (#305): hand-written `simd128` implementations of all four HNSW distance metrics (dot product, squared Euclidean, cosine, Manhattan) using `std::arch::wasm32` intrinsics. Enabled by default for wasm32 builds via `.cargo/config.toml` (`target-feature=+simd128`), giving 4.36x to 5.35x speedup on 384-dim f32 vectors. Runtime requirement: Chrome 91+, Firefox 89+, Safari 16.4+ (universal on active browsers). Relaxed-simd FMA fast path intentionally not wired up: the Wasm spec permits runtime-defined rounding for `f32x4_relaxed_madd`, making distance values implementation-dependent, and current wasmtime regresses cosine and euclidean_sq vs plain add+mul.
 
 ### Changed
 
@@ -38,7 +39,7 @@ Compact-store correctness (post-`compact()` read path, signed integer round-trip
 
 ---
 
-Thanks to [@temporaryfix](https://github.com/temporaryfix) for substantial work this cycle: the two compact-store correctness fixes (#306, #307) and the property-based suite that surfaced them (#303), the hybrid-on-persistent fix (#309), the Cypher CASE aggregate fix (#300), the VectorScan k bounding follow-up to #299, the native SIMD safety assert (#312, closes #311), and CodSpeed benchmark CI (#304).
+Thanks to [@temporaryfix](https://github.com/temporaryfix) for substantial work this cycle: the two compact-store correctness fixes (#306, #307) and the property-based suite that surfaced them (#303), the hybrid-on-persistent fix (#309), the Cypher CASE aggregate fix (#300), the VectorScan k bounding follow-up to #299, the native SIMD safety assert (#312, closes #311), CodSpeed benchmark CI (#304), and the wasm32 simd128 distance kernels (#305).
 
 ## [0.5.40] - 2026-04-20
 
