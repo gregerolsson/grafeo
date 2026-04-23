@@ -29,6 +29,10 @@ console_error_panic_hook = "0.1"
 serde.workspace = true
 serde_json = "1.0"
 
+# Snapshot integrity (HMAC-SHA256 over exported bytes)
+hmac = "0.13"
+sha2 = { workspace = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 
@@ -47,17 +51,18 @@ sql-pgq = ["grafeo-engine/sql-pgq"]
 vector-index = ["grafeo-engine/vector-index"]
 text-index = ["grafeo-engine/text-index"]
 hybrid-search = ["grafeo-engine/hybrid-search"]
+algos = ["grafeo-engine/algos"]
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
 compact-store = ["grafeo-engine/compact-store"]
 # Persona-based profiles
 lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "grafeo-engine/regex"]  # Graph App Developer
 rdf = ["rdf-model", "gql", "sparql", "graphql", "grafeo-engine/regex-lite"]  # Knowledge Engineer
 ai = ["vector-index", "text-index", "hybrid-search"]  # AI/Agent Developer
-analytics = ["ai"]  # Data Scientist (alias for ai in WASM, no algos/import available)
+analytics = ["ai", "algos"]  # Data Scientist (ai search + graph algorithms)
 edge = ["grafeo-engine/lpg", "gql", "compact-store", "grafeo-engine/regex-lite"]  # Frontend/Edge
 # Deployment-based profiles (deprecated)
 browser = ["edge"]  # Deprecated: use edge
-full = ["lpg", "languages", "ai"]
+full = ["lpg", "languages", "ai", "algos"]
 
 [lints]
 workspace = true

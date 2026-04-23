@@ -3434,6 +3434,22 @@ impl ExpressionPredicate {
                     crate::index::vector::cosine_similarity(&a, &b) as f64,
                 ))
             }
+            "cosine_distance" => {
+                if args.len() != 2 {
+                    return None;
+                }
+                let a_val = self.eval_expr(&args[0], chunk, row)?;
+                let b_val = self.eval_expr(&args[1], chunk, row)?;
+                let a = Self::coerce_to_float_vec(&a_val)?;
+                let b = Self::coerce_to_float_vec(&b_val)?;
+                if a.len() != b.len() {
+                    return None;
+                }
+                // cosine_distance = 1 - cosine_similarity, range [0, 2]
+                Some(Value::Float64(
+                    1.0 - crate::index::vector::cosine_similarity(&a, &b) as f64,
+                ))
+            }
             "euclidean_distance" => {
                 if args.len() != 2 {
                     return None;

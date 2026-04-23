@@ -265,7 +265,7 @@ fn test_import_lpg_edge_source_out_of_bounds() {
     .unwrap();
 
     let err = db.import_lpg(data).unwrap_err();
-    let msg = format!("{err}");
+    let msg = format!("{err:?}");
     assert!(
         msg.contains("source index 5 out of bounds"),
         "unexpected error: {msg}"
@@ -283,7 +283,7 @@ fn test_import_lpg_edge_target_out_of_bounds() {
     .unwrap();
 
     let err = db.import_lpg(data).unwrap_err();
-    let msg = format!("{err}");
+    let msg = format!("{err:?}");
     assert!(
         msg.contains("target index 99 out of bounds"),
         "unexpected error: {msg}"
@@ -301,7 +301,7 @@ fn test_import_lpg_invalid_shape() {
     .unwrap();
 
     let err = db.import_lpg(data).unwrap_err();
-    let msg = format!("{err}");
+    let msg = format!("{err:?}");
     assert!(msg.contains("Invalid LPG data"), "unexpected error: {msg}");
 }
 
@@ -407,4 +407,140 @@ fn test_import_lpg_snapshot_roundtrip() {
 
     assert_eq!(restored.node_count(), 2);
     assert_eq!(restored.edge_count(), 1);
+}
+
+// ==========================================================================
+// L25: transactions + close()
+// ==========================================================================
+
+#[wasm_bindgen_test]
+fn test_begin_commit_transaction_persists_writes() {
+    let db = Database::new().expect("create db");
+    db.begin_transaction().expect("begin");
+    assert!(db.is_transaction_active());
+
+    db.execute("CREATE (:T {x: 1})").expect("insert in tx");
+    assert_eq!(
+        db.node_count(),
+        0,
+        "commit not yet called: count should be 0"
+    );
+
+    db.commit_transaction().expect("commit");
+    assert!(!db.is_transaction_active());
+    assert_eq!(db.node_count(), 1, "writes visible after commit");
+}
+
+#[wasm_bindgen_test]
+fn test_rollback_transaction_discards_writes() {
+    let db = Database::new().expect("create db");
+    db.begin_transaction().expect("begin");
+    db.execute("CREATE (:T {x: 1})").expect("insert in tx");
+
+    db.rollback_transaction().expect("rollback");
+    assert!(!db.is_transaction_active());
+    assert_eq!(db.node_count(), 0, "rollback discards writes");
+}
+
+#[wasm_bindgen_test]
+fn test_double_begin_errors() {
+    let db = Database::new().expect("create db");
+    db.begin_transaction().expect("first begin");
+    assert!(db.begin_transaction().is_err(), "second begin should error");
+    db.rollback_transaction().expect("cleanup rollback");
+}
+
+#[wasm_bindgen_test]
+fn test_commit_without_active_errors() {
+    let db = Database::new().expect("create db");
+    assert!(db.commit_transaction().is_err());
+    assert!(db.rollback_transaction().is_err());
+}
+
+#[wasm_bindgen_test]
+fn test_close_blocks_subsequent_operations() {
+    let db = Database::new().expect("create db");
+    db.execute("CREATE (:T)").expect("insert");
+    db.close();
+
+    assert!(db.execute("CREATE (:T)").is_err(), "execute after close");
+    assert!(db.export_snapshot().is_err(), "export after close");
+    assert!(db.begin_transaction().is_err(), "begin after close");
+}
+
+#[wasm_bindgen_test]
+fn test_close_rolls_back_active_transaction() {
+    let db = Database::new().expect("create db");
+    db.begin_transaction().expect("begin");
+    db.execute("CREATE (:T)").expect("insert in tx");
+    db.close();
+    // Second close is a no-op.
+    db.close();
+}
+
+// ==========================================================================
+// M7: signed-snapshot integrity
+// ==========================================================================
+
+#[wasm_bindgen_test]
+fn test_signed_snapshot_roundtrip() {
+    let db = Database::new().expect("create db");
+    db.execute("CREATE (:Doc {title: 'A'})").expect("insert");
+    db.execute("CREATE (:Doc {title: 'B'})").expect("insert");
+
+    let key = b"0123456789abcdef0123456789abcdef";
+    let signed = db.export_snapshot_signed(key).expect("export signed");
+
+    // Signed format is distinguishable from raw-unsigned.
+    assert_eq!(&signed[..4], b"GSN1");
+
+    let restored = Database::import_snapshot_signed(&signed, key).expect("restore");
+    assert_eq!(restored.node_count(), 2);
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_import_tampered_snapshot() {
+    let db = Database::new().expect("create db");
+    db.execute("CREATE (:T)").expect("insert");
+    let key = b"secret-key";
+    let mut signed = db.export_snapshot_signed(key).expect("export signed");
+
+    // Flip a byte in the middle of the payload.
+    let mid = signed.len() / 2;
+    signed[mid] ^= 0x01;
+
+    assert!(Database::import_snapshot_signed(&signed, key).is_err());
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_import_wrong_key_rejected() {
+    let db = Database::new().expect("create db");
+    db.execute("CREATE (:T)").expect("insert");
+    let signed = db.export_snapshot_signed(b"key-a").expect("export signed");
+
+    assert!(
+        Database::import_snapshot_signed(&signed, b"key-b").is_err(),
+        "wrong key must not verify"
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_wasm_import_empty_snapshot() {
+    assert!(Database::import_snapshot(b"").is_err());
+    assert!(Database::import_snapshot_signed(b"", b"k").is_err());
+}
+
+#[wasm_bindgen_test]
+fn test_signed_snapshot_rejected_by_unsigned_import() {
+    let db = Database::new().expect("create db");
+    db.execute("CREATE (:T)").expect("insert");
+    let signed = db.export_snapshot_signed(b"k").expect("export signed");
+
+    assert!(Database::import_snapshot(&signed).is_err());
+}
+
+#[wasm_bindgen_test]
+fn test_export_signed_requires_key() {
+    let db = Database::new().expect("create db");
+    assert!(db.export_snapshot_signed(b"").is_err());
 }

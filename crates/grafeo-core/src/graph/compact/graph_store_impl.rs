@@ -246,6 +246,14 @@ impl GraphStore for CompactStore {
         }
     }
 
+    fn nodes_by_label_count(&self, label: &str) -> usize {
+        // Row count is preserved across the compact->original ID mapping, so
+        // NodeTable::len() is authoritative whether preserves_ids() is set or not.
+        self.label_to_table_id
+            .get(label)
+            .map_or(0, |&tid| self.node_tables_by_id[tid as usize].len())
+    }
+
     fn node_count(&self) -> usize {
         self.node_tables_by_id.iter().map(|nt| nt.len()).sum()
     }

@@ -142,6 +142,15 @@ pub trait GraphStore: Send + Sync {
     /// Returns node IDs with a specific label.
     fn nodes_by_label(&self, label: &str) -> Vec<NodeId>;
 
+    /// Returns the number of non-deleted nodes with a specific label.
+    ///
+    /// Default falls back to `self.nodes_by_label(label).len()`; stores that
+    /// maintain a per-label index should override for an O(1) count without
+    /// allocating the full ID list.
+    fn nodes_by_label_count(&self, label: &str) -> usize {
+        self.nodes_by_label(label).len()
+    }
+
     /// Returns the total number of non-deleted nodes.
     fn node_count(&self) -> usize;
 

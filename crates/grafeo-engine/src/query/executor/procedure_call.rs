@@ -1,33 +1,40 @@
 //! Physical operator for CALL procedure execution.
 //!
-//! Wraps a [`GraphAlgorithm`] and produces [`DataChunk`]s from its result,
-//! with optional YIELD column filtering and aliasing.
+//! Wraps a [`Procedure`] and produces [`DataChunk`]s from its result, with
+//! optional YIELD column filtering and aliasing. The `Procedure` trait
+//! unifies graph algorithms, catalog introspection, and vector/text search
+//! behind a single dispatch path (see [`crate::procedures`]).
 
 use std::sync::Arc;
 
-use grafeo_adapters::plugins::algorithms::GraphAlgorithm;
 use grafeo_adapters::plugins::{AlgorithmResult, Parameters};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult};
 use grafeo_core::graph::GraphStoreSearch;
 
-/// Physical operator that executes a graph algorithm and yields its results.
+use crate::procedures::{Procedure, ProcedureContext};
+
+/// Physical operator that executes a procedure and yields its results.
 ///
-/// On the first call to [`next()`](Operator::next), the algorithm is executed and
+/// On the first call to [`next()`](Operator::next), the procedure runs and
 /// the full result is cached. Subsequent calls yield rows in chunks of
 /// `CHUNK_SIZE` until exhausted.
 pub struct ProcedureCallOperator {
     store: Arc<dyn GraphStoreSearch>,
-    algorithm: Arc<dyn GraphAlgorithm>,
+    procedure: Arc<dyn Procedure>,
     params: Parameters,
+    /// Optional LPG store handle, required by search procedures that reach
+    /// the HNSW / BM25 indexes rather than the raw graph store.
+    #[cfg(feature = "lpg")]
+    lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
     /// YIELD items: (original_column, alias). `None` means yield all columns.
     yield_columns: Option<Vec<(String, Option<String>)>>,
     /// Canonical column names from the procedure registry (e.g., `["node_id", "score"]`
     /// for PageRank, even though the algorithm internally names it `"pagerank"`).
-    /// Used to remap algorithm result columns for YIELD matching.
+    /// Used to remap procedure result columns for YIELD matching.
     canonical_columns: Vec<String>,
-    /// Cached algorithm result (populated on first next()).
+    /// Cached procedure result (populated on first next()).
     result: Option<AlgorithmResult>,
     /// Current row position in the cached result.
     row_index: usize,
@@ -44,15 +51,17 @@ impl ProcedureCallOperator {
     /// Creates a new procedure call operator.
     pub fn new(
         store: Arc<dyn GraphStoreSearch>,
-        algorithm: Arc<dyn GraphAlgorithm>,
+        procedure: Arc<dyn Procedure>,
         params: Parameters,
         yield_columns: Option<Vec<(String, Option<String>)>>,
         canonical_columns: Vec<String>,
     ) -> Self {
         Self {
             store,
-            algorithm,
+            procedure,
             params,
+            #[cfg(feature = "lpg")]
+            lpg_store: None,
             yield_columns,
             canonical_columns,
             result: None,
@@ -62,11 +71,27 @@ impl ProcedureCallOperator {
         }
     }
 
-    /// Executes the algorithm and resolves YIELD column mapping.
+    /// Attaches an LPG store handle so search procedures can reach vector /
+    /// text indexes.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
+        self.lpg_store = Some(lpg_store);
+        self
+    }
+
+    /// Executes the procedure and resolves YIELD column mapping.
     fn execute_algorithm(&mut self) -> Result<(), OperatorError> {
+        #[cfg(feature = "lpg")]
+        let ctx = match self.lpg_store.as_deref() {
+            Some(lpg) => ProcedureContext::with_lpg_store(&*self.store, lpg),
+            None => ProcedureContext::new(&*self.store),
+        };
+        #[cfg(not(feature = "lpg"))]
+        let ctx = ProcedureContext::new(&*self.store);
         let result = self
-            .algorithm
-            .execute(&*self.store, &self.params)
+            .procedure
+            .execute(&ctx, &self.params)
             .map_err(|e| OperatorError::Execution(format!("Procedure execution failed: {e}")))?;
 
         // Use canonical column names if available (same length as result columns),

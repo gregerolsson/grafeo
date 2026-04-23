@@ -463,6 +463,14 @@ impl GraphStore for RdfGraphStoreAdapter {
             .collect()
     }
 
+    fn nodes_by_label_count(&self, label: &str) -> usize {
+        let label_arc = ArcStr::from(label);
+        self.node_labels
+            .iter()
+            .filter(|labels| labels.contains(&label_arc))
+            .count()
+    }
+
     fn node_count(&self) -> usize {
         self.node_to_term.len()
     }

@@ -188,6 +188,10 @@ impl GraphStore for WalGraphStore {
         self.inner.nodes_by_label(label)
     }
 
+    fn nodes_by_label_count(&self, label: &str) -> usize {
+        self.inner.nodes_by_label_count(label)
+    }
+
     fn node_count(&self) -> usize {
         self.inner.node_count()
     }

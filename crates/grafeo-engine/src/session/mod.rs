@@ -4691,6 +4691,13 @@ impl Session {
         .with_session_context(session_context)
         .with_read_only(read_only);
 
+        // Attach the LPG store so CALL grafeo.search.* procedures can reach
+        // HNSW / BM25 indexes.
+        #[cfg(feature = "lpg")]
+        {
+            planner = planner.with_lpg_store(Arc::clone(&self.store));
+        }
+
         // Attach the constraint validator for schema enforcement and property size limits
         let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
             .with_store(store)

@@ -93,6 +93,10 @@ pub struct Planner {
     pub(super) validator: Option<Arc<dyn ConstraintValidator>>,
     /// Catalog for user-defined procedure lookup.
     pub(super) catalog: Option<Arc<crate::catalog::Catalog>>,
+    /// LPG store handle for procedures that need direct index access (vector
+    /// and text search reach HNSW / BM25 indexes owned by the LPG store).
+    #[cfg(feature = "lpg")]
+    pub(super) lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
     /// Shared parameter state for the currently planning correlated Apply.
     /// Set by `plan_apply` before planning the inner operator, consumed by
     /// `plan_operator` when encountering `ParameterScan`.
@@ -135,6 +139,8 @@ impl Planner {
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
             catalog: None,
+            #[cfg(feature = "lpg")]
+            lpg_store: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -178,6 +184,8 @@ impl Planner {
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
             catalog: None,
+            #[cfg(feature = "lpg")]
+            lpg_store: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             profiling: std::cell::Cell::new(false),
@@ -242,6 +250,15 @@ impl Planner {
     #[must_use]
     pub fn with_catalog(mut self, catalog: Arc<crate::catalog::Catalog>) -> Self {
         self.catalog = Some(catalog);
+        self
+    }
+
+    /// Attaches an LPG store handle so `CALL grafeo.search.*` procedures can
+    /// reach the vector and text indexes.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
+        self.lpg_store = Some(lpg_store);
         self
     }
 
@@ -840,10 +857,10 @@ impl Planner {
         // into HNSW (which degrades to full traversal and risks overflow
         // in quantized rescore paths even with saturating_mul).
         let k = scan.k.unwrap_or_else(|| {
-            scan.label
-                .as_ref()
-                .map(|l| self.store.nodes_by_label(l).len())
-                .unwrap_or(self.store.node_count())
+            scan.label.as_ref().map_or_else(
+                || self.store.node_count(),
+                |l| self.store.nodes_by_label_count(l),
+            )
         });
 
         // Pick the metric we'll execute under. When the user asked for a
@@ -3455,5 +3472,57 @@ mod tests {
             row_index: 0,
         });
         let _any = boxed.into_any();
+    }
+
+    // ==================== VectorScan k-bounding regression ====================
+
+    /// `VectorScanOp.k = None` means "return every match," but feeding
+    /// `usize::MAX` into the store's vector_search degrades HNSW to a full
+    /// traversal and (pre-saturating-mul) could overflow quantized rescore
+    /// paths. The planner must bound k to the label's node count (or the
+    /// global count when no label is set, or zero when the label is unknown).
+    ///
+    /// We can't inspect VectorScanOperator.k directly — it's private — so the
+    /// assertion here is that planning succeeds across all three branches
+    /// without panicking or surfacing an internal-state error. Paired with
+    /// `LpgStore::nodes_by_label_count` tests, this guards the full path.
+    #[cfg(feature = "vector-index")]
+    #[test]
+    fn test_plan_vector_scan_k_none_bounds_across_label_states() {
+        use crate::query::plan::VectorScanOp;
+
+        let store = create_test_store();
+        // Sanity: the test store has 2 Person nodes, 1 Company, 0 Unknown.
+        assert_eq!(store.nodes_by_label_count("Person"), 2);
+        assert_eq!(store.nodes_by_label_count("Unknown"), 0);
+        assert_eq!(store.node_count(), 3);
+
+        let planner = Planner::new(store);
+        let make_scan = |label: Option<&str>| VectorScanOp {
+            variable: "n".to_string(),
+            index_name: None,
+            property: "embedding".to_string(),
+            label: label.map(str::to_string),
+            query_vector: LogicalExpression::Literal(Value::List(
+                vec![
+                    Value::Float64(1.0),
+                    Value::Float64(0.0),
+                    Value::Float64(0.0),
+                ]
+                .into(),
+            )),
+            k: None,
+            metric: Some(VectorMetric::Cosine),
+            min_similarity: Some(0.5),
+            max_distance: None,
+            input: None,
+        };
+
+        for label in [Some("Person"), Some("Unknown"), None] {
+            let (_op, cols) = planner
+                .plan_vector_scan(&make_scan(label))
+                .unwrap_or_else(|e| panic!("plan_vector_scan failed for {label:?}: {e:?}"));
+            assert_eq!(cols[0], "n", "variable column must be first for {label:?}");
+        }
     }
 }

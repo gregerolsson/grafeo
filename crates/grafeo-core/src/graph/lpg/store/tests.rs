@@ -647,6 +647,25 @@ fn test_nodes_by_label_nonexistent() {
 }
 
 #[test]
+fn test_nodes_by_label_count_matches_vec_len() {
+    // nodes_by_label_count is the O(1) fast path used by the planner to
+    // bound unbounded VectorScan k; it must agree with the Vec-returning
+    // variant for every label, including ones that don't exist.
+    let store = LpgStore::new().unwrap();
+    store.create_node(&["Person"]);
+    store.create_node(&["Person"]);
+    store.create_node(&["Animal"]);
+
+    for label in ["Person", "Animal", "NonExistent"] {
+        assert_eq!(
+            store.nodes_by_label_count(label),
+            store.nodes_by_label(label).len(),
+            "count mismatch for label {label:?}"
+        );
+    }
+}
+
+#[test]
 fn test_statistics() {
     let store = LpgStore::new().unwrap();
 

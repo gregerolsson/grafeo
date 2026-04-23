@@ -18,6 +18,7 @@ PROFILE="minimal-size"
 TARGET="web"
 SCOPE=""
 FEATURES=""
+PKG_NAME="@grafeo-db/wasm"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -25,6 +26,7 @@ while [[ $# -gt 0 ]]; do
         --scope)    SCOPE="--scope $2"; shift 2 ;;
         --features) FEATURES="--features $2"; shift 2 ;;
         --out-dir)  OUT_DIR="$2"; shift 2 ;;
+        --name)     PKG_NAME="$2"; shift 2 ;;
         --release)  PROFILE="release"; shift ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -62,6 +64,32 @@ echo "  wasm-bindgen..."
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 wasm-bindgen --target "$TARGET" --out-dir "$OUT_DIR" "$WASM_FILE"
+
+# Step 2b: wasm-bindgen does not emit a package.json. Write a minimal one
+# so the output is installable via npm `file:` links and symlinked node_modules.
+# Version mirrors [workspace.package] in Cargo.toml.
+PKG_VERSION=$(awk '/^\[workspace\.package\]/{p=1;next} /^\[/{p=0} p && /^version[[:space:]]*=/{gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)
+PKG_VERSION="${PKG_VERSION:-0.0.0}"
+cat > "$OUT_DIR/package.json" <<EOF
+{
+  "name": "$PKG_NAME",
+  "version": "$PKG_VERSION",
+  "type": "module",
+  "main": "grafeo_wasm.js",
+  "module": "grafeo_wasm.js",
+  "types": "grafeo_wasm.d.ts",
+  "files": [
+    "grafeo_wasm.js",
+    "grafeo_wasm.d.ts",
+    "grafeo_wasm_bg.wasm",
+    "grafeo_wasm_bg.wasm.d.ts"
+  ],
+  "sideEffects": [
+    "./grafeo_wasm.js",
+    "./snippets/*"
+  ]
+}
+EOF
 
 # Step 3: Report sizes
 RAW_SIZE=$(stat -c%s "$OUT_DIR/grafeo_wasm_bg.wasm" 2>/dev/null || stat -f%z "$OUT_DIR/grafeo_wasm_bg.wasm")

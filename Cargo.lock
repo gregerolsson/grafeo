@@ -1593,10 +1593,12 @@ dependencies = [
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
+ "hmac",
  "js-sys",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

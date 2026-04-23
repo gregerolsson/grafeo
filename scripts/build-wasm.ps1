@@ -14,6 +14,7 @@ param(
     [string]$Scope = "",
     [string]$Features = "",
     [string]$OutDir = "",
+    [string]$Name = "@grafeo-db/wasm",
     [switch]$Release
 )
 
@@ -47,6 +48,41 @@ if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 & wasm-bindgen --target $Target --out-dir $OutDir $WasmFile
 if ($LASTEXITCODE -ne 0) { throw "wasm-bindgen failed" }
+
+# Step 2b: wasm-bindgen does not emit a package.json. Write a minimal one
+# so the output is installable via npm `file:` links and symlinked node_modules.
+# Version mirrors [workspace.package] in Cargo.toml.
+$cargoToml = Get-Content "Cargo.toml"
+$pkgVersion = "0.0.0"
+$inWorkspacePackage = $false
+foreach ($line in $cargoToml) {
+    if ($line -match '^\[workspace\.package\]') { $inWorkspacePackage = $true; continue }
+    if ($line -match '^\[') { $inWorkspacePackage = $false }
+    if ($inWorkspacePackage -and $line -match '^version\s*=\s*"([^"]+)"') {
+        $pkgVersion = $Matches[1]; break
+    }
+}
+$packageJson = @"
+{
+  "name": "$Name",
+  "version": "$pkgVersion",
+  "type": "module",
+  "main": "grafeo_wasm.js",
+  "module": "grafeo_wasm.js",
+  "types": "grafeo_wasm.d.ts",
+  "files": [
+    "grafeo_wasm.js",
+    "grafeo_wasm.d.ts",
+    "grafeo_wasm_bg.wasm",
+    "grafeo_wasm_bg.wasm.d.ts"
+  ],
+  "sideEffects": [
+    "./grafeo_wasm.js",
+    "./snippets/*"
+  ]
+}
+"@
+$packageJson | Out-File -FilePath (Join-Path $OutDir "package.json") -Encoding utf8 -NoNewline
 
 # Step 3: Report sizes
 $wasmPath = Join-Path $OutDir "grafeo_wasm_bg.wasm"
