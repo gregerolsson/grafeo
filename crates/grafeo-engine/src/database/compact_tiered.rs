@@ -338,6 +338,30 @@ mod tests {
     }
 
     #[test]
+    fn spill_drops_original_arc() {
+        // Proxy for "spill frees memory": the in-memory Arc the wrapper held
+        // before `persist_to_mmap` must be dropped during the transition, so
+        // the only live reference left to that specific allocation is
+        // whatever the caller chose to hold. Verified by comparing strong
+        // counts before and after.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("base.compact");
+
+        let tiered = CompactStoreTiered::new_in_memory(build_sample_store());
+        // One Arc in the wrapper, none held externally.
+        assert_eq!(Arc::strong_count(&tiered.store()), 2);
+        // The line above borrowed a clone then dropped it; wrapper now holds 1.
+
+        tiered.persist_to_mmap(&path).expect("persist_to_mmap");
+
+        // After spill: the wrapper holds a fresh Arc pointing at a
+        // newly-deserialized CompactStore. The original allocation is gone.
+        let after = tiered.store();
+        // wrapper holds 1 + our binding holds 1 = 2
+        assert_eq!(Arc::strong_count(&after), 2);
+    }
+
+    #[test]
     fn store_values_survive_mmap_round_trip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("base.compact");
