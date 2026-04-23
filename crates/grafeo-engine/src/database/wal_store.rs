@@ -334,13 +334,7 @@ impl GraphStoreSearch for WalGraphStore {
     }
 
     #[cfg(feature = "text-index")]
-    fn score_text(
-        &self,
-        node_id: NodeId,
-        label: &str,
-        property: &str,
-        query: &str,
-    ) -> Option<f64> {
+    fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
         self.inner.score_text(node_id, label, property, query)
     }
 
