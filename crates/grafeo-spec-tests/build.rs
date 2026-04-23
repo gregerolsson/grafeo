@@ -773,25 +773,29 @@ fn generate_tests(
                 );
                 generate_single_test(
                     output,
-                    &fn_name,
-                    file,
-                    tc,
-                    Some(query),
-                    Some(lang),
-                    rel_path,
-                    DbSource::InMemory,
+                    &TestSpec {
+                        fn_name: &fn_name,
+                        file,
+                        tc,
+                        query_override: Some(query),
+                        lang_override: Some(lang),
+                        rel_path,
+                        db_source: DbSource::InMemory,
+                    },
                 );
                 count += 1;
                 if case_needs_persistent {
                     generate_single_test(
                         output,
-                        &format!("{fn_name}_persistent"),
-                        file,
-                        tc,
-                        Some(query),
-                        Some(lang),
-                        rel_path,
-                        DbSource::Persistent,
+                        &TestSpec {
+                            fn_name: &format!("{fn_name}_persistent"),
+                            file,
+                            tc,
+                            query_override: Some(query),
+                            lang_override: Some(lang),
+                            rel_path,
+                            db_source: DbSource::Persistent,
+                        },
                     );
                     count += 1;
                 }
@@ -800,25 +804,29 @@ fn generate_tests(
             let base = sanitize_test_name(&tc.name);
             generate_single_test(
                 output,
-                &base,
-                file,
-                tc,
-                None,
-                None,
-                rel_path,
-                DbSource::InMemory,
+                &TestSpec {
+                    fn_name: &base,
+                    file,
+                    tc,
+                    query_override: None,
+                    lang_override: None,
+                    rel_path,
+                    db_source: DbSource::InMemory,
+                },
             );
             count += 1;
             if case_needs_persistent {
                 generate_single_test(
                     output,
-                    &format!("{base}_persistent"),
-                    file,
-                    tc,
-                    None,
-                    None,
-                    rel_path,
-                    DbSource::Persistent,
+                    &TestSpec {
+                        fn_name: &format!("{base}_persistent"),
+                        file,
+                        tc,
+                        query_override: None,
+                        lang_override: None,
+                        rel_path,
+                        db_source: DbSource::Persistent,
+                    },
                 );
                 count += 1;
             }
@@ -837,16 +845,24 @@ enum DbSource {
     Persistent,
 }
 
-fn generate_single_test(
-    output: &mut String,
-    fn_name: &str,
-    file: &GtestFile,
-    tc: &TestCase,
-    query_override: Option<&str>,
-    lang_override: Option<&str>,
-    rel_path: &str,
+struct TestSpec<'a> {
+    fn_name: &'a str,
+    file: &'a GtestFile,
+    tc: &'a TestCase,
+    query_override: Option<&'a str>,
+    lang_override: Option<&'a str>,
+    rel_path: &'a str,
     db_source: DbSource,
-) {
+}
+
+fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
+    let fn_name = spec.fn_name;
+    let file = spec.file;
+    let tc = spec.tc;
+    let query_override = spec.query_override;
+    let lang_override = spec.lang_override;
+    let rel_path = spec.rel_path;
+    let db_source = spec.db_source;
     let language = lang_override
         .or(tc.language.as_deref())
         .unwrap_or(&file.meta.language);
