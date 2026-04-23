@@ -1582,12 +1582,12 @@ mod tests {
         assert_eq!(ids.len(), 2);
         let mut temps: Vec<i64> = ids
             .iter()
-            .filter_map(|&id| {
-                match compact.get_node_property(id, &PropertyKey::new("temp")) {
+            .filter_map(
+                |&id| match compact.get_node_property(id, &PropertyKey::new("temp")) {
                     Some(Value::Int64(n)) => Some(n),
                     _ => None,
-                }
-            })
+                },
+            )
             .collect();
         temps.sort_unstable();
         assert_eq!(temps, vec![-10, 5]);

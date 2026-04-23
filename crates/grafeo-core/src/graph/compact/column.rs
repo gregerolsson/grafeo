@@ -1951,13 +1951,16 @@ mod tests {
         let col = ColumnCodec::RawI64(vec![-10, -5, 0, 5, 10, -100, 100]);
 
         // [-5, 5] inclusive
-        let result =
-            col.find_in_range(Some(&Value::Int64(-5)), Some(&Value::Int64(5)), true, true);
+        let result = col.find_in_range(Some(&Value::Int64(-5)), Some(&Value::Int64(5)), true, true);
         assert_eq!(result, vec![1, 2, 3]);
 
         // (-5, 5) exclusive
-        let result =
-            col.find_in_range(Some(&Value::Int64(-5)), Some(&Value::Int64(5)), false, false);
+        let result = col.find_in_range(
+            Some(&Value::Int64(-5)),
+            Some(&Value::Int64(5)),
+            false,
+            false,
+        );
         assert_eq!(result, vec![2]);
 
         // < 0 (no lower bound)

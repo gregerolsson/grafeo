@@ -124,7 +124,10 @@ fn where_range_matches_across_zero() {
 
     // Signed range semantics — -100 ≤ val < 0 must include exactly -100, -10, -5.
     assert_eq!(
-        row_count(&db, "MATCH (n:A) WHERE n.val >= -100 AND n.val < 0 RETURN n"),
+        row_count(
+            &db,
+            "MATCH (n:A) WHERE n.val >= -100 AND n.val < 0 RETURN n"
+        ),
         3
     );
     // -5 ≤ val ≤ 5 must include -5, 0, 5.
@@ -155,7 +158,15 @@ fn per_label_sum_preserves_int64_across_compact() {
     let post_b = scalar(&db, "MATCH (n:B) RETURN sum(n.num)");
 
     assert_eq!(pre_a, Value::Int64(20));
-    assert_eq!(post_a, Value::Int64(20), "A column has mixed signs (RawI64)");
+    assert_eq!(
+        post_a,
+        Value::Int64(20),
+        "A column has mixed signs (RawI64)"
+    );
     assert_eq!(pre_b, Value::Int64(3));
-    assert_eq!(post_b, Value::Int64(3), "B column is non-negative (BitPacked)");
+    assert_eq!(
+        post_b,
+        Value::Int64(3),
+        "B column is non-negative (BitPacked)"
+    );
 }
