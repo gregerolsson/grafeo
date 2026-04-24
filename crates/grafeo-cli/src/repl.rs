@@ -319,7 +319,7 @@ fn handle_meta_command(
         }
         ":memory" => {
             if !quiet {
-                crate::output::format_memory(&db.memory_usage());
+                crate::output::print_memory(&db.memory_usage());
             }
             MetaResult::Continue
         }

@@ -377,7 +377,7 @@ tests:
       - "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS]->(b)"
     query: "CALL grafeo.kcore()"
     expect:
-      columns: [node_id, value]
+      columns: [node_id, core_number, max_core]
       count: 3
 
   # ---------------------------------------------------------------------------
