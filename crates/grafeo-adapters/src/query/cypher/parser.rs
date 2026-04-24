@@ -2424,6 +2424,7 @@ impl<'a> Parser<'a> {
                 name: label,
                 properties,
                 key_labels: Vec::new(),
+                is_reference: false,
             })
         }
     }
@@ -2496,6 +2497,7 @@ impl<'a> Parser<'a> {
             key_labels: Vec::new(),
             source_node_types: src_types,
             target_node_types: tgt_types,
+            is_reference: false,
         })
     }
 

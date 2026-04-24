@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use arcstr::ArcStr;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
@@ -31,7 +32,13 @@ use crate::statistics::Statistics;
 /// been deleted and returns `None`. Otherwise, the base is queried.
 pub struct LayeredStore {
     /// Read-only columnar base (cold data).
-    base: Arc<CompactStore>,
+    ///
+    /// Held via [`ArcSwap`] so the engine can atomically swap the underlying
+    /// `Arc<CompactStore>` when the base is spilled to a mmap'd file. Readers
+    /// acquire the current Arc via `self.base.load()` without locking;
+    /// [`swap_base`](Self::swap_base) publishes a new base in a single
+    /// `store()` call.
+    base: ArcSwap<CompactStore>,
     /// Mutable overlay for new and modified data.
     overlay: Arc<LpgStore>,
     /// Node IDs modified or created in the overlay.
@@ -47,7 +54,7 @@ pub struct LayeredStore {
 impl std::fmt::Debug for LayeredStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LayeredStore")
-            .field("base_node_count", &self.base.node_count())
+            .field("base_node_count", &self.base.load().node_count())
             .field("overlay_node_count", &self.overlay.node_count())
             .field("dirty_nodes", &self.dirty_node_ids.read().len())
             .field(
@@ -77,7 +84,7 @@ impl LayeredStore {
         overlay.set_next_edge_id(max_edge_id + 1);
 
         Ok(Self {
-            base: Arc::new(base),
+            base: ArcSwap::new(Arc::new(base)),
             overlay,
             dirty_node_ids: RwLock::new(FxHashSet::default()),
             dirty_edge_ids: RwLock::new(FxHashSet::default()),
@@ -86,16 +93,24 @@ impl LayeredStore {
         })
     }
 
-    /// Returns a reference to the compact base store.
-    #[must_use]
-    pub fn base_store(&self) -> &CompactStore {
-        &self.base
-    }
-
     /// Returns a shared reference to the compact base store.
     #[must_use]
     pub fn base_store_arc(&self) -> Arc<CompactStore> {
-        Arc::clone(&self.base)
+        self.base.load_full()
+    }
+
+    /// Atomically replaces the compact base store.
+    ///
+    /// The engine calls this after spilling the base to a mmap'd file: the
+    /// old in-memory `Arc<CompactStore>` drops (freeing heap memory once the
+    /// last external reference is released), and subsequent reads go through
+    /// the new mmap-backed `CompactStore`. Overlay state (dirty sets,
+    /// deleted sets, the overlay `LpgStore`) is untouched.
+    ///
+    /// Returns the previous base `Arc`, so callers can inspect refcounts or
+    /// keep it alive while in-flight readers drain.
+    pub fn swap_base(&self, new_base: Arc<CompactStore>) -> Arc<CompactStore> {
+        self.base.swap(new_base)
     }
 
     /// Returns a reference to the overlay LPG store.
@@ -117,7 +132,7 @@ impl LayeredStore {
     #[must_use]
     pub fn memory_bytes(&self) -> usize {
         let (store_mem, index_mem, mvcc_mem, pool_mem) = self.overlay.memory_breakdown();
-        self.base.memory_bytes()
+        self.base.load().memory_bytes()
             + store_mem.total_bytes
             + index_mem.total_bytes
             + mvcc_mem.total_bytes
@@ -160,7 +175,10 @@ impl GraphStore for LayeredStore {
             return self.overlay.get_node(id);
         }
         // dirty_node_ids only tracks modified base nodes; new overlay nodes fall through here.
-        self.base.get_node(id).or_else(|| self.overlay.get_node(id))
+        self.base
+            .load()
+            .get_node(id)
+            .or_else(|| self.overlay.get_node(id))
     }
 
     fn get_edge(&self, id: EdgeId) -> Option<Edge> {
@@ -170,7 +188,12 @@ impl GraphStore for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.get_edge(id);
         }
-        self.base.get_edge(id)
+        // Edges created after `compact()` live only in the overlay; fall
+        // through when the base doesn't recognise the id.
+        self.base
+            .load()
+            .get_edge(id)
+            .or_else(|| self.overlay.get_edge(id))
     }
 
     fn get_node_versioned(
@@ -185,7 +208,15 @@ impl GraphStore for LayeredStore {
         if self.is_node_dirty(id) {
             return self.overlay.get_node_versioned(id, epoch, transaction_id);
         }
-        self.base.get_node(id)
+        // `dirty_node_ids` only tracks overlay modifications of *base* nodes.
+        // Overlay-only nodes (post-`compact()` writes) fall through to here;
+        // the base doesn't know them, so defer to the overlay's versioned
+        // fetch. CompactStore itself has no MVCC versions, so `get_node`
+        // is the right base call.
+        self.base
+            .load()
+            .get_node(id)
+            .or_else(|| self.overlay.get_node_versioned(id, epoch, transaction_id))
     }
 
     fn get_edge_versioned(
@@ -200,7 +231,10 @@ impl GraphStore for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.get_edge_versioned(id, epoch, transaction_id);
         }
-        self.base.get_edge(id)
+        self.base
+            .load()
+            .get_edge(id)
+            .or_else(|| self.overlay.get_edge_versioned(id, epoch, transaction_id))
     }
 
     fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
@@ -210,7 +244,10 @@ impl GraphStore for LayeredStore {
         if self.is_node_dirty(id) {
             return self.overlay.get_node_at_epoch(id, epoch);
         }
-        self.base.get_node(id)
+        self.base
+            .load()
+            .get_node(id)
+            .or_else(|| self.overlay.get_node_at_epoch(id, epoch))
     }
 
     fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
@@ -220,7 +257,10 @@ impl GraphStore for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.get_edge_at_epoch(id, epoch);
         }
-        self.base.get_edge(id)
+        self.base
+            .load()
+            .get_edge(id)
+            .or_else(|| self.overlay.get_edge_at_epoch(id, epoch))
     }
 
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
@@ -231,6 +271,7 @@ impl GraphStore for LayeredStore {
             return self.overlay.get_node_property(id, key);
         }
         self.base
+            .load()
             .get_node_property(id, key)
             .or_else(|| self.overlay.get_node_property(id, key))
     }
@@ -242,7 +283,10 @@ impl GraphStore for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.get_edge_property(id, key);
         }
-        self.base.get_edge_property(id, key)
+        self.base
+            .load()
+            .get_edge_property(id, key)
+            .or_else(|| self.overlay.get_edge_property(id, key))
     }
 
     fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
@@ -309,25 +353,23 @@ impl GraphStore for LayeredStore {
 
         // Base neighbors (minus deleted).
         if !deleted_nodes.contains(&node) && !self.is_node_dirty(node) {
-            for nid in self.base.neighbors(node, direction) {
+            for nid in self.base.load().neighbors(node, direction) {
                 if !deleted_nodes.contains(&nid) {
                     results.push(nid);
                 }
             }
         }
 
-        // Overlay neighbors (for dirty source node or overlay-only node).
-        if self.is_node_dirty(node) || self.overlay.get_node(node).is_some() {
-            for nid in self.overlay.neighbors(node, direction) {
-                if !deleted_nodes.contains(&nid) {
-                    results.push(nid);
-                }
+        // Overlay neighbors — always consulted. An edge created after
+        // `compact()` whose src is a base node records the base id in
+        // the overlay's adjacency even though the overlay has no
+        // corresponding node object; gating on `overlay.get_node(node)`
+        // would miss that case.
+        for nid in self.overlay.neighbors(node, direction) {
+            if !deleted_nodes.contains(&nid) {
+                results.push(nid);
             }
         }
-
-        // Overlay edges that connect base nodes.
-        // If node is in the base and the overlay has edges for it
-        // (e.g., after promote), those are already in dirty.
 
         results.sort_unstable();
         results.dedup();
@@ -342,21 +384,29 @@ impl GraphStore for LayeredStore {
 
         // Base edges (minus deleted).
         if !deleted_nodes.contains(&node) && !self.is_node_dirty(node) {
-            for (target, eid) in self.base.edges_from(node, direction) {
+            for (target, eid) in self.base.load().edges_from(node, direction) {
                 if !deleted_nodes.contains(&target) && !deleted_edges.contains(&eid) {
                     results.push((target, eid));
                 }
             }
         }
 
-        // Overlay edges.
-        if self.is_node_dirty(node) || self.overlay.get_node(node).is_some() {
-            for (target, eid) in self.overlay.edges_from(node, direction) {
-                if !deleted_nodes.contains(&target) && !deleted_edges.contains(&eid) {
-                    results.push((target, eid));
-                }
+        // Overlay edges — always consulted. The overlay stores edges
+        // keyed by src/dst even when the endpoint is a base node (e.g. a
+        // post-`compact()` edge from a base node to an overlay node), so
+        // we can't gate this on whether the overlay has the node itself.
+        // `LpgStore::edges_from` returns empty for ids with no outgoing
+        // edges, so the unconditional call is cheap when there's nothing
+        // to report.
+        for (target, eid) in self.overlay.edges_from(node, direction) {
+            if !deleted_nodes.contains(&target) && !deleted_edges.contains(&eid) {
+                results.push((target, eid));
             }
         }
+
+        // Deduplicate in case a promoted edge appears in both layers.
+        results.sort_unstable_by_key(|&(_, eid)| eid);
+        results.dedup_by_key(|&mut (_, eid)| eid);
 
         results
     }
@@ -370,7 +420,7 @@ impl GraphStore for LayeredStore {
     }
 
     fn has_backward_adjacency(&self) -> bool {
-        self.base.has_backward_adjacency() || self.overlay.has_backward_adjacency()
+        self.base.load().has_backward_adjacency() || self.overlay.has_backward_adjacency()
     }
 
     fn node_ids(&self) -> Vec<NodeId> {
@@ -378,6 +428,7 @@ impl GraphStore for LayeredStore {
 
         let mut ids: Vec<NodeId> = self
             .base
+            .load()
             .node_ids()
             .into_iter()
             .filter(|id| !deleted.contains(id))
@@ -394,6 +445,7 @@ impl GraphStore for LayeredStore {
 
         let mut ids: Vec<NodeId> = self
             .base
+            .load()
             .nodes_by_label(label)
             .into_iter()
             .filter(|id| !deleted.contains(id) && !dirty.contains(id))
@@ -410,7 +462,7 @@ impl GraphStore for LayeredStore {
     }
 
     fn node_count(&self) -> usize {
-        let base_count = self.base.node_count();
+        let base_count = self.base.load().node_count();
         let deleted = self.deleted_from_base_nodes.read().len();
         let overlay_count = self.overlay.node_count();
         // Dirty nodes that came from the base are counted once in the overlay.
@@ -419,20 +471,20 @@ impl GraphStore for LayeredStore {
             .dirty_node_ids
             .read()
             .iter()
-            .filter(|id| self.base.get_node(**id).is_some())
+            .filter(|id| self.base.load().get_node(**id).is_some())
             .count();
         base_count - deleted - promoted + overlay_count
     }
 
     fn edge_count(&self) -> usize {
-        let base_count = self.base.edge_count();
+        let base_count = self.base.load().edge_count();
         let deleted = self.deleted_from_base_edges.read().len();
         let overlay_count = self.overlay.edge_count();
         let promoted = self
             .dirty_edge_ids
             .read()
             .iter()
-            .filter(|id| self.base.get_edge(**id).is_some())
+            .filter(|id| self.base.load().get_edge(**id).is_some())
             .count();
         base_count - deleted - promoted + overlay_count
     }
@@ -444,7 +496,10 @@ impl GraphStore for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.edge_type(id);
         }
-        self.base.edge_type(id)
+        self.base
+            .load()
+            .edge_type(id)
+            .or_else(|| self.overlay.edge_type(id))
     }
 
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
@@ -453,6 +508,7 @@ impl GraphStore for LayeredStore {
 
         let mut results: Vec<NodeId> = self
             .base
+            .load()
             .find_nodes_by_property(property, value)
             .into_iter()
             .filter(|id| !deleted.contains(id) && !dirty.contains(id))
@@ -471,6 +527,7 @@ impl GraphStore for LayeredStore {
 
         let mut results: Vec<NodeId> = self
             .base
+            .load()
             .find_nodes_by_properties(conditions)
             .into_iter()
             .filter(|id| !deleted.contains(id) && !dirty.contains(id))
@@ -493,6 +550,7 @@ impl GraphStore for LayeredStore {
 
         let mut results: Vec<NodeId> = self
             .base
+            .load()
             .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive)
             .into_iter()
             .filter(|id| !deleted.contains(id) && !dirty.contains(id))
@@ -514,7 +572,9 @@ impl GraphStore for LayeredStore {
         op: CompareOp,
         value: &Value,
     ) -> bool {
-        self.base.node_property_might_match(property, op, value)
+        self.base
+            .load()
+            .node_property_might_match(property, op, value)
             || self.overlay.node_property_might_match(property, op, value)
     }
 
@@ -524,13 +584,15 @@ impl GraphStore for LayeredStore {
         op: CompareOp,
         value: &Value,
     ) -> bool {
-        self.base.edge_property_might_match(property, op, value)
+        self.base
+            .load()
+            .edge_property_might_match(property, op, value)
             || self.overlay.edge_property_might_match(property, op, value)
     }
 
     fn statistics(&self) -> Arc<Statistics> {
         // Combine base + overlay statistics.
-        let base_stats = self.base.statistics();
+        let base_stats = self.base.load().statistics();
 
         let mut combined = (*base_stats).clone();
         combined.total_nodes = self.node_count() as u64;
@@ -553,14 +615,15 @@ impl GraphStore for LayeredStore {
     }
 
     fn estimate_label_cardinality(&self, label: &str) -> f64 {
-        self.base.estimate_label_cardinality(label) + self.overlay.estimate_label_cardinality(label)
+        self.base.load().estimate_label_cardinality(label)
+            + self.overlay.estimate_label_cardinality(label)
     }
 
     fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
         // Rough approximation: weighted average.
-        let base_est = self.base.estimate_avg_degree(edge_type, outgoing);
+        let base_est = self.base.load().estimate_avg_degree(edge_type, outgoing);
         let overlay_est = self.overlay.estimate_avg_degree(edge_type, outgoing);
-        let base_edges = self.base.edge_count() as f64;
+        let base_edges = self.base.load().edge_count() as f64;
         let overlay_edges = self.overlay.edge_count() as f64;
         let total = base_edges + overlay_edges;
         if total == 0.0 {
@@ -574,19 +637,20 @@ impl GraphStore for LayeredStore {
     }
 
     fn all_labels(&self) -> Vec<String> {
-        let mut labels: FxHashSet<String> = self.base.all_labels().into_iter().collect();
+        let mut labels: FxHashSet<String> = self.base.load().all_labels().into_iter().collect();
         labels.extend(self.overlay.all_labels());
         labels.into_iter().collect()
     }
 
     fn all_edge_types(&self) -> Vec<String> {
-        let mut types: FxHashSet<String> = self.base.all_edge_types().into_iter().collect();
+        let mut types: FxHashSet<String> = self.base.load().all_edge_types().into_iter().collect();
         types.extend(self.overlay.all_edge_types());
         types.into_iter().collect()
     }
 
     fn all_property_keys(&self) -> Vec<String> {
-        let mut keys: FxHashSet<String> = self.base.all_property_keys().into_iter().collect();
+        let mut keys: FxHashSet<String> =
+            self.base.load().all_property_keys().into_iter().collect();
         keys.extend(self.overlay.all_property_keys());
         keys.into_iter().collect()
     }
@@ -598,7 +662,20 @@ impl GraphStore for LayeredStore {
         if self.is_node_dirty(id) {
             return self.overlay.is_node_visible_at_epoch(id, epoch);
         }
-        self.base.is_node_visible_at_epoch(id, epoch)
+        // `dirty_node_ids` only tracks overlay *modifications of base nodes*
+        // — overlay-only nodes (e.g. post-`compact()` writes) fall through
+        // here and must be dispatched to the overlay's MVCC check. The base
+        // doesn't know the id, so it would otherwise report them invisible.
+        //
+        // Snapshot the base once: a concurrent `swap_base` between the
+        // presence check and the visibility call would otherwise dispatch
+        // through a different `CompactStore` than the one we tested.
+        let base = self.base.load();
+        if base.get_node(id).is_some() {
+            base.is_node_visible_at_epoch(id, epoch)
+        } else {
+            self.overlay.is_node_visible_at_epoch(id, epoch)
+        }
     }
 
     fn is_node_visible_versioned(
@@ -615,8 +692,13 @@ impl GraphStore for LayeredStore {
                 .overlay
                 .is_node_visible_versioned(id, epoch, transaction_id);
         }
-        self.base
-            .is_node_visible_versioned(id, epoch, transaction_id)
+        let base = self.base.load();
+        if base.get_node(id).is_some() {
+            base.is_node_visible_versioned(id, epoch, transaction_id)
+        } else {
+            self.overlay
+                .is_node_visible_versioned(id, epoch, transaction_id)
+        }
     }
 
     fn is_edge_visible_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
@@ -626,7 +708,12 @@ impl GraphStore for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.is_edge_visible_at_epoch(id, epoch);
         }
-        self.base.is_edge_visible_at_epoch(id, epoch)
+        let base = self.base.load();
+        if base.get_edge(id).is_some() {
+            base.is_edge_visible_at_epoch(id, epoch)
+        } else {
+            self.overlay.is_edge_visible_at_epoch(id, epoch)
+        }
     }
 
     fn is_edge_visible_versioned(
@@ -643,8 +730,13 @@ impl GraphStore for LayeredStore {
                 .overlay
                 .is_edge_visible_versioned(id, epoch, transaction_id);
         }
-        self.base
-            .is_edge_visible_versioned(id, epoch, transaction_id)
+        let base = self.base.load();
+        if base.get_edge(id).is_some() {
+            base.is_edge_visible_versioned(id, epoch, transaction_id)
+        } else {
+            self.overlay
+                .is_edge_visible_versioned(id, epoch, transaction_id)
+        }
     }
 
     fn filter_visible_node_ids(&self, ids: &[NodeId], epoch: EpochId) -> Vec<NodeId> {
@@ -842,7 +934,7 @@ impl GraphStoreMut for LayeredStore {
             // Node is in the overlay: delete from overlay.
             return self.overlay.delete_node(id);
         }
-        if self.base.get_node(id).is_some() {
+        if self.base.load().get_node(id).is_some() {
             self.deleted_from_base_nodes.write().insert(id);
             return true;
         }
@@ -860,7 +952,7 @@ impl GraphStoreMut for LayeredStore {
                 .overlay
                 .delete_node_versioned(id, epoch, transaction_id);
         }
-        if self.base.get_node(id).is_some() {
+        if self.base.load().get_node(id).is_some() {
             self.deleted_from_base_nodes.write().insert(id);
             return true;
         }
@@ -873,7 +965,7 @@ impl GraphStoreMut for LayeredStore {
             self.overlay.delete_node_edges(node_id);
         }
         // Mark base edges as deleted.
-        for (_, eid) in self.base.edges_from(node_id, Direction::Both) {
+        for (_, eid) in self.base.load().edges_from(node_id, Direction::Both) {
             self.deleted_from_base_edges.write().insert(eid);
         }
     }
@@ -882,7 +974,7 @@ impl GraphStoreMut for LayeredStore {
         if self.is_edge_dirty(id) {
             return self.overlay.delete_edge(id);
         }
-        if self.base.get_edge(id).is_some() {
+        if self.base.load().get_edge(id).is_some() {
             self.deleted_from_base_edges.write().insert(id);
             return true;
         }
@@ -900,7 +992,7 @@ impl GraphStoreMut for LayeredStore {
                 .overlay
                 .delete_edge_versioned(id, epoch, transaction_id);
         }
-        if self.base.get_edge(id).is_some() {
+        if self.base.load().get_edge(id).is_some() {
             self.deleted_from_base_edges.write().insert(id);
             return true;
         }
@@ -1015,7 +1107,7 @@ impl LayeredStore {
         if self.is_node_dirty(id) {
             return; // already in overlay
         }
-        let Some(base_node) = self.base.get_node(id) else {
+        let Some(base_node) = self.base.load().get_node(id) else {
             return; // not in base either (new node case handled by caller)
         };
 
@@ -1045,7 +1137,7 @@ impl LayeredStore {
         if self.is_edge_dirty(id) {
             return;
         }
-        let Some(base_edge) = self.base.get_edge(id) else {
+        let Some(base_edge) = self.base.load().get_edge(id) else {
             return;
         };
 
@@ -2268,7 +2360,7 @@ mod tests {
         let next_id_before = layered.overlay.next_node_id();
 
         // Snapshot the base node to compare after promotion.
-        let base_node = layered.base.get_node(target).unwrap();
+        let base_node = layered.base.load().get_node(target).unwrap();
         let base_labels: Vec<String> = base_node
             .labels
             .iter()
@@ -2276,6 +2368,7 @@ mod tests {
             .collect();
         let base_name = layered
             .base
+            .load()
             .get_node_property(target, &PropertyKey::new("name"))
             .unwrap();
 
@@ -2330,7 +2423,7 @@ mod tests {
         let (target_dst, target_eid) = edges[0];
 
         // Capture the base edge's metadata for later comparison.
-        let base_edge = layered.base.get_edge(target_eid).unwrap();
+        let base_edge = layered.base.load().get_edge(target_eid).unwrap();
         let base_since = base_edge
             .properties
             .get(&PropertyKey::new("since"))
@@ -2405,8 +2498,8 @@ mod tests {
         let layered = build_test_layered();
 
         // base_store() returns a reference whose counts match the original.
-        assert_eq!(layered.base_store().node_count(), 3);
-        assert_eq!(layered.base_store().edge_count(), 2);
+        assert_eq!(layered.base_store_arc().node_count(), 3);
+        assert_eq!(layered.base_store_arc().edge_count(), 2);
 
         // base_store_arc() returns an owned Arc that aliases the base.
         let arc = layered.base_store_arc();
@@ -2624,7 +2717,7 @@ mod tests {
         let persons = layered.nodes_by_label("Person");
         let base_person = *persons
             .iter()
-            .find(|id| layered.base.get_node(**id).is_some())
+            .find(|id| layered.base.load().get_node(**id).is_some())
             .expect("fixture must have at least one base node");
         let before_delete_node = layered.overlay_mutation_count();
         layered.delete_node(base_person);
@@ -2641,7 +2734,7 @@ mod tests {
         let (other_base, base_eid) = persons2
             .iter()
             .find_map(|id| {
-                layered.base.get_node(*id)?;
+                layered.base.load().get_node(*id)?;
                 let edges = layered.edges_from(*id, Direction::Outgoing);
                 edges.first().map(|(_, eid)| (*id, *eid))
             })
@@ -2677,7 +2770,7 @@ mod tests {
         let layered = build_test_layered();
 
         // base_store returns a reference with 3 base nodes
-        assert_eq!(layered.base_store().node_count(), 3);
+        assert_eq!(layered.base_store_arc().node_count(), 3);
 
         // base_store_arc returns a cloned Arc that sees the same data
         let arc_clone = layered.base_store_arc();
@@ -3031,7 +3124,7 @@ mod tests {
         // The phantom property lands in the overlay even though the node does not
         // exist in either layer, so verify the path did not panic and no base node
         // appeared.
-        assert!(layered.base_store().get_node(missing).is_none());
+        assert!(layered.base_store_arc().get_node(missing).is_none());
     }
 
     #[test]
@@ -3041,7 +3134,7 @@ mod tests {
 
         // set_edge_property on a missing edge should take the "not in base" branch.
         layered.set_edge_property(missing, "weight", Value::Float64(1.0));
-        assert!(layered.base_store().get_edge(missing).is_none());
+        assert!(layered.base_store_arc().get_edge(missing).is_none());
     }
 
     #[test]

@@ -2,6 +2,51 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.41] - 2026-04-24
+
+Compact-store correctness (post-`compact()` read path, signed integer round-trip), search procedures, disk-backed compact base, silent-hybrid-on-persistent-DB fix, memory introspection for RDF and CDC, and test-infrastructure hardening (proptest, persistent spec variants, CodSpeed CI).
+
+### Added
+
+- **`CALL grafeo.search.*` procedures**: first-class procedure entry points for text and vector search, with scalar similarity available as an expression in projections. Routes through the existing `GraphStoreSearch` surface so WAL/CDC wrappers and `LayeredStore` all work.
+- **WASM transactions + `close()`**: explicit transaction API for the browser bindings, plus `close()` to release handles deterministically instead of waiting for GC.
+- **Tamper-evident WASM snapshots**: `exportSnapshotSigned(key)` / `importSnapshotSigned(data, key)` wrap snapshots with a `GSN1` magic header and an HMAC-SHA256 tag over magic + payload, with 128 MiB input cap and constant-time verification. `importSnapshot()` refuses `GSN1`-prefixed payloads so the two entry points can't be confused.
+- **Property-based round-trip coverage for `compact()`** (#303): proptest generates arbitrary LPG graphs and asserts equivalence across 28 GQL queries per case on a compacted vs fresh database. 128 cases by default, `PROPTEST_CASES=1024` for local investigation. Surfaced the two compact-store bugs fixed in this release (#301, #302).
+- **Persistent spec-test variants** (#309): every `.gtest` case requiring `text-index` or `vector-index` now auto-generates a `_persistent` sibling that opens `GrafeoDB::open(tempdir)`, exercising the WAL-wrapped read path used by every on-disk session. 49 persistent variants land with this release.
+- **CodSpeed continuous benchmark regression** (#304): all seven Criterion suites run under Callgrind on every PR via `cargo codspeed`, posting a diff vs `main` as a PR comment. Fork PRs skip cleanly; plain `cargo bench` continues to work unchanged.
+- **`ColumnCodec::RawI64`** (#306): native signed 64-bit codec for columns containing at least one negative value, with i64 comparison in `find_eq` / `find_in_range` and signed zone maps. Non-negative columns continue to use the more compact `BitPacked` encoding.
+- **wasm32 simd128 distance kernels** (#305): `std::arch::wasm32` implementations of all four HNSW distance metrics (dot product, squared Euclidean, cosine, Manhattan), 4.36x to 5.35x faster on 384-dim f32 vectors. Enabled by default for wasm32 builds via `.cargo/config.toml` (`target-feature=+simd128`); runtime requirement Chrome 91+ / Firefox 89+ / Safari 16.4+. Relaxed-simd FMA deliberately skipped: spec permits runtime-defined rounding, and wasmtime regresses vs plain add+mul.
+- **RDF and CDC memory breakdown**: `db.memory_usage()` gains `rdf` (triple count, term dictionary, optional Ring index, named-graph count) and `cdc` (entity count, event count) blocks alongside the existing store/index/MVCC/cache totals. Feature-gated and skipped from JSON when empty.
+- **CLI `:memory` meta-command**: prints the hierarchical memory breakdown in the REPL, omitting zero-valued and feature-disabled components.
+- **Disk-backed compact base** (`compact-store + mmap` features): `CompactStoreTiered` wraps the columnar base in a two-state `InMemory` / `OnDisk` (mmap) machine. `compact()` registers a `CompactStoreConsumer` with the `BufferManager`; under memory pressure the base serialises to `<spill_path>/compact_base.grafeo` and `ArcSwap` publishes the fresh mmap-backed `Arc` through `LayeredStore`, so queries see no discontinuity and the old heap allocation drops.
+- **Contributor docs for CDC, query planner, and MVCC visibility**: module-level `//!` guides covering the CDC event model and epoch relationship, the planner's rewrite and filter-pushdown ordering, and the `EpochId::PENDING` / visibility / `TransactionWriteTracker` flow.
+
+### Changed
+
+- **On-disk codec format extended**: databases written by 0.5.41+ may contain columns under the new `RawI64` discriminant (6). Earlier 0.5.4x binaries reject these with `unknown codec discriminant`. One-way format break, in line with the 0.5.35 precedent.
+
+### Fixed
+
+- **Post-`compact()` writes invisible to `MATCH`** (#307, closes #302): `LayeredStore` get/versioned/epoch/property/type/visibility methods now fall through to the overlay when the base doesn't recognise the id; `edges_from` / `neighbors` always consult the overlay so cross-layer edges surface. Results dedup by `EdgeId` to handle promoted edges.
+- **Signed Int64 columns stringified after `compact()`** (#306, closes #301): negative-containing `Int64` columns were routed to `InferredType::Dict`, silently becoming `Value::String` (`WHERE n.num = 100` returned zero rows). Signed columns now use the new `RawI64` codec, preserving type and ordering through compaction.
+- **Silent text/vector search on file-backed DBs** (#309, closes #308): `WalGraphStore` and `CdcGraphStore` fell through to the `GraphStoreSearch` trait defaults (all no-ops), so every index lookup on a `GrafeoDB::open()` session silently returned "no index." Both wrappers now delegate every `GraphStoreSearch` method to `self.inner`.
+- **Cypher aggregate substitution inside CASE WHEN** (#300): aggregates wrapped in `CASE WHEN ... THEN sum(...) ...` now substitute the reduced value post-aggregation instead of leaving an unresolved reference.
+- **VectorScan `k=None` risked HNSW overflow** (#299 follow-up): unbounded k was being passed as `usize::MAX`, degrading HNSW to full traversal and risking overflow in quantized rescore. The planner now bounds k to the label's node count via a new `nodes_by_label_count` trait method.
+- **Native SIMD kernels read past `b` on mismatched slice lengths** (#312, closes #311): AVX2, SSE, and NEON kernels drove the main loop from `a.len()` and raw-pointer-loaded `b`, guarded only by a `debug_assert_eq!`. The four public `*_simd` dispatchers now assert length equality in release.
+- **`rustls-webpki` 0.103.13**: clears RUSTSEC-2026-0104 (reachable panic in CRL parsing), pulled transitively via `hf-hub -> ureq -> rustls`.
+- **GQL schema DDL: `CREATE GRAPH TYPE` bare references no longer corrupt the catalog** (#316): `NODE TYPE Person` and `EDGE TYPE KNOWS` inside a graph-type body are now treated as references to existing catalog entries per ISO/IEC 39075:2024, not as empty inline redeclarations. The previous behavior silently wiped `NOT NULL` and other property constraints on the referenced types. References to undefined types now error cleanly at `CREATE GRAPH TYPE` time.
+
+### Dependencies
+
+- `proptest` 1.x added as workspace dev-dep and enabled on `grafeo-engine` for property-based tests.
+- `codspeed-criterion-compat` 3.x added as workspace dev-dep and enabled on `grafeo-common`, `grafeo-core`, `grafeo-storage`, `grafeo-engine`. Drop-in for Criterion; pass-through outside `cargo codspeed run`.
+- `tempfile` added as a dev-dep on `grafeo-spec-tests` for the `_persistent` variants.
+- `arc-swap` 1.x added to the workspace and enabled on `grafeo-core` under the `compact-store` feature, backing the `LayeredStore` base pointer for lock-free atomic swap.
+
+---
+
+Thanks to [@temporaryfix](https://github.com/temporaryfix) for substantial work this cycle: the two compact-store correctness fixes (#306, #307) and the property-based suite that surfaced them (#303), the hybrid-on-persistent fix (#309), the Cypher CASE aggregate fix (#300), the VectorScan k bounding follow-up to #299, the native SIMD safety assert (#312, closes #311), CodSpeed benchmark CI (#304), and the wasm32 simd128 distance kernels (#305).
+
 ## [0.5.40] - 2026-04-20
 
 Unified hybrid queries (graph + vector + text), lazy streaming results, structured Python errors, catalog hierarchy hardening, and compact-store fixes.

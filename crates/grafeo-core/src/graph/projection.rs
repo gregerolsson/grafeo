@@ -336,6 +336,13 @@ impl GraphStore for GraphProjection {
         self.inner.nodes_by_label(label)
     }
 
+    fn nodes_by_label_count(&self, label: &str) -> usize {
+        if self.spec.filters_labels() && !self.spec.node_labels.contains(label) {
+            return 0;
+        }
+        self.inner.nodes_by_label_count(label)
+    }
+
     fn node_count(&self) -> usize {
         self.node_ids().len()
     }

@@ -27,6 +27,8 @@ pub(crate) mod catalog_section;
 pub(crate) mod cdc_store;
 #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
 mod checkpoint_timer;
+#[cfg(all(feature = "compact-store", feature = "mmap"))]
+pub mod compact_tiered;
 #[cfg(feature = "lpg")]
 mod crud;
 #[cfg(feature = "embed")]
@@ -180,6 +182,14 @@ pub struct GrafeoDB {
     /// Layered store (compact base + mutable overlay), set after `compact()`.
     #[cfg(all(feature = "compact-store", feature = "lpg"))]
     layered_store: Option<Arc<grafeo_core::graph::compact::layered::LayeredStore>>,
+    /// Disk-backed tier wrapper for the compact base, set after `compact()`.
+    ///
+    /// Provides the spill path for [`CompactStoreConsumer`]: when the buffer
+    /// manager signals memory pressure, the consumer calls
+    /// `persist_to_mmap()` here and then publishes the fresh base to
+    /// `layered_store` via `swap_base()`.
+    #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+    compact_tiered: Option<Arc<compact_tiered::CompactStoreTiered>>,
 }
 
 impl GrafeoDB {
@@ -612,6 +622,8 @@ impl GrafeoDB {
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
+            #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+            compact_tiered: None,
         };
 
         // Register storage sections as memory consumers for pressure tracking
@@ -751,6 +763,8 @@ impl GrafeoDB {
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
+            #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+            compact_tiered: None,
         })
     }
 
@@ -840,6 +854,8 @@ impl GrafeoDB {
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "compact-store", feature = "lpg"))]
             layered_store: None,
+            #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+            compact_tiered: None,
         })
     }
 
@@ -913,6 +929,23 @@ impl GrafeoDB {
         self.external_read_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreSearch>);
         self.external_write_store = Some(Arc::clone(&layered) as Arc<dyn GraphStoreMut>);
         self.store = Some(Arc::clone(layered.overlay_store()));
+
+        // Install the disk-backed tier wrapper and register its memory
+        // consumer so the BufferManager can spill the base to mmap under
+        // memory pressure.
+        #[cfg(feature = "mmap")]
+        {
+            let tiered = Arc::new(compact_tiered::CompactStoreTiered::new_in_memory(
+                layered.base_store_arc(),
+            ));
+            let spill_path = self.buffer_manager.config().spill_path.clone();
+            let consumer = Arc::new(section_consumer::CompactStoreConsumer::new(
+                &tiered, &layered, spill_path,
+            ));
+            self.buffer_manager.register_consumer(consumer);
+            self.compact_tiered = Some(tiered);
+        }
+
         self.layered_store = Some(layered);
         self.read_only = false;
         self.query_cache = Arc::new(QueryCache::default());
@@ -968,6 +1001,27 @@ impl GrafeoDB {
         self.external_read_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStoreSearch>);
         self.external_write_store = Some(Arc::clone(&new_layered) as Arc<dyn GraphStoreMut>);
         self.store = Some(Arc::clone(new_layered.overlay_store()));
+
+        // Replace the tier wrapper: old one's Weak refs will now return None,
+        // and its consumer (unregistered below) no longer tracks the freshly
+        // built base.
+        #[cfg(feature = "mmap")]
+        {
+            self.buffer_manager
+                .unregister_consumer("section:CompactStore");
+            let tiered = Arc::new(compact_tiered::CompactStoreTiered::new_in_memory(
+                new_layered.base_store_arc(),
+            ));
+            let spill_path = self.buffer_manager.config().spill_path.clone();
+            let consumer = Arc::new(section_consumer::CompactStoreConsumer::new(
+                &tiered,
+                &new_layered,
+                spill_path,
+            ));
+            self.buffer_manager.register_consumer(consumer);
+            self.compact_tiered = Some(tiered);
+        }
+
         self.layered_store = Some(new_layered);
         self.query_cache = Arc::new(QueryCache::default());
 
@@ -1959,6 +2013,24 @@ impl GrafeoDB {
     #[must_use]
     pub fn buffer_manager(&self) -> &Arc<BufferManager> {
         &self.buffer_manager
+    }
+
+    /// Returns the layered store (compact base + mutable overlay), if
+    /// [`compact()`](Self::compact) has been called.
+    #[cfg(all(feature = "compact-store", feature = "lpg"))]
+    #[must_use]
+    pub fn layered_store(
+        &self,
+    ) -> Option<&Arc<grafeo_core::graph::compact::layered::LayeredStore>> {
+        self.layered_store.as_ref()
+    }
+
+    /// Returns the disk-backed tier wrapper for the compact base, if
+    /// [`compact()`](Self::compact) has been called and `mmap` is enabled.
+    #[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+    #[must_use]
+    pub fn compact_tiered(&self) -> Option<&Arc<compact_tiered::CompactStoreTiered>> {
+        self.compact_tiered.as_ref()
     }
 
     /// Returns the query cache.

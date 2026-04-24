@@ -17,7 +17,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use codspeed_criterion_compat::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

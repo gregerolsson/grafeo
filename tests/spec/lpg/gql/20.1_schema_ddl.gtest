@@ -136,6 +136,26 @@ tests:
       rows:
         - [0]
 
+  # Issue #316: bare `NODE TYPE X` / `EDGE TYPE X` inside CREATE GRAPH TYPE
+  # is a reference to an existing catalog entry, not an inline redeclaration.
+  # NOT NULL and other constraints on the referenced types must survive.
+  - name: create_graph_type_bare_references_preserve_catalog
+    statements:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER)"
+      - "CREATE EDGE TYPE KNOWS (since INTEGER)"
+      - "CREATE GRAPH TYPE social (NODE TYPE Person, EDGE TYPE KNOWS)"
+      - "INSERT (:Person {age: 30})"
+    expect:
+      error: name
+
+  # Issue #316: bare reference to an undefined node type must error at
+  # CREATE GRAPH TYPE time, not silently register an empty type.
+  - name: create_graph_type_bare_reference_to_missing_type_errors
+    statements:
+      - "CREATE GRAPH TYPE ghost_schema (NODE TYPE DoesNotExist)"
+    expect:
+      error: DoesNotExist
+
   # ---------------------------------------------------------------------------
   # CREATE / DROP SCHEMA
   # ---------------------------------------------------------------------------

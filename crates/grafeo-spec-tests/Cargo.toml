@@ -23,9 +23,12 @@ algos = []
 shacl = ["triple-store", "grafeo-engine/shacl"]
 
 [dependencies]
-grafeo-engine = { workspace = true, features = ["embedded", "languages", "triple-store"] }
+grafeo-engine = { workspace = true, features = ["embedded", "languages", "triple-store", "wal"] }
 grafeo-common = { workspace = true }
 md5 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [build-dependencies]
 # No serde_yaml: hand-written parser for the simple YAML subset

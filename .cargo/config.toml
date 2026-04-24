@@ -1,3 +1,11 @@
-# Configuration for wasm32 builds
+# Configuration for wasm32 builds.
+#
+# `+simd128` enables the hand-written simd128 distance kernels in
+# `grafeo-core/src/index/vector/simd.rs`, giving ~4-5x vector-search speedup
+# in the browser. Supported on Chrome 91+, Firefox 89+, Safari 16.4+
+# (universal on active browsers as of 2026).
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+    '-C', 'target-feature=+simd128',
+]

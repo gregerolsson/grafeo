@@ -5,7 +5,7 @@
 
 use std::hint::black_box;
 
-use codspeed_criterion_compat::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 use grafeo_common::memory::arena::Arena;
 use grafeo_common::memory::bump::BumpAllocator;

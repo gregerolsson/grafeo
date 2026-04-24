@@ -4,6 +4,106 @@
 //! (create, update, delete) with before/after property snapshots. This
 //! enables audit trails, temporal queries, and downstream sync.
 //!
+//! # Event model
+//!
+//! Every write emits a [`ChangeEvent`] keyed by [`EntityId`]. Three id
+//! variants cover the three supported data models: `Node(NodeId)` and
+//! `Edge(EdgeId)` for LPG, `Triple(u64)` for RDF (hashed via a
+//! content-stable triple hash so the log can key events by triple
+//! content without maintaining a separate id registry).
+//! [`ChangeKind`] distinguishes
+//! `Create` / `Update` / `Delete`; the `before` and `after` property maps
+//! are populated only for the variants that can carry them (`Update` has
+//! both; `Create` has only `after`; `Delete` has only `before`).
+//!
+//! The extra edge/label/triple fields on [`ChangeEvent`] are skipped in
+//! serialisation when absent so JSON consumers see a clean shape per
+//! variant. Adding a new field is a non-breaking change when it is also
+//! `#[serde(skip_serializing_if = "Option::is_none")]`.
+//!
+//! # Thread safety and ordering
+//!
+//! [`CdcLog`] is the authoritative in-memory store, a
+//! `RwLock<HbHashMap<EntityId, Vec<ChangeEvent>>>`. Readers (history
+//! queries, retention probes) take the read lock; writers (commit-path
+//! recording) take the write lock. We use [`hashbrown`]'s `HashMap` for
+//! the Fx-hashed inner map, and [`parking_lot`]'s `RwLock` for cheap
+//! uncontended locking; under concurrent insert+read the typical pattern
+//! is short write critical sections (one `entry().or_default().push()`
+//! per event) and occasional long read critical sections for
+//! `history*()` snapshots that clone the event vector out of the lock.
+//!
+//! Per-entity event order within the `Vec<ChangeEvent>` is insertion
+//! order, which is monotonic by construction: the only writer is the
+//! commit path (see "Integration with the commit path" below) and each
+//! event carries the MVCC `epoch` that produced it plus an HLC
+//! timestamp from the embedded [`HlcClock`]. The clock guarantees
+//! strictly-increasing timestamps across all threads within a process
+//! (wall-clock ms in the upper 48 bits, logical counter in the lower
+//! 16, with the logical bits bumped on collision). Timestamps are
+//! assigned inside the write lock, so readers never observe an event
+//! out of timestamp order.
+//!
+//! # Integration with the commit path
+//!
+//! Recording happens inline in `database::crud` and the
+//! MutationOperator: each write calls one of the `record_*` methods on
+//! [`CdcLog`] immediately after the corresponding mutation lands in the
+//! overlay store, still holding the writer's logical frame. That means
+//! CDC event visibility tracks LpgStore visibility: a reader that sees
+//! the mutation via MVCC also sees the event, and vice versa. There is
+//! no asynchronous flush queue between the write and the log; the
+//! guarantee is "at the time of commit, events are already recorded."
+//!
+//! WAL wrapping (via `CdcGraphStore`) buffers events per-transaction and
+//! flushes on commit so rolled-back work does not pollute the log. In
+//! the embedded in-process path the store is the source of truth for
+//! ordering; the log records after the store call returns.
+//!
+//! # CDC epoch vs. MVCC epoch
+//!
+//! The `epoch` field on [`ChangeEvent`] is the MVCC [`EpochId`] produced
+//! by the [`TransactionManager`](crate::transaction::TransactionManager)
+//! at commit time. It is the same epoch that tags the resulting
+//! [`LpgStore`](grafeo_core::graph::lpg::LpgStore) version, so
+//! `history_since(id, epoch)` and `MATCH ... AT EPOCH` return a
+//! consistent view. The CDC log has no epoch of its own: retention is
+//! driven by external epoch advances through
+//! [`apply_retention()`](CdcLog::apply_retention), called from
+//! [`GrafeoDB::gc()`](crate::GrafeoDB::gc) under the same epoch used to
+//! GC MVCC version chains.
+//!
+//! # Why in-memory only
+//!
+//! The CDC log is not persisted: it lives only in the
+//! `RwLock<HashMap<_, Vec<ChangeEvent>>>` above, is allocated fresh by
+//! [`CdcLog::new`] at database open, and a crash+recover cycle loses
+//! the entire event history. The WAL replay path
+//! ([`GrafeoDB::apply_wal_records`](crate::GrafeoDB)) rebuilds
+//! [`LpgStore`](grafeo_core::graph::lpg::LpgStore) state by calling
+//! mutation methods directly, bypassing the CDC recording sites in
+//! `database::crud`, so no events are re-emitted. The WAL does contain
+//! the same sequence of mutations a consumer would need to rebuild an
+//! equivalent history, but that reconstruction is not wired up today.
+//!
+//! Keeping CDC in memory avoids a second persistent log with its own
+//! crash-consistency semantics and keeps the commit path off the
+//! disk-flush critical path. The retention limits in
+//! [`CdcRetentionConfig`] therefore protect working set, not
+//! durability; see [#250][] for the unbounded-growth incident that
+//! motivated the retention knobs.
+//!
+//! The planned 0.6.x `reactive-event-bus` refactor (see
+//! `.claude/todo/6_rc/reactive-event-bus.md`) generalises this pattern:
+//! CDC becomes one [`MutationListener`][ml] among many, the recording
+//! path moves behind a trait, and other listeners (cache invalidation,
+//! replication, scoring hooks) register alongside. The in-process API
+//! surface here is the one CDC binding that carries forward; the rest
+//! of the file is effectively "the first listener".
+//!
+//! [#250]: https://github.com/GrafeoDB/grafeo/issues/250
+//! [ml]: https://github.com/GrafeoDB/grafeo/blob/main/.claude/todo/6_rc/reactive-event-bus.md
+//!
 //! # Example
 //!
 //! ```no_run
@@ -451,6 +551,30 @@ impl CdcLog {
         self.events.read().values().map(Vec::len).sum()
     }
 
+    /// Estimates the heap footprint of the log in bytes.
+    ///
+    /// Counts the entity-keyed hash map overhead, the per-entity `Vec<ChangeEvent>`
+    /// capacity, and the events themselves. `ChangeEvent` contains owned `Value`
+    /// payloads that can be arbitrarily large (property snapshots), but this
+    /// estimate treats them as fixed-size and therefore undercounts histories
+    /// that hold large strings, vectors, or bytes. Good enough to surface
+    /// "CDC is dominating heap" in a memory-usage breakdown; not a precise
+    /// accounting.
+    #[must_use]
+    pub fn heap_memory_bytes(&self) -> (usize, usize, usize) {
+        let guard = self.events.read();
+        let entity_count = guard.len();
+        let mut event_count = 0usize;
+        let mut bytes = 0usize;
+        let entry_overhead = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
+        let event_size = std::mem::size_of::<ChangeEvent>();
+        for events in guard.values() {
+            event_count += events.len();
+            bytes += entry_overhead + events.capacity() * event_size;
+        }
+        (bytes, entity_count, event_count)
+    }
+
     /// Removes all events with `epoch < min_epoch`.
     ///
     /// Entities whose entire history falls below the threshold are removed
@@ -533,8 +657,9 @@ impl MemoryConsumer for CdcLog {
     }
 
     fn eviction_priority(&self) -> u8 {
-        // CDC events are derived data (can be re-computed from WAL if needed).
-        // Evict before index buffers and graph storage.
+        // CDC events are auxiliary history, not required for query correctness:
+        // evicting them only loses history lookups, while indexes and graph
+        // storage back live reads. Evict before those.
         priorities::QUERY_CACHE
     }
 
@@ -912,5 +1037,24 @@ mod tests {
         let freed = log.evict(100);
         assert_eq!(freed, 0, "evict with target < 256 bytes should be a no-op");
         assert_eq!(log.event_count(), 10);
+    }
+
+    #[test]
+    fn test_heap_memory_bytes_scales_with_events() {
+        let log = CdcLog::new();
+        let (empty_bytes, empty_entities, empty_events) = log.heap_memory_bytes();
+        assert_eq!(empty_entities, 0);
+        assert_eq!(empty_events, 0);
+
+        for epoch in 1..=50 {
+            log.record_create_node(NodeId::new(epoch), EpochId(epoch), None, None);
+        }
+        let (populated_bytes, populated_entities, populated_events) = log.heap_memory_bytes();
+        assert_eq!(populated_entities, 50);
+        assert_eq!(populated_events, 50);
+        assert!(
+            populated_bytes > empty_bytes,
+            "heap estimate must grow when events are recorded"
+        );
     }
 }

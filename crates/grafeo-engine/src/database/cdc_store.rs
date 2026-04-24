@@ -248,6 +248,10 @@ impl GraphStore for CdcGraphStore {
         self.inner.nodes_by_label(label)
     }
 
+    fn nodes_by_label_count(&self, label: &str) -> usize {
+        self.inner.nodes_by_label_count(label)
+    }
+
     fn node_count(&self) -> usize {
         self.inner.node_count()
     }
@@ -381,7 +385,84 @@ impl GraphStore for CdcGraphStore {
     }
 }
 
-impl GraphStoreSearch for CdcGraphStore {}
+// Pure delegation: CDC wraps the store to buffer mutation events but owns no
+// index state, so every text/vector lookup has to fall through to the
+// underlying `GraphStoreMut` (which is a `GraphStoreSearch` by bound). A stub
+// impl silently turns into "no index exists" at every call site — the same
+// regression that hit the WAL wrapper in issue #308.
+impl GraphStoreSearch for CdcGraphStore {
+    #[cfg(feature = "text-index")]
+    fn has_text_index(&self, label: &str, property: &str) -> bool {
+        self.inner.has_text_index(label, property)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn score_text(&self, node_id: NodeId, label: &str, property: &str, query: &str) -> Option<f64> {
+        self.inner.score_text(node_id, label, property, query)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner.text_search(label, property, query, k)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        threshold: f64,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner
+            .text_search_with_threshold(label, property, query, threshold)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index(&self, label: &str, property: &str) -> bool {
+        self.inner.has_vector_index(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_index_metric(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<grafeo_core::index::vector::DistanceMetric> {
+        self.inner.vector_index_metric(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_search(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        metric: grafeo_core::index::vector::DistanceMetric,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner.vector_search(label, property, query, k, metric)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_search_with_threshold(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        threshold: f64,
+        metric: grafeo_core::index::vector::DistanceMetric,
+    ) -> Vec<(NodeId, f64)> {
+        self.inner
+            .vector_search_with_threshold(label, property, query, threshold, metric)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GraphStoreMut: delegate + CDC buffer/record
@@ -1815,5 +1896,169 @@ mod tests {
         let _ = cdc.get_edge_versioned(e, epoch, tx);
         let _ = cdc.get_edge_at_epoch(e, epoch);
         let _ = cdc.is_edge_visible_versioned(e, epoch, tx);
+    }
+
+    // ---------------------------------------------------------------
+    // Edge-direction-specific cases for delete_node_edges
+    //
+    // The loop walks `outgoing.chain(incoming)`. An isolated node or
+    // a node with edges only in one direction must still deliver exactly
+    // one Delete per edge, and zero Deletes when there are none.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn delete_node_edges_on_isolated_node_emits_no_events() {
+        let (cdc, log) = setup();
+        let id = cdc.create_node(&["Solo"]);
+        let create_count = log.history(EntityId::Node(id)).len();
+
+        cdc.delete_node_edges(id);
+
+        // No edges existed, so no Delete events anywhere in the log
+        // should be tagged for a nonexistent edge id, and the node's
+        // own history is unchanged.
+        assert_eq!(
+            log.history(EntityId::Node(id)).len(),
+            create_count,
+            "delete_node_edges on isolated node must not touch the node's history"
+        );
+    }
+
+    #[test]
+    fn delete_node_edges_with_only_outgoing_edges() {
+        let (cdc, log) = setup();
+        let src = cdc.create_node(&[]);
+        let dst_a = cdc.create_node(&[]);
+        let dst_b = cdc.create_node(&[]);
+        let e1 = cdc.create_edge(src, dst_a, "OUT1");
+        let e2 = cdc.create_edge(src, dst_b, "OUT2");
+
+        cdc.delete_node_edges(src);
+
+        let e1_deletes: Vec<_> = log
+            .history(EntityId::Edge(e1))
+            .into_iter()
+            .filter(|ev| ev.kind == ChangeKind::Delete)
+            .collect();
+        let e2_deletes: Vec<_> = log
+            .history(EntityId::Edge(e2))
+            .into_iter()
+            .filter(|ev| ev.kind == ChangeKind::Delete)
+            .collect();
+        assert_eq!(e1_deletes.len(), 1);
+        assert_eq!(e2_deletes.len(), 1);
+    }
+
+    #[test]
+    fn delete_node_edges_with_only_incoming_edges() {
+        let (cdc, log) = setup();
+        let target = cdc.create_node(&[]);
+        let src_a = cdc.create_node(&[]);
+        let src_b = cdc.create_node(&[]);
+        let e1 = cdc.create_edge(src_a, target, "IN1");
+        let e2 = cdc.create_edge(src_b, target, "IN2");
+
+        cdc.delete_node_edges(target);
+
+        for edge_id in [e1, e2] {
+            let deletes: Vec<_> = log
+                .history(EntityId::Edge(edge_id))
+                .into_iter()
+                .filter(|ev| ev.kind == ChangeKind::Delete)
+                .collect();
+            assert_eq!(
+                deletes.len(),
+                1,
+                "incoming-only edge {edge_id:?} should have exactly one Delete event"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Batch and labels edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn batch_create_edges_empty_slice_records_nothing() {
+        let (cdc, _log) = setup();
+        let ids = cdc.batch_create_edges(&[]);
+        assert!(ids.is_empty());
+        // No transactional buffering either (batch uses direct recording).
+        assert!(cdc.pending_events().lock().is_empty());
+    }
+
+    #[test]
+    fn create_node_with_empty_labels_still_populates_labels_field() {
+        // Documents a deliberate choice: the labels field on a Create
+        // event is Some(empty vec), not None, even with no labels. This
+        // matters for downstream consumers that distinguish
+        // "missing field" vs "empty list of labels."
+        let (cdc, log) = setup();
+        let id = cdc.create_node(&[]);
+        let events = log.history(EntityId::Node(id));
+        assert_eq!(events.len(), 1);
+        let labels = events[0]
+            .labels
+            .as_ref()
+            .expect("labels must be Some even with empty input");
+        assert!(labels.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // Shared-buffer semantics via wrap()
+    //
+    // Two CdcGraphStores wrapping the same pending_events Arc<Mutex<Vec>>
+    // (e.g., default graph + named graph) must buffer versioned events
+    // into the same Vec so the session can flush them atomically.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn wrap_routes_versioned_events_to_shared_buffer() {
+        let inner = Arc::new(LpgStore::new().unwrap());
+        let log = Arc::new(CdcLog::new());
+        let shared = Arc::new(Mutex::new(Vec::<ChangeEvent>::new()));
+
+        let cdc = CdcGraphStore::wrap(Arc::clone(&inner) as Arc<dyn GraphStoreMut>, log, shared);
+
+        let id = cdc.create_node_versioned(&["P"], EpochId(1), TransactionId::new(1));
+        let pending = cdc.pending_events();
+        let buf = pending.lock();
+        assert_eq!(buf.len(), 1);
+        assert_eq!(buf[0].entity_id, EntityId::Node(id));
+        assert_eq!(buf[0].kind, ChangeKind::Create);
+    }
+
+    #[test]
+    fn two_wrapped_stores_share_buffer_for_versioned_mutations() {
+        let inner_a = Arc::new(LpgStore::new().unwrap());
+        let inner_b = Arc::new(LpgStore::new().unwrap());
+        let log = Arc::new(CdcLog::new());
+        let shared = Arc::new(Mutex::new(Vec::<ChangeEvent>::new()));
+
+        let cdc_a = CdcGraphStore::wrap(
+            Arc::clone(&inner_a) as Arc<dyn GraphStoreMut>,
+            Arc::clone(&log),
+            Arc::clone(&shared),
+        );
+        let cdc_b = CdcGraphStore::wrap(
+            Arc::clone(&inner_b) as Arc<dyn GraphStoreMut>,
+            Arc::clone(&log),
+            Arc::clone(&shared),
+        );
+
+        let tx = TransactionId::new(42);
+        let _ = cdc_a.create_node_versioned(&["A"], EpochId(1), tx);
+        let _ = cdc_b.create_node_versioned(&["B"], EpochId(1), tx);
+
+        // Both events land in the single shared buffer, in order.
+        let buf = shared.lock();
+        assert_eq!(buf.len(), 2);
+        let labels_a = buf[0].labels.as_ref().unwrap();
+        let labels_b = buf[1].labels.as_ref().unwrap();
+        assert_eq!(labels_a, &["A"]);
+        assert_eq!(labels_b, &["B"]);
+        // Both use PENDING since the commit epoch hasn't been assigned.
+        assert_eq!(buf[0].epoch, EpochId::PENDING);
+        assert_eq!(buf[1].epoch, EpochId::PENDING);
     }
 }

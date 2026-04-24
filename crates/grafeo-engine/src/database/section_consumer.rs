@@ -13,7 +13,8 @@ use std::sync::Arc;
         feature = "mmap",
         not(feature = "temporal")
     ),
-    all(feature = "lpg", feature = "text-index")
+    all(feature = "lpg", feature = "text-index"),
+    all(feature = "compact-store", feature = "mmap", feature = "lpg")
 ))]
 use std::sync::Weak;
 
@@ -47,11 +48,14 @@ use parking_lot::RwLock;
     not(feature = "temporal")
 ))]
 use std::collections::HashMap;
-#[cfg(all(
-    feature = "lpg",
-    feature = "vector-index",
-    feature = "mmap",
-    not(feature = "temporal")
+#[cfg(any(
+    all(
+        feature = "lpg",
+        feature = "vector-index",
+        feature = "mmap",
+        not(feature = "temporal")
+    ),
+    all(feature = "compact-store", feature = "mmap", feature = "lpg")
 ))]
 use std::path::PathBuf;
 
@@ -413,6 +417,128 @@ impl MemoryConsumer for TextIndexConsumer {
 
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
         Err(SpillError::NotSupported)
+    }
+}
+
+/// Memory consumer for the CompactStore base under a `LayeredStore`.
+///
+/// Delegates spill/reload to a [`CompactStoreTiered`] wrapper and atomically
+/// swaps the `LayeredStore`'s base `Arc<CompactStore>` when tier state
+/// changes, so the old in-memory allocation actually drops after a spill.
+///
+/// Priority is [`GRAPH_STORAGE`](priorities::GRAPH_STORAGE) (evict-last):
+/// the compact base is persistent data, spilling it is the last resort
+/// before query failure.
+#[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+pub struct CompactStoreConsumer {
+    tiered: Weak<super::compact_tiered::CompactStoreTiered>,
+    layered: Weak<grafeo_core::graph::compact::layered::LayeredStore>,
+    spill_path: Option<PathBuf>,
+}
+
+#[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+impl CompactStoreConsumer {
+    /// Creates a consumer that spills the base to `<spill_path>/compact_base.grafeo`.
+    ///
+    /// `spill_path = None` disables spilling.
+    pub fn new(
+        tiered: &Arc<super::compact_tiered::CompactStoreTiered>,
+        layered: &Arc<grafeo_core::graph::compact::layered::LayeredStore>,
+        spill_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            tiered: Arc::downgrade(tiered),
+            layered: Arc::downgrade(layered),
+            spill_path,
+        }
+    }
+
+    fn spill_file(&self) -> Option<PathBuf> {
+        self.spill_path
+            .as_ref()
+            .map(|dir| dir.join("compact_base.grafeo"))
+    }
+}
+
+#[cfg(all(feature = "compact-store", feature = "mmap", feature = "lpg"))]
+impl MemoryConsumer for CompactStoreConsumer {
+    fn name(&self) -> &str {
+        "section:CompactStore"
+    }
+
+    fn memory_usage(&self) -> usize {
+        // When OnDisk, the heap copy of CompactStore is still alive (we
+        // deserialized from mmap eagerly). Report its heap bytes in both
+        // states; the OS page cache that backs mmap lives outside the heap.
+        self.tiered.upgrade().map_or(0, |t| t.memory_bytes())
+    }
+
+    fn eviction_priority(&self) -> u8 {
+        priorities::GRAPH_STORAGE
+    }
+
+    fn region(&self) -> MemoryRegion {
+        MemoryRegion::GraphStorage
+    }
+
+    fn evict(&self, _target_bytes: usize) -> usize {
+        // CompactStore cannot evict in-place: use spill() to tier to disk.
+        0
+    }
+
+    fn can_spill(&self) -> bool {
+        let Some(tiered) = self.tiered.upgrade() else {
+            return false;
+        };
+        self.spill_path.is_some() && !tiered.is_on_disk()
+    }
+
+    fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
+        let tiered = self
+            .tiered
+            .upgrade()
+            .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
+
+        if tiered.is_on_disk() {
+            return Ok(0);
+        }
+
+        let path = self.spill_file().ok_or(SpillError::NoSpillDirectory)?;
+
+        let before = tiered.memory_bytes();
+        tiered
+            .persist_to_mmap(&path)
+            .map_err(|e| SpillError::IoError(e.to_string()))?;
+
+        // Publish the fresh (mmap-backed) base to the LayeredStore so readers
+        // switch over and the old allocation can drop. If the LayeredStore has
+        // been reconstructed (e.g. recompact() between registration and this
+        // call), the weak ref returns None: the new LayeredStore already owns
+        // a matching base from the new tiered wrapper, so there's nothing to
+        // swap here.
+        if let Some(layered) = self.layered.upgrade() {
+            layered.swap_base(tiered.store());
+        }
+
+        let after = tiered.memory_bytes();
+        Ok(before.saturating_sub(after))
+    }
+
+    fn reload(&self) -> Result<(), SpillError> {
+        let tiered = self
+            .tiered
+            .upgrade()
+            .ok_or_else(|| SpillError::IoError("compact-store tiered dropped".to_string()))?;
+
+        if !tiered.is_on_disk() {
+            return Ok(());
+        }
+
+        tiered.reload_to_ram();
+        if let Some(layered) = self.layered.upgrade() {
+            layered.swap_base(tiered.store());
+        }
+        Ok(())
     }
 }
 

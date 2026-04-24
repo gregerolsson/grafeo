@@ -58,12 +58,15 @@ tokenizers = { version = "0.22", optional = true, default-features = false, feat
 hf-hub = { version = "0.5", optional = true }
 crc32fast = { workspace = true, optional = true }
 
+# Memory-mapped files (optional, for compact-store mmap spill)
+memmap2 = { workspace = true, optional = true }
+
 [dev-dependencies]
 criterion.workspace = true
-codspeed-criterion-compat.workspace = true
 tempfile.workspace = true
 serde_json = "1"
 tokio.workspace = true
+proptest.workspace = true
 
 [features]
 default = ["lpg", "gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
@@ -87,7 +90,7 @@ async-storage = ["dep:grafeo-storage", "grafeo-storage/async-storage", "dep:toki
 grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fast"]  # Single-file .grafeo format
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
-mmap = ["grafeo-core/mmap"]  # File-backed vector storage
+mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage and compact-store spill
 temporal = ["grafeo-core/temporal"]  # Append-only versioned properties
 compact-store = ["grafeo-core/compact-store"]  # CompactStore — columnar graph for read-only workloads
 # Convenience groups

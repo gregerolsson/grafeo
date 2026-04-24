@@ -7,7 +7,7 @@ pub mod formatter;
 use comfy_table::{Cell, Color, ContentArrangement, Table};
 use is_terminal::IsTerminal;
 
-pub use formatter::{format_bytes, format_duration_ms};
+pub use formatter::{format_bytes, format_duration_ms, print_memory};
 
 /// Output format selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

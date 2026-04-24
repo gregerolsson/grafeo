@@ -34,6 +34,12 @@ pub enum ColumnType {
         /// Number of dimensions in each vector.
         dimensions: u16,
     },
+    /// Native 64-bit signed integer column (no bit-packing; used when at
+    /// least one value is negative). See [`ColumnCodec::RawI64`] for the
+    /// storage layout.
+    ///
+    /// [`ColumnCodec::RawI64`]: super::column::ColumnCodec::RawI64
+    Int64,
 }
 
 /// A single column within a table schema.

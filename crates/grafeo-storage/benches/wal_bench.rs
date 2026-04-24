@@ -10,7 +10,7 @@
 
 use std::hint::black_box;
 
-use codspeed_criterion_compat::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use grafeo_common::types::{NodeId, TransactionId, Value};
 use grafeo_storage::wal::{DurabilityMode, WalConfig, WalManager, WalRecord, WalRecovery};
 

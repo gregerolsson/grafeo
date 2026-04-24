@@ -145,27 +145,42 @@ pub struct CreateEdgeTypeStatement {
 /// An inline element type definition within a graph type body.
 #[derive(Debug, Clone)]
 pub enum InlineElementType {
-    /// Inline node type: `NODE TYPE Name (prop1 TYPE, ...)`
+    /// Inline node type entry in a `CREATE GRAPH TYPE` body.
+    ///
+    /// When `is_reference` is true, this entry is a pure reference to an
+    /// existing node type in the catalog (ISO/IEC 39075 bare element-type
+    /// reference). The executor must not register or overwrite the type;
+    /// it only validates existence and adds the name to the graph type's
+    /// allowed node types.
+    ///
+    /// When `is_reference` is false, this is an inline declaration and the
+    /// executor registers (or replaces) the catalog entry.
     Node {
         /// Type name.
         name: String,
-        /// Property definitions (may be empty).
+        /// Property definitions. Empty when `is_reference` is true.
         properties: Vec<PropertyDefinition>,
-        /// Key label sets (GG21): labels that form the key for this type.
+        /// Key label sets (GG21). Empty when `is_reference` is true.
         key_labels: Vec<String>,
+        /// True if this is a bare reference to an existing type.
+        is_reference: bool,
     },
-    /// Inline edge type: `EDGE TYPE Name (prop1 TYPE, ...)`
+    /// Inline edge type entry in a `CREATE GRAPH TYPE` body.
+    ///
+    /// See `Node` for the reference vs declaration semantics.
     Edge {
         /// Type name.
         name: String,
-        /// Property definitions (may be empty).
+        /// Property definitions. Empty when `is_reference` is true.
         properties: Vec<PropertyDefinition>,
-        /// Key label sets (GG21): labels that form the key for this type.
+        /// Key label sets (GG21). Empty when `is_reference` is true.
         key_labels: Vec<String>,
-        /// Allowed source node types.
+        /// Allowed source node types. Empty when `is_reference` is true.
         source_node_types: Vec<String>,
-        /// Allowed target node types.
+        /// Allowed target node types. Empty when `is_reference` is true.
         target_node_types: Vec<String>,
+        /// True if this is a bare reference to an existing type.
+        is_reference: bool,
     },
 }
 

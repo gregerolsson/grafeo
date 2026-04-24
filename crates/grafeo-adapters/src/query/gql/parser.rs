@@ -5241,40 +5241,49 @@ impl<'a> Parser<'a> {
             self.advance();
 
             // GG21: Optional KEY label set: KEY (Label1, Label2)
-            let key_labels =
-                if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("KEY") {
-                    self.advance();
-                    self.expect(TokenKind::LParen)?;
-                    let mut labels = Vec::new();
-                    loop {
-                        if !self.is_identifier() && !self.is_label_or_type_name() {
-                            return Err(self.error("Expected label name in KEY clause"));
-                        }
-                        labels.push(self.get_identifier_name());
-                        self.advance();
-                        if self.current.kind != TokenKind::Comma {
-                            break;
-                        }
-                        self.advance();
+            let has_key_clause =
+                self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("KEY");
+            let key_labels = if has_key_clause {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let mut labels = Vec::new();
+                loop {
+                    if !self.is_identifier() && !self.is_label_or_type_name() {
+                        return Err(self.error("Expected label name in KEY clause"));
                     }
-                    self.expect(TokenKind::RParen)?;
-                    labels
-                } else {
-                    Vec::new()
-                };
+                    labels.push(self.get_identifier_name());
+                    self.advance();
+                    if self.current.kind != TokenKind::Comma {
+                        break;
+                    }
+                    self.advance();
+                }
+                self.expect(TokenKind::RParen)?;
+                labels
+            } else {
+                Vec::new()
+            };
 
-            // Optional property definitions
-            let properties = if self.current.kind == TokenKind::LParen {
+            // Optional property definitions. The presence of `(` (even empty
+            // parens) marks this as an inline declaration, not a reference.
+            let has_property_block = self.current.kind == TokenKind::LParen;
+            let properties = if has_property_block {
                 self.parse_property_definitions()?
             } else {
                 Vec::new()
             };
+
+            // ISO/IEC 39075:2024 bare element-type reference: a name with no
+            // property block and no KEY clause is a reference to an existing
+            // type in the catalog, not an inline declaration. Issue #316.
+            let is_reference = !has_property_block && !has_key_clause;
 
             if is_node {
                 types.push(InlineElementType::Node {
                     name: type_name,
                     properties,
                     key_labels,
+                    is_reference,
                 });
             } else {
                 types.push(InlineElementType::Edge {
@@ -5283,6 +5292,7 @@ impl<'a> Parser<'a> {
                     key_labels,
                     source_node_types: Vec::new(),
                     target_node_types: Vec::new(),
+                    is_reference,
                 });
             }
 
@@ -5380,6 +5390,7 @@ impl<'a> Parser<'a> {
                         name: src_label,
                         properties: src_props,
                         key_labels: Vec::new(),
+                        is_reference: false,
                     });
                 }
                 if seen_node_types.insert(tgt_label.clone()) {
@@ -5387,6 +5398,7 @@ impl<'a> Parser<'a> {
                         name: tgt_label,
                         properties: tgt_props,
                         key_labels: Vec::new(),
+                        is_reference: false,
                     });
                 }
 
@@ -5397,6 +5409,7 @@ impl<'a> Parser<'a> {
                     key_labels: Vec::new(),
                     source_node_types: src_types,
                     target_node_types: tgt_types,
+                    is_reference: false,
                 });
             } else {
                 // Standalone node pattern
@@ -5405,6 +5418,7 @@ impl<'a> Parser<'a> {
                         name: src_label,
                         properties: src_props,
                         key_labels: Vec::new(),
+                        is_reference: false,
                     });
                 }
             }
@@ -5488,6 +5502,7 @@ impl<'a> Parser<'a> {
                         name: src_label,
                         properties: src_props,
                         key_labels: Vec::new(),
+                        is_reference: false,
                     });
                 }
                 if seen_node_types.insert(tgt_label.clone()) {
@@ -5495,6 +5510,7 @@ impl<'a> Parser<'a> {
                         name: tgt_label,
                         properties: tgt_props,
                         key_labels: Vec::new(),
+                        is_reference: false,
                     });
                 }
 
@@ -5504,6 +5520,7 @@ impl<'a> Parser<'a> {
                     key_labels: Vec::new(),
                     source_node_types: src_types,
                     target_node_types: tgt_types,
+                    is_reference: false,
                 });
             } else {
                 // Standalone node pattern
@@ -5512,6 +5529,7 @@ impl<'a> Parser<'a> {
                         name: src_label,
                         properties: src_props,
                         key_labels: Vec::new(),
+                        is_reference: false,
                     });
                 }
             }
@@ -9644,6 +9662,133 @@ mod tests {
                     assert_eq!(key_labels[1], "NamedEntity");
                 }
                 _ => panic!("Expected Node"),
+            }
+        } else {
+            panic!("Expected CreateGraphType");
+        }
+    }
+
+    // ==================== Issue #316: bare element-type references ====================
+
+    #[test]
+    fn test_parse_create_graph_type_bare_reference_node() {
+        // Issue #316: `NODE TYPE Person` inside a graph type body must parse
+        // as a reference (is_reference = true), not an inline declaration.
+        let mut parser = Parser::new("CREATE GRAPH TYPE g (NODE TYPE Person)");
+        let result = parser.parse();
+        assert!(result.is_ok(), "bare reference should parse: {result:?}");
+        if let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = result.unwrap() {
+            assert_eq!(stmt.inline_types.len(), 1);
+            match &stmt.inline_types[0] {
+                InlineElementType::Node {
+                    name,
+                    properties,
+                    is_reference,
+                    ..
+                } => {
+                    assert_eq!(name, "Person");
+                    assert!(properties.is_empty());
+                    assert!(*is_reference, "bare name must parse as reference");
+                }
+                other => panic!("expected Node variant, got {other:?}"),
+            }
+        } else {
+            panic!("Expected CreateGraphType");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_graph_type_bare_reference_edge() {
+        let mut parser = Parser::new("CREATE GRAPH TYPE g (EDGE TYPE KNOWS)");
+        let result = parser.parse();
+        assert!(
+            result.is_ok(),
+            "bare edge reference should parse: {result:?}"
+        );
+        if let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = result.unwrap() {
+            match &stmt.inline_types[0] {
+                InlineElementType::Edge {
+                    name,
+                    properties,
+                    is_reference,
+                    ..
+                } => {
+                    assert_eq!(name, "KNOWS");
+                    assert!(properties.is_empty());
+                    assert!(*is_reference, "bare edge name must parse as reference");
+                }
+                other => panic!("expected Edge variant, got {other:?}"),
+            }
+        } else {
+            panic!("Expected CreateGraphType");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_graph_type_inline_declaration_not_reference() {
+        // Control: NODE TYPE Person (p STRING) is a declaration, is_reference = false.
+        let mut parser = Parser::new("CREATE GRAPH TYPE g (NODE TYPE Person (p STRING))");
+        let result = parser.parse();
+        assert!(
+            result.is_ok(),
+            "inline declaration should parse: {result:?}"
+        );
+        if let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = result.unwrap() {
+            match &stmt.inline_types[0] {
+                InlineElementType::Node {
+                    is_reference,
+                    properties,
+                    ..
+                } => {
+                    assert!(!*is_reference, "declaration must not be a reference");
+                    assert_eq!(properties.len(), 1);
+                }
+                other => panic!("expected Node variant, got {other:?}"),
+            }
+        } else {
+            panic!("Expected CreateGraphType");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_graph_type_empty_parens_not_reference() {
+        // `NODE TYPE Person ()` is an explicit empty declaration, NOT a reference.
+        // Documents the boundary case: any `(...)` marks declaration intent.
+        let mut parser = Parser::new("CREATE GRAPH TYPE g (NODE TYPE Person ())");
+        let result = parser.parse();
+        assert!(result.is_ok(), "empty-parens form should parse: {result:?}");
+        if let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = result.unwrap() {
+            match &stmt.inline_types[0] {
+                InlineElementType::Node { is_reference, .. } => {
+                    assert!(
+                        !*is_reference,
+                        "explicit () is a declaration, not a reference"
+                    );
+                }
+                other => panic!("expected Node variant, got {other:?}"),
+            }
+        } else {
+            panic!("Expected CreateGraphType");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_graph_type_key_clause_not_reference() {
+        // GG21 KEY clause also marks this as a declaration, not a reference.
+        let mut parser = Parser::new("CREATE GRAPH TYPE g (NODE TYPE Person KEY (Label1))");
+        let result = parser.parse();
+        assert!(result.is_ok(), "KEY-only form should parse: {result:?}");
+        if let Statement::Schema(SchemaStatement::CreateGraphType(stmt)) = result.unwrap() {
+            match &stmt.inline_types[0] {
+                InlineElementType::Node {
+                    is_reference,
+                    key_labels,
+                    ..
+                } => {
+                    assert!(!*is_reference, "KEY clause is a declaration signal");
+                    assert_eq!(key_labels, &vec!["Label1".to_string()]);
+                }
+                other => panic!("expected Node variant, got {other:?}"),
             }
         } else {
             panic!("Expected CreateGraphType");

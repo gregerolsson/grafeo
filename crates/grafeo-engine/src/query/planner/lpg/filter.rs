@@ -1,4 +1,27 @@
 //! Filter planning with zone map pre-filtering and index lookups.
+//!
+//! The order of the rewrite/pushdown attempts in [`Planner::plan_filter`][pf]
+//! is load-bearing, not a performance tweak:
+//!
+//! 1. Subquery rewrites (`extract_complex_exists`, `extract_exists_from_or`,
+//!    `extract_count_comparison`) must run first. The later steps assume
+//!    a scalar predicate with no subquery shape; once a rewrite fires,
+//!    the rest of the method is bypassed.
+//! 2. Zone-map short-circuit fires before any index lookup so we can
+//!    skip opening an index file at all when summary statistics prove
+//!    emptiness.
+//! 3. Property-index and range-index attempts come before hybrid
+//!    pushdown because they are cheaper and strictly more specific.
+//! 4. Compound hybrid (`try_plan_filter_compound_hybrid`) is tried
+//!    before single-sided vector/text pushdown so an `AND` over both
+//!    kinds doesn't get torn apart into a scan + filter.
+//! 5. The generic `FilterOperator` is the last resort; whatever fell
+//!    through still runs correctly, just without an index.
+//!
+//! Changing this order needs a correctness argument, not just a
+//! benchmark.
+//!
+//! [pf]: super::Planner::plan_filter
 
 use super::{
     ApplyOperator, Arc, BinaryOp, DistinctOperator, EmptyOperator, ExpressionPredicate,

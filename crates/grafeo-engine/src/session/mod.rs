@@ -111,6 +111,12 @@ pub struct Session {
     /// The underlying store.
     #[cfg(feature = "lpg")]
     store: Arc<LpgStore>,
+    /// Classifies the role of `store` for the active backend.
+    /// Search procedures (CALL grafeo.search.*) only reach into `store` when
+    /// this is `Active`. External-store sessions keep `store` as a placeholder
+    /// and must not expose it: it has no indexes or data.
+    #[cfg(feature = "lpg")]
+    lpg_backend: LpgBackend,
     /// Graph store trait object for pluggable storage backends (read path).
     graph_store: Arc<dyn GraphStoreSearch>,
     /// Writable graph store (None for read-only databases).
@@ -212,6 +218,20 @@ pub struct Session {
     >,
 }
 
+/// Role of the session's internal `LpgStore`.
+#[cfg(feature = "lpg")]
+#[derive(Clone, Copy)]
+enum LpgBackend {
+    /// The internal `LpgStore` is the session's active backing store (possibly
+    /// wrapped by WAL/CDC/Layered decorators on the read/write path). Search
+    /// procedures can reach its HNSW/BM25 indexes.
+    Active,
+    /// The internal `LpgStore` is an empty placeholder because the session is
+    /// backed by an external `GraphStoreSearch` implementation. Search
+    /// procedures must not use it.
+    Placeholder,
+}
+
 /// Per-graph savepoint snapshot, capturing the store state at the time of the savepoint.
 #[derive(Clone)]
 struct GraphSavepoint {
@@ -245,6 +265,7 @@ impl Session {
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,
+            lpg_backend: LpgBackend::Active,
             graph_store,
             graph_store_mut,
             catalog: cfg.catalog,
@@ -372,6 +393,8 @@ impl Session {
         Ok(Self {
             #[cfg(feature = "lpg")]
             store: Arc::new(LpgStore::new()?),
+            #[cfg(feature = "lpg")]
+            lpg_backend: LpgBackend::Placeholder,
             graph_store: read_store,
             graph_store_mut: write_store,
             catalog: cfg.catalog,
@@ -1566,43 +1589,60 @@ impl Session {
                         (nt, et, stmt.open)
                     };
 
-                // GG03: Register inline element types and add their names
+                // GG03: Process inline element type entries. Per ISO/IEC 39075,
+                // a bare `NODE TYPE Name` or `EDGE TYPE Name` inside a graph
+                // type body is a reference; anything with a property block or
+                // a KEY clause is an inline declaration. See issue #316.
                 for inline in &stmt.inline_types {
                     match inline {
                         InlineElementType::Node {
                             name,
                             properties,
                             key_labels,
+                            is_reference,
                             ..
                         } => {
                             let inline_effective = self.effective_type_key(name);
-                            let def = NodeTypeDefinition {
-                                name: inline_effective.clone(),
-                                properties: properties
-                                    .iter()
-                                    .map(|p| TypedProperty {
-                                        name: p.name.clone(),
-                                        data_type: PropertyDataType::from_type_name(&p.data_type),
-                                        nullable: p.nullable,
-                                        default_value: None,
-                                    })
-                                    .collect(),
-                                constraints: Vec::new(),
-                                parent_types: key_labels.clone(),
-                            };
-                            // Register or replace so inline defs override existing
-                            self.catalog.register_or_replace_node_type(def);
-                            #[cfg(feature = "wal")]
-                            {
-                                let props_for_wal: Vec<(String, String, bool)> = properties
-                                    .iter()
-                                    .map(|p| (p.name.clone(), p.data_type.clone(), p.nullable))
-                                    .collect();
-                                self.log_schema_wal(&WalRecord::CreateNodeType {
+                            if *is_reference {
+                                // Reference: validate existence; do not register, do not WAL.
+                                if self.catalog.get_node_type(&inline_effective).is_none() {
+                                    return Err(Error::Query(QueryError::new(
+                                        QueryErrorKind::Semantic,
+                                        format!(
+                                            "Referenced node type '{inline_effective}' does not exist"
+                                        ),
+                                    )));
+                                }
+                            } else {
+                                let def = NodeTypeDefinition {
                                     name: inline_effective.clone(),
-                                    properties: props_for_wal,
+                                    properties: properties
+                                        .iter()
+                                        .map(|p| TypedProperty {
+                                            name: p.name.clone(),
+                                            data_type: PropertyDataType::from_type_name(
+                                                &p.data_type,
+                                            ),
+                                            nullable: p.nullable,
+                                            default_value: None,
+                                        })
+                                        .collect(),
                                     constraints: Vec::new(),
-                                });
+                                    parent_types: key_labels.clone(),
+                                };
+                                self.catalog.register_or_replace_node_type(def);
+                                #[cfg(feature = "wal")]
+                                {
+                                    let props_for_wal: Vec<(String, String, bool)> = properties
+                                        .iter()
+                                        .map(|p| (p.name.clone(), p.data_type.clone(), p.nullable))
+                                        .collect();
+                                    self.log_schema_wal(&WalRecord::CreateNodeType {
+                                        name: inline_effective.clone(),
+                                        properties: props_for_wal,
+                                        constraints: Vec::new(),
+                                    });
+                                }
                             }
                             if !node_types.contains(&inline_effective) {
                                 node_types.push(inline_effective);
@@ -1613,36 +1653,50 @@ impl Session {
                             properties,
                             source_node_types,
                             target_node_types,
+                            is_reference,
                             ..
                         } => {
                             let inline_effective = self.effective_type_key(name);
-                            let def = EdgeTypeDefinition {
-                                name: inline_effective.clone(),
-                                properties: properties
-                                    .iter()
-                                    .map(|p| TypedProperty {
-                                        name: p.name.clone(),
-                                        data_type: PropertyDataType::from_type_name(&p.data_type),
-                                        nullable: p.nullable,
-                                        default_value: None,
-                                    })
-                                    .collect(),
-                                constraints: Vec::new(),
-                                source_node_types: source_node_types.clone(),
-                                target_node_types: target_node_types.clone(),
-                            };
-                            self.catalog.register_or_replace_edge_type_def(def);
-                            #[cfg(feature = "wal")]
-                            {
-                                let props_for_wal: Vec<(String, String, bool)> = properties
-                                    .iter()
-                                    .map(|p| (p.name.clone(), p.data_type.clone(), p.nullable))
-                                    .collect();
-                                self.log_schema_wal(&WalRecord::CreateEdgeType {
+                            if *is_reference {
+                                if self.catalog.get_edge_type_def(&inline_effective).is_none() {
+                                    return Err(Error::Query(QueryError::new(
+                                        QueryErrorKind::Semantic,
+                                        format!(
+                                            "Referenced edge type '{inline_effective}' does not exist"
+                                        ),
+                                    )));
+                                }
+                            } else {
+                                let def = EdgeTypeDefinition {
                                     name: inline_effective.clone(),
-                                    properties: props_for_wal,
+                                    properties: properties
+                                        .iter()
+                                        .map(|p| TypedProperty {
+                                            name: p.name.clone(),
+                                            data_type: PropertyDataType::from_type_name(
+                                                &p.data_type,
+                                            ),
+                                            nullable: p.nullable,
+                                            default_value: None,
+                                        })
+                                        .collect(),
                                     constraints: Vec::new(),
-                                });
+                                    source_node_types: source_node_types.clone(),
+                                    target_node_types: target_node_types.clone(),
+                                };
+                                self.catalog.register_or_replace_edge_type_def(def);
+                                #[cfg(feature = "wal")]
+                                {
+                                    let props_for_wal: Vec<(String, String, bool)> = properties
+                                        .iter()
+                                        .map(|p| (p.name.clone(), p.data_type.clone(), p.nullable))
+                                        .collect();
+                                    self.log_schema_wal(&WalRecord::CreateEdgeType {
+                                        name: inline_effective.clone(),
+                                        properties: props_for_wal,
+                                        constraints: Vec::new(),
+                                    });
+                                }
                             }
                             if !edge_types.contains(&inline_effective) {
                                 edge_types.push(inline_effective);
@@ -4690,6 +4744,15 @@ impl Session {
         .with_catalog(Arc::clone(&self.catalog))
         .with_session_context(session_context)
         .with_read_only(read_only);
+
+        // Attach the LPG store so CALL grafeo.search.* procedures can reach
+        // HNSW / BM25 indexes. Skip when the session is backed by an external
+        // store — `self.store` is an empty placeholder in that case and would
+        // make search procedures see a store with no data or indexes.
+        #[cfg(feature = "lpg")]
+        if matches!(self.lpg_backend, LpgBackend::Active) {
+            planner = planner.with_lpg_store(Arc::clone(&self.store));
+        }
 
         // Attach the constraint validator for schema enforcement and property size limits
         let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))

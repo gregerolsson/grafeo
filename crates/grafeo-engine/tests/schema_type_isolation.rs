@@ -271,6 +271,10 @@ fn create_graph_typed_respects_schema() {
 
     session.execute("CREATE SCHEMA IF NOT EXISTS s1").unwrap();
     session.execute("SESSION SET SCHEMA s1").unwrap();
+    // Pre-declare KNOWS so the bare reference in the graph type body is valid.
+    session
+        .execute("CREATE EDGE TYPE KNOWS (since INTEGER)")
+        .expect("pre-declare KNOWS edge type");
     session
         .execute(
             "CREATE GRAPH TYPE social_network (

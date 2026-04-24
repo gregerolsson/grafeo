@@ -250,6 +250,7 @@ fn handle_meta_command(
                 println!("  :schema       Show database schema");
                 println!("  :info         Show database info");
                 println!("  :stats        Show detailed statistics");
+                println!("  :memory       Show hierarchical memory breakdown");
                 println!("  :format <f>   Set output format (table, json, csv)");
                 println!("  :timing       Toggle query timing display");
                 println!("  :begin        Start a transaction");
@@ -313,6 +314,12 @@ fn handle_meta_command(
                     "Memory: {}",
                     crate::output::format_bytes(stats.memory_bytes)
                 );
+            }
+            MetaResult::Continue
+        }
+        ":memory" => {
+            if !quiet {
+                crate::output::print_memory(&db.memory_usage());
             }
             MetaResult::Continue
         }

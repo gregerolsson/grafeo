@@ -2,7 +2,7 @@
 //!
 //! Store-level types (`StoreMemory`, `IndexMemory`, etc.) live in grafeo-common.
 //! This module defines the top-level `MemoryUsage` aggregate and engine-specific
-//! types (`CacheMemory`, `BufferManagerMemory`).
+//! types (`CacheMemory`, `BufferManagerMemory`, `RdfMemory`, `CdcMemory`).
 
 pub use grafeo_common::memory::usage::{
     IndexMemory, MvccMemory, NamedMemory, StoreMemory, StringPoolMemory,
@@ -26,6 +26,12 @@ pub struct MemoryUsage {
     pub string_pool: StringPoolMemory,
     /// Buffer manager tracked allocations.
     pub buffer_manager: BufferManagerMemory,
+    /// RDF triple store (only populated when the `triple-store` feature is enabled).
+    #[serde(default, skip_serializing_if = "RdfMemory::is_empty")]
+    pub rdf: RdfMemory,
+    /// Change data capture log (only populated when the `cdc` feature is enabled).
+    #[serde(default, skip_serializing_if = "CdcMemory::is_empty")]
+    pub cdc: CdcMemory,
 }
 
 impl MemoryUsage {
@@ -36,7 +42,9 @@ impl MemoryUsage {
             + self.mvcc.total_bytes
             + self.caches.total_bytes
             + self.string_pool.total_bytes
-            + self.buffer_manager.allocated_bytes;
+            + self.buffer_manager.allocated_bytes
+            + self.rdf.total_bytes
+            + self.cdc.total_bytes;
     }
 }
 
@@ -57,6 +65,63 @@ impl CacheMemory {
     /// Recomputes `total_bytes` from child values.
     pub fn compute_total(&mut self) {
         self.total_bytes = self.parsed_plan_cache_bytes + self.optimized_plan_cache_bytes;
+    }
+}
+
+/// RDF triple store memory breakdown.
+///
+/// Default is empty (all zeros) when the `triple-store` feature is disabled,
+/// so users on LPG-only builds see no RDF line in the hierarchical report.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RdfMemory {
+    /// Total estimated RDF memory in bytes.
+    pub total_bytes: usize,
+    /// Number of triples across the default graph and any named graphs.
+    pub triple_count: usize,
+    /// Primary triple set and all six index maps (subject, predicate, object, SP, PO, OS).
+    pub triples_and_indexes_bytes: usize,
+    /// Cached term dictionary bytes (None when no cache is warm).
+    pub term_dictionary_bytes: usize,
+    /// Cached Ring index bytes (only populated when `ring-index` is enabled).
+    pub ring_index_bytes: usize,
+    /// Named graphs in the default store (does not include nested graph memory,
+    /// which is summed into `triples_and_indexes_bytes`).
+    pub named_graph_count: usize,
+}
+
+impl RdfMemory {
+    /// True when no RDF memory is reported. Used by `skip_serializing_if` so
+    /// LPG-only builds don't emit an empty `rdf` block in JSON.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total_bytes == 0 && self.triple_count == 0
+    }
+
+    /// Recomputes `total_bytes` from child values.
+    pub fn compute_total(&mut self) {
+        self.total_bytes =
+            self.triples_and_indexes_bytes + self.term_dictionary_bytes + self.ring_index_bytes;
+    }
+}
+
+/// CDC log memory breakdown.
+///
+/// Default is empty when the `cdc` feature is disabled.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CdcMemory {
+    /// Total estimated CDC memory in bytes.
+    pub total_bytes: usize,
+    /// Number of entities with at least one recorded event.
+    pub entity_count: usize,
+    /// Total number of recorded change events across all entities.
+    pub event_count: usize,
+}
+
+impl CdcMemory {
+    /// True when no CDC memory is reported.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.event_count == 0 && self.total_bytes == 0
     }
 }
 
@@ -120,10 +185,41 @@ mod tests {
                 allocated_bytes: 20,
                 ..Default::default()
             },
+            rdf: RdfMemory {
+                total_bytes: 500,
+                triple_count: 10,
+                triples_and_indexes_bytes: 500,
+                ..Default::default()
+            },
+            cdc: CdcMemory {
+                total_bytes: 40,
+                event_count: 3,
+                entity_count: 2,
+            },
             ..Default::default()
         };
         usage.compute_total();
-        assert_eq!(usage.total_bytes, 410);
+        assert_eq!(usage.total_bytes, 950);
+    }
+
+    #[test]
+    fn rdf_and_cdc_default_is_empty() {
+        let rdf = RdfMemory::default();
+        assert!(rdf.is_empty());
+        let cdc = CdcMemory::default();
+        assert!(cdc.is_empty());
+    }
+
+    #[test]
+    fn rdf_compute_total_sums_children() {
+        let mut rdf = RdfMemory {
+            triples_and_indexes_bytes: 100,
+            term_dictionary_bytes: 50,
+            ring_index_bytes: 25,
+            ..Default::default()
+        };
+        rdf.compute_total();
+        assert_eq!(rdf.total_bytes, 175);
     }
 
     #[test]

@@ -1592,9 +1592,16 @@ fn test_create_graph_type_inline_iso_syntax() {
 // ISO: GG03
 #[test]
 fn test_create_graph_type_inline_multiple() {
-    // GG03: Multiple inline types in one graph type definition
+    // GG03: Multiple inline types in one graph type definition.
+    // Employee, Department, and WORKS_IN are declarations (have property
+    // blocks). MANAGES is a bare reference, so it must be pre-declared.
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
+
+    // Pre-declare MANAGES so the bare reference in the graph type body is valid.
+    session
+        .execute("CREATE EDGE TYPE MANAGES (since INTEGER)")
+        .expect("pre-declare MANAGES edge type");
 
     let result = session.execute(
         "CREATE GRAPH TYPE company_graph (\
@@ -1609,6 +1616,99 @@ fn test_create_graph_type_inline_multiple() {
     // Creating with same name should fail (proving it was registered)
     let dup = session.execute("CREATE GRAPH TYPE company_graph");
     assert!(dup.is_err(), "Duplicate graph type should fail");
+}
+
+// ISO: GG03
+// Regression for issue #316.
+#[test]
+fn test_create_graph_type_bare_references_preserve_catalog() {
+    // Regression: issue #316. Bare `NODE TYPE X` / `EDGE TYPE X` inside
+    // CREATE GRAPH TYPE must NOT overwrite the existing catalog definition.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+
+    session
+        .execute("CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER, city STRING)")
+        .unwrap();
+    session
+        .execute("CREATE NODE TYPE Product (sku STRING NOT NULL, price FLOAT NOT NULL)")
+        .unwrap();
+    session
+        .execute("CREATE EDGE TYPE KNOWS (since INTEGER)")
+        .unwrap();
+
+    // Bare references inside a graph type body. Before the fix, this
+    // silently overwrote Person / Product / KNOWS with empty property
+    // lists. The CREATE GRAPH TYPE must still succeed.
+    session
+        .execute(
+            "CREATE GRAPH TYPE shop_schema (\
+                NODE TYPE Person,\
+                NODE TYPE Product,\
+                EDGE TYPE KNOWS\
+            )",
+        )
+        .expect("CREATE GRAPH TYPE with bare references must not fail");
+
+    // Verify the pre-existing type definitions survive intact, by
+    // inspecting the catalog via SHOW NODE TYPES / SHOW EDGE TYPES.
+    let node_result = session.execute("SHOW NODE TYPES").unwrap();
+    let person_row = node_result
+        .rows()
+        .iter()
+        .find(|r| matches!(&r[0], Value::String(s) if s == "Person"))
+        .cloned()
+        .expect("Person must still exist in the catalog");
+    let person_props = match &person_row[1] {
+        Value::String(s) => s.clone(),
+        other => panic!("expected String properties column, got {other:?}"),
+    };
+    assert!(
+        person_props.contains("name") && person_props.contains("NOT NULL"),
+        "Person.name NOT NULL was wiped by CREATE GRAPH TYPE; SHOW \
+         NODE TYPES returned properties: {person_props}",
+    );
+    assert!(
+        person_props.contains("age") && person_props.contains("city"),
+        "Person.age and Person.city were wiped; got: {person_props}",
+    );
+
+    let edge_result = session.execute("SHOW EDGE TYPES").unwrap();
+    let knows_row = edge_result
+        .rows()
+        .iter()
+        .find(|r| matches!(&r[0], Value::String(s) if s == "KNOWS"))
+        .cloned()
+        .expect("KNOWS must still exist in the catalog");
+    let knows_props = match &knows_row[1] {
+        Value::String(s) => s.clone(),
+        other => panic!("expected String properties column, got {other:?}"),
+    };
+    assert!(
+        knows_props.contains("since"),
+        "KNOWS.since was wiped; got: {knows_props}",
+    );
+}
+
+// ISO: GG03
+// Regression for issue #316.
+#[test]
+fn test_create_graph_type_bare_reference_to_missing_type_errors() {
+    // Dangling reference: bare `NODE TYPE Foo` where Foo is not in the
+    // catalog must raise an error at CREATE GRAPH TYPE time.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+
+    let result = session.execute("CREATE GRAPH TYPE ghost_schema (NODE TYPE DoesNotExist)");
+    assert!(
+        result.is_err(),
+        "reference to undefined node type must error; got {result:?}",
+    );
+    let msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        msg.contains("DoesNotExist"),
+        "error must name the missing type, got: {msg}",
+    );
 }
 
 // ISO: GG03
@@ -1639,6 +1739,11 @@ fn test_create_graph_type_like_graph() {
     // GG04: CREATE GRAPH TYPE ... LIKE <graph>
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
+
+    // Pre-declare ACTED_IN so the bare reference in the graph type body is valid.
+    session
+        .execute("CREATE EDGE TYPE ACTED_IN (role STRING)")
+        .expect("pre-declare ACTED_IN edge type");
 
     // Create a graph type and bind it to a graph
     session
@@ -1671,6 +1776,11 @@ fn test_create_graph_type_key_label_sets() {
     // GG21: Explicit key label sets in element type definitions
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
+
+    // Pre-declare KNOWS so the bare reference in the graph type body is valid.
+    session
+        .execute("CREATE EDGE TYPE KNOWS (since INTEGER)")
+        .expect("pre-declare KNOWS edge type");
 
     let result = session.execute(
         "CREATE GRAPH TYPE keyed_type (\

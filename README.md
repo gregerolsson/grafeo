@@ -1,6 +1,7 @@
 [![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml)
 [![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg)](https://grafeo.dev)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
+[![CodSpeed Badge](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/GrafeoDB/grafeo?utm_source=badge)
 [![Crates.io](https://img.shields.io/crates/v/grafeo.svg?color=00ADD8)](https://crates.io/crates/grafeo)
 [![PyPI](https://img.shields.io/pypi/v/grafeo.svg?color=00ADD8)](https://pypi.org/project/grafeo/)
 [![npm](https://img.shields.io/npm/v/@grafeo-db/js.svg?color=00ADD8)](https://www.npmjs.com/package/@grafeo-db/js)

@@ -654,6 +654,66 @@ fn test_case_aggregate_in_then_branch() {
 }
 
 // ===========================================================================
+// T3b: Cypher-specific CASE + aggregate (exercises extract_wrapped_aggregates
+// CASE/Binary branches via the Cypher translator)
+// ===========================================================================
+
+/// Aggregate in WHEN condition — result depends on actual aggregate value.
+/// Before the fix, sum() was not substituted and evaluated to null, so
+/// null > 0 → null → ELSE taken incorrectly.
+#[cfg(feature = "cypher")]
+#[test]
+fn test_cypher_case_when_aggregate_condition_true() {
+    let db = stats_graph();
+    let s = db.session();
+    // sum(d.score) = 150, 150 > 0 is true → 'positive'
+    let r = s
+        .execute_cypher(
+            "MATCH (d:Data) \
+             RETURN CASE WHEN sum(d.score) > 0 THEN 'positive' ELSE 'zero' END AS label",
+        )
+        .unwrap();
+    assert_eq!(r.rows().len(), 1);
+    assert_eq!(r.rows()[0][0], Value::String("positive".into()));
+}
+
+/// Aggregate value in THEN branch — THEN must evaluate to the aggregate, not null.
+#[cfg(feature = "cypher")]
+#[test]
+fn test_cypher_case_then_aggregate_value() {
+    let db = stats_graph();
+    let s = db.session();
+    // CASE WHEN true THEN sum(d.score) ELSE -1 END → 150
+    let r = s
+        .execute_cypher(
+            "MATCH (d:Data) \
+             RETURN CASE WHEN true THEN sum(d.score) ELSE -1 END AS total",
+        )
+        .unwrap();
+    assert_eq!(r.rows().len(), 1);
+    assert_eq!(r.rows()[0][0], Value::Int64(150));
+}
+
+/// Multiple aggregates in ELSE branch (sum/count division).
+/// Before the fix, the Binary handler only extracted one aggregate from
+/// a two-aggregate expression, and the CASE handler discarded the substitute.
+#[cfg(feature = "cypher")]
+#[test]
+fn test_cypher_case_else_aggregate_division() {
+    let db = stats_graph();
+    let s = db.session();
+    // ELSE sum(d.score) / count(d) = 150 / 5 = 30
+    let r = s
+        .execute_cypher(
+            "MATCH (d:Data) \
+             RETURN CASE WHEN false THEN -1 ELSE sum(d.score) / count(d) END AS avg_score",
+        )
+        .unwrap();
+    assert_eq!(r.rows().len(), 1);
+    assert_eq!(r.rows()[0][0], Value::Int64(30));
+}
+
+// ===========================================================================
 // T4: Non-aggregate function wrapping an aggregate argument
 // Exercises: extract_wrapped_aggregates FunctionCall non-aggregate branch
 // ===========================================================================

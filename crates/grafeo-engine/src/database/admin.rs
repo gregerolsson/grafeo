@@ -153,6 +153,39 @@ impl super::GrafeoDB {
             buffer_manager,
             ..Default::default()
         };
+
+        #[cfg(feature = "triple-store")]
+        {
+            use crate::memory_usage::RdfMemory;
+            let (
+                triple_count,
+                triples_and_indexes_bytes,
+                term_dictionary_bytes,
+                ring_index_bytes,
+                named_graph_count,
+            ) = self.rdf_store.heap_memory_bytes();
+            usage.rdf = RdfMemory {
+                triple_count,
+                triples_and_indexes_bytes,
+                term_dictionary_bytes,
+                ring_index_bytes,
+                named_graph_count,
+                total_bytes: 0,
+            };
+            usage.rdf.compute_total();
+        }
+
+        #[cfg(feature = "cdc")]
+        {
+            use crate::memory_usage::CdcMemory;
+            let (total_bytes, entity_count, event_count) = self.cdc_log.heap_memory_bytes();
+            usage.cdc = CdcMemory {
+                total_bytes,
+                entity_count,
+                event_count,
+            };
+        }
+
         usage.compute_total();
         usage
     }

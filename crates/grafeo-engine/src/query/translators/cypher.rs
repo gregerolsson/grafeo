@@ -1468,13 +1468,14 @@ impl CypherTranslator {
             } else if contains_aggregate(&item.expression) {
                 // Wrapped aggregate (e.g. `count(n) > 0 AS exists`)
                 needs_post_return = true;
-                let synthetic_alias = format!("_agg_{agg_counter}");
-                agg_counter += 1;
 
-                // Extract the innermost aggregate and build a substitute expression
-                let (agg_expr, substitute) =
-                    self.extract_wrapped_aggregate(&item.expression, &synthetic_alias)?;
-                aggregates.push(agg_expr);
+                // Extract all aggregates and build a substitute expression
+                // with variable references replacing each aggregate.
+                let substitute = self.extract_wrapped_aggregates(
+                    &item.expression,
+                    &mut agg_counter,
+                    &mut aggregates,
+                )?;
                 post_return_items.push(ReturnItem {
                     expression: substitute,
                     alias: item.alias.clone(),
@@ -1501,140 +1502,120 @@ impl CypherTranslator {
         }
     }
 
-    /// Extracts an aggregate from inside a wrapping expression and returns
-    /// both the aggregate and a substitute expression that references the
-    /// aggregate result by `synthetic_alias`.
+    /// Extracts all aggregates from inside a wrapping expression, assigning
+    /// each a synthetic alias (`_agg_{counter}`), and returns the expression
+    /// with every aggregate replaced by a variable reference to its alias.
     ///
-    /// For `count(n) > 0`, returns:
-    /// - aggregate: `count(n)` with alias `synthetic_alias`
-    /// - substitute: `Variable(synthetic_alias) > Literal(0)`
-    fn extract_wrapped_aggregate(
+    /// For `count(n) > 0`:
+    /// - pushes `count(n)` with alias `_agg_0` into `aggregates_out`
+    /// - returns `Variable("_agg_0") > Literal(0)`
+    ///
+    /// For `sum(x) / count(x)`:
+    /// - pushes `sum(x)` as `_agg_0` and `count(x)` as `_agg_1`
+    /// - returns `Variable("_agg_0") / Variable("_agg_1")`
+    fn extract_wrapped_aggregates(
         &self,
         expr: &ast::Expression,
-        synthetic_alias: &str,
-    ) -> Result<(AggregateExpr, LogicalExpression)> {
+        agg_counter: &mut u32,
+        aggregates_out: &mut Vec<AggregateExpr>,
+    ) -> Result<LogicalExpression> {
         match expr {
             ast::Expression::FunctionCall { name, args, .. } => {
                 // Check if the function itself is an aggregate
-                if let Some(agg) =
-                    self.try_extract_aggregate(expr, &Some(synthetic_alias.to_string()))?
-                {
-                    let substitute = LogicalExpression::Variable(synthetic_alias.to_string());
-                    return Ok((agg, substitute));
+                let alias = format!("_agg_{agg_counter}");
+                if let Some(agg) = self.try_extract_aggregate(expr, &Some(alias.clone()))? {
+                    *agg_counter += 1;
+                    aggregates_out.push(agg);
+                    return Ok(LogicalExpression::Variable(alias));
                 }
-                // Non-aggregate function wrapping an aggregate argument,
-                // e.g. size(collect(DISTINCT n.v)). Extract the inner aggregate
-                // and replace the argument with a variable reference.
-                for (i, arg) in args.iter().enumerate() {
+                // Non-aggregate function wrapping aggregate arguments,
+                // e.g. size(collect(DISTINCT n.v)). Recurse into each argument.
+                let mut translated_args = Vec::with_capacity(args.len());
+                for arg in args {
                     if contains_aggregate(arg) {
-                        let (agg, inner_sub) =
-                            self.extract_wrapped_aggregate(arg, synthetic_alias)?;
-                        // Rebuild the outer function call with the substituted argument
-                        let mut translated_args: Vec<LogicalExpression> = args
-                            .iter()
-                            .enumerate()
-                            .map(|(j, a)| {
-                                if j == i {
-                                    Ok(inner_sub.clone())
-                                } else {
-                                    self.translate_expression(a)
-                                }
-                            })
-                            .collect::<Result<_>>()?;
-                        let _ = &mut translated_args; // suppress unused_mut if needed
-                        let substitute = LogicalExpression::FunctionCall {
-                            name: name.clone(),
-                            args: translated_args,
-                            distinct: false,
-                        };
-                        return Ok((agg, substitute));
+                        translated_args.push(self.extract_wrapped_aggregates(
+                            arg,
+                            agg_counter,
+                            aggregates_out,
+                        )?);
+                    } else {
+                        translated_args.push(self.translate_expression(arg)?);
                     }
                 }
-                Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "contains_aggregate was true but no aggregate found in function arguments",
-                )))
+                Ok(LogicalExpression::FunctionCall {
+                    name: name.clone(),
+                    args: translated_args,
+                    distinct: false,
+                })
             }
             ast::Expression::Binary { left, op, right } => {
                 let binary_op = self.translate_binary_op(*op)?;
-                if contains_aggregate(left) {
-                    let (agg, left_sub) = self.extract_wrapped_aggregate(left, synthetic_alias)?;
-                    let right_expr = self.translate_expression(right)?;
-                    Ok((
-                        agg,
-                        LogicalExpression::Binary {
-                            left: Box::new(left_sub),
-                            op: binary_op,
-                            right: Box::new(right_expr),
-                        },
-                    ))
+                let left_sub = if contains_aggregate(left) {
+                    self.extract_wrapped_aggregates(left, agg_counter, aggregates_out)?
                 } else {
-                    let (agg, right_sub) =
-                        self.extract_wrapped_aggregate(right, synthetic_alias)?;
-                    let left_expr = self.translate_expression(left)?;
-                    Ok((
-                        agg,
-                        LogicalExpression::Binary {
-                            left: Box::new(left_expr),
-                            op: binary_op,
-                            right: Box::new(right_sub),
-                        },
-                    ))
-                }
+                    self.translate_expression(left)?
+                };
+                let right_sub = if contains_aggregate(right) {
+                    self.extract_wrapped_aggregates(right, agg_counter, aggregates_out)?
+                } else {
+                    self.translate_expression(right)?
+                };
+                Ok(LogicalExpression::Binary {
+                    left: Box::new(left_sub),
+                    op: binary_op,
+                    right: Box::new(right_sub),
+                })
             }
             ast::Expression::Unary { op, operand } => {
-                let (agg, sub) = self.extract_wrapped_aggregate(operand, synthetic_alias)?;
+                let sub = self.extract_wrapped_aggregates(operand, agg_counter, aggregates_out)?;
                 // Unary positive is identity: just return the operand
                 if *op == ast::UnaryOp::Pos {
-                    return Ok((agg, sub));
+                    return Ok(sub);
                 }
                 let unary_op = self.translate_unary_op(*op)?;
-                Ok((
-                    agg,
-                    LogicalExpression::Unary {
-                        op: unary_op,
-                        operand: Box::new(sub),
-                    },
-                ))
+                Ok(LogicalExpression::Unary {
+                    op: unary_op,
+                    operand: Box::new(sub),
+                })
             }
             ast::Expression::Case {
                 input,
                 whens,
                 else_clause,
             } => {
-                // Find the first aggregate inside the CASE branches and extract it.
-                // The aggregate is replaced by a variable reference; the rest of
-                // the CASE is translated normally.
+                let operand = match input {
+                    Some(inp) if contains_aggregate(inp) => Some(Box::new(
+                        self.extract_wrapped_aggregates(inp, agg_counter, aggregates_out)?,
+                    )),
+                    Some(inp) => Some(Box::new(self.translate_expression(inp)?)),
+                    None => None,
+                };
+                let mut when_clauses = Vec::with_capacity(whens.len());
                 for (cond, then) in whens {
-                    if contains_aggregate(cond) {
-                        let (agg, _) = self.extract_wrapped_aggregate(cond, synthetic_alias)?;
-                        let full_case = self.translate_expression(expr)?;
-                        return Ok((agg, full_case));
-                    }
-                    if contains_aggregate(then) {
-                        let (agg, _) = self.extract_wrapped_aggregate(then, synthetic_alias)?;
-                        let full_case = self.translate_expression(expr)?;
-                        return Ok((agg, full_case));
-                    }
+                    let cond_expr = if contains_aggregate(cond) {
+                        self.extract_wrapped_aggregates(cond, agg_counter, aggregates_out)?
+                    } else {
+                        self.translate_expression(cond)?
+                    };
+                    let then_expr = if contains_aggregate(then) {
+                        self.extract_wrapped_aggregates(then, agg_counter, aggregates_out)?
+                    } else {
+                        self.translate_expression(then)?
+                    };
+                    when_clauses.push((cond_expr, then_expr));
                 }
-                if let Some(el) = else_clause
-                    && contains_aggregate(el)
-                {
-                    let (agg, _) = self.extract_wrapped_aggregate(el, synthetic_alias)?;
-                    let full_case = self.translate_expression(expr)?;
-                    return Ok((agg, full_case));
-                }
-                if let Some(inp) = input
-                    && contains_aggregate(inp)
-                {
-                    let (agg, _) = self.extract_wrapped_aggregate(inp, synthetic_alias)?;
-                    let full_case = self.translate_expression(expr)?;
-                    return Ok((agg, full_case));
-                }
-                Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "Unsupported expression wrapping an aggregate",
-                )))
+                let else_expr = match else_clause {
+                    Some(el) if contains_aggregate(el) => Some(Box::new(
+                        self.extract_wrapped_aggregates(el, agg_counter, aggregates_out)?,
+                    )),
+                    Some(el) => Some(Box::new(self.translate_expression(el)?)),
+                    None => None,
+                };
+                Ok(LogicalExpression::Case {
+                    operand,
+                    when_clauses,
+                    else_clause: else_expr,
+                })
             }
             _ => Err(Error::Query(QueryError::new(
                 QueryErrorKind::Semantic,
