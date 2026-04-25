@@ -19,7 +19,13 @@ pub mod directory;
 #[cfg(feature = "wal")]
 pub mod mmap;
 
+#[cfg(feature = "wal")]
+pub mod page_fetcher;
+
 pub use directory::SectionDirectory;
 
 #[cfg(feature = "wal")]
 pub use mmap::MmapSection;
+
+#[cfg(feature = "wal")]
+pub use page_fetcher::{AccessHint, MmapPageFetcher, PageFetcher};
