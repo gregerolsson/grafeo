@@ -578,37 +578,28 @@ impl super::Planner {
             })
             .collect();
 
+        // ON CREATE / ON MATCH SET on a MERGE relationship may reference the
+        // edge variable itself: build an augmented scope that includes it.
+        let mut action_scope_columns = columns.clone();
+        action_scope_columns.push(merge_rel.variable.clone());
+
         let on_create_properties: Vec<(String, PropertySource)> = merge_rel
             .on_create
             .iter()
             .map(|(name, expr)| {
-                let source = self
-                    .expression_to_property_source(expr, &columns)
-                    .unwrap_or_else(|_| {
-                        Self::try_fold_expression(expr).map_or(
-                            PropertySource::Constant(Value::Null),
-                            PropertySource::Constant,
-                        )
-                    });
-                (name.clone(), source)
+                let source = self.merge_action_property_source(expr, &action_scope_columns)?;
+                Ok::<_, Error>((name.clone(), source))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         let on_match_properties: Vec<(String, PropertySource)> = merge_rel
             .on_match
             .iter()
             .map(|(name, expr)| {
-                let source = self
-                    .expression_to_property_source(expr, &columns)
-                    .unwrap_or_else(|_| {
-                        Self::try_fold_expression(expr).map_or(
-                            PropertySource::Constant(Value::Null),
-                            PropertySource::Constant,
-                        )
-                    });
-                (name.clone(), source)
+                let source = self.merge_action_property_source(expr, &action_scope_columns)?;
+                Ok::<_, Error>((name.clone(), source))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         // Add the edge variable to output columns and track it as an edge
         let edge_output_column = columns.len();
@@ -638,7 +629,9 @@ impl super::Planner {
 
         let mut merge_rel_op =
             MergeRelationshipOperator::new(self.write_store()?, input_op, config)
-                .with_transaction_context(self.viewing_epoch, self.transaction_id);
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                .with_search_store(Arc::clone(&self.store))
+                .with_session_context(self.session_context.clone());
 
         if let Some(ref validator) = self.validator {
             merge_rel_op = merge_rel_op.with_validator(Arc::clone(validator));
