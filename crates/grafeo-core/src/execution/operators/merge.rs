@@ -312,6 +312,39 @@ impl MergeOperator {
         merged
     }
 
+    /// Writes a freshly-created node's properties through the versioned
+    /// API when the operator is participating in a transaction, so that
+    /// rollback can undo them via the MVCC undo log. Falls back to the
+    /// non-versioned setter only when no transaction context is attached
+    /// (test paths and standalone operator construction).
+    fn write_node_props(&self, id: NodeId, props: &[(PropertyKey, Value)]) {
+        if let Some(tid) = self.transaction_id {
+            for (key, value) in props {
+                self.store
+                    .set_node_property_versioned(id, key.as_str(), value.clone(), tid);
+            }
+        } else {
+            for (key, value) in props {
+                self.store
+                    .set_node_property(id, key.as_str(), value.clone());
+            }
+        }
+    }
+
+    /// Creates a node through the versioned API so the create itself is
+    /// tagged with the operator's transaction (when one is attached) and
+    /// can be undone by transaction rollback. The non-versioned
+    /// `create_node_with_props` would tag the create with
+    /// [`TransactionId::SYSTEM`], leaving the node visible after the
+    /// surrounding session transaction rolls back.
+    fn store_create_node(&self, label_refs: &[&str]) -> NodeId {
+        let epoch = self
+            .viewing_epoch
+            .unwrap_or_else(|| self.store.current_epoch());
+        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
+        self.store.create_node_versioned(label_refs, epoch, tx)
+    }
+
     /// Creates a new node with the specified labels and resolved properties.
     fn create_node(
         &self,
@@ -336,7 +369,9 @@ impl MergeOperator {
             .collect();
 
         let labels: Vec<&str> = self.config.labels.iter().map(String::as_str).collect();
-        Ok(self.store.create_node_with_props(&labels, &prop_pairs))
+        let id = self.store_create_node(&labels);
+        self.write_node_props(id, &prop_pairs);
+        Ok(id)
     }
 
     /// Phase one of the two-phase create path: creates the node from match
@@ -345,6 +380,11 @@ impl MergeOperator {
     /// satisfy NOT NULL / PRIMARY KEY requirements that match props alone
     /// would fail). Per-property type checks and uniqueness checks for the
     /// match properties still run here.
+    ///
+    /// Both the create and the property writes go through the versioned
+    /// API, so a failure in phase two (or in `apply_on_match`) is undone
+    /// when the surrounding session transaction rolls back. Without that,
+    /// the node would persist as an orphan visible to later queries.
     fn create_node_phase_one(
         &self,
         resolved_match_props: &[(String, Value)],
@@ -363,7 +403,9 @@ impl MergeOperator {
             .collect();
 
         let labels: Vec<&str> = self.config.labels.iter().map(String::as_str).collect();
-        Ok(self.store.create_node_with_props(&labels, &prop_pairs))
+        let id = self.store_create_node(&labels);
+        self.write_node_props(id, &prop_pairs);
+        Ok(id)
     }
 
     /// Phase two of the two-phase create path: validates ON CREATE
@@ -756,6 +798,35 @@ impl MergeRelationshipOperator {
         None
     }
 
+    /// Versioned-API edge create. See [`MergeOperator::store_create_node`]
+    /// for the rationale: the create itself must be tagged with the
+    /// operator's transaction so that rollback can undo it.
+    fn store_create_edge(&self, src: NodeId, dst: NodeId) -> EdgeId {
+        let epoch = self
+            .viewing_epoch
+            .unwrap_or_else(|| self.store.current_epoch());
+        let tx = self.transaction_id.unwrap_or(TransactionId::SYSTEM);
+        self.store
+            .create_edge_versioned(src, dst, &self.config.edge_type, epoch, tx)
+    }
+
+    /// Writes a freshly-created edge's properties through the versioned
+    /// setter when a transaction is attached, mirroring
+    /// [`MergeOperator::write_node_props`].
+    fn write_edge_props(&self, id: EdgeId, props: &[(PropertyKey, Value)]) {
+        if let Some(tid) = self.transaction_id {
+            for (key, value) in props {
+                self.store
+                    .set_edge_property_versioned(id, key.as_str(), value.clone(), tid);
+            }
+        } else {
+            for (key, value) in props {
+                self.store
+                    .set_edge_property(id, key.as_str(), value.clone());
+            }
+        }
+    }
+
     /// Creates a new edge with resolved match and on_create properties.
     fn create_edge(
         &self,
@@ -781,15 +852,19 @@ impl MergeRelationshipOperator {
             .map(|(k, v)| (PropertyKey::new(k.as_str()), v))
             .collect();
 
-        Ok(self
-            .store
-            .create_edge_with_props(src, dst, &self.config.edge_type, &prop_pairs))
+        let id = self.store_create_edge(src, dst);
+        self.write_edge_props(id, &prop_pairs);
+        Ok(id)
     }
 
     /// Phase one of the two-phase edge create path: validates per-property
     /// types on match props and writes the edge, deferring the completeness
     /// check until ON CREATE expression properties are resolved. See
     /// [`MergeOperator::create_node_phase_one`] for the rationale.
+    ///
+    /// Both the create and the property writes go through the versioned
+    /// API, so a failure in phase two (or in `apply_on_match_edge`) is
+    /// undone when the surrounding session transaction rolls back.
     fn create_edge_phase_one(
         &self,
         src: NodeId,
@@ -808,9 +883,9 @@ impl MergeRelationshipOperator {
             .map(|(k, v)| (PropertyKey::new(k.as_str()), v.clone()))
             .collect();
 
-        Ok(self
-            .store
-            .create_edge_with_props(src, dst, &self.config.edge_type, &prop_pairs))
+        let id = self.store_create_edge(src, dst);
+        self.write_edge_props(id, &prop_pairs);
+        Ok(id)
     }
 
     /// Phase two of the two-phase edge create path: validates ON CREATE
