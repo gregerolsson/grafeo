@@ -6,12 +6,14 @@
 //! - `DeleteNodeOperator`: Deletes nodes
 //! - `DeleteEdgeOperator`: Deletes edges
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::types::{
     EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
 };
 
+use super::filter::FilterExpression;
 use super::{Operator, OperatorError, OperatorResult, SharedWriteTracker};
 use crate::execution::chunk::DataChunkBuilder;
 use crate::graph::{GraphStore, GraphStoreMut};
@@ -169,10 +171,29 @@ pub enum PropertySource {
         /// The property name to extract.
         property: String,
     },
+    /// A runtime expression that may reference a variable not present in the
+    /// caller's input chunk. Used by `MERGE ... ON CREATE/MATCH SET` so that
+    /// expressions like `coalesce(c.description, 'fallback')` can reference
+    /// the MERGE variable, which only exists after the merge resolves.
+    ///
+    /// Generic operators do not know how to evaluate this variant: the default
+    /// `resolve` implementation returns `Value::Null`. Operators that produce
+    /// an augmented row (e.g., MERGE) must intercept this variant before
+    /// calling `resolve`.
+    Expression {
+        /// The expression to evaluate against an augmented row.
+        expr: Box<FilterExpression>,
+        /// Variable-name to column-index map for the augmented row layout.
+        variable_columns: HashMap<String, usize>,
+    },
 }
 
 impl PropertySource {
     /// Resolves a property value from a data chunk row.
+    ///
+    /// Returns `Value::Null` for [`PropertySource::Expression`]: those sources
+    /// require an operator-specific augmented row and must be intercepted by
+    /// the producing operator (currently the MERGE node and edge operators).
     pub fn resolve(
         &self,
         chunk: &crate::execution::chunk::DataChunk,
@@ -207,6 +228,9 @@ impl PropertySource {
                     Value::Null
                 }
             }
+            // Expression sources require an augmented row built by the producer.
+            // Reaching this branch means an operator forgot to intercept it.
+            PropertySource::Expression { .. } => Value::Null,
         }
     }
 }
