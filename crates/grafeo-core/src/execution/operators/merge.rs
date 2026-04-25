@@ -173,8 +173,7 @@ impl MergeOperator {
         row: usize,
         merged_node: NodeId,
     ) -> DataChunk {
-        let mut builder =
-            DataChunkBuilder::with_capacity(&self.config.output_schema, 1);
+        let mut builder = DataChunkBuilder::with_capacity(&self.config.output_schema, 1);
         if let Some(input) = chunk {
             for col_idx in 0..input.column_count() {
                 let val = input
@@ -238,8 +237,7 @@ impl MergeOperator {
                     )
                     .with_session_context(self.session_context.clone());
                     if let Some(epoch) = self.viewing_epoch {
-                        predicate =
-                            predicate.with_transaction_context(epoch, self.transaction_id);
+                        predicate = predicate.with_transaction_context(epoch, self.transaction_id);
                     }
                     predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
                 }
@@ -596,8 +594,7 @@ impl MergeRelationshipOperator {
         row: usize,
         merged_edge: EdgeId,
     ) -> DataChunk {
-        let mut builder =
-            DataChunkBuilder::with_capacity(&self.config.output_schema, 1);
+        let mut builder = DataChunkBuilder::with_capacity(&self.config.output_schema, 1);
         for col_idx in 0..chunk.column_count() {
             let val = chunk
                 .column(col_idx)
@@ -654,8 +651,7 @@ impl MergeRelationshipOperator {
                     )
                     .with_session_context(self.session_context.clone());
                     if let Some(epoch) = self.viewing_epoch {
-                        predicate =
-                            predicate.with_transaction_context(epoch, self.transaction_id);
+                        predicate = predicate.with_transaction_context(epoch, self.transaction_id);
                     }
                     predicate.eval_at(&augmented, 0).unwrap_or(Value::Null)
                 }
@@ -1136,8 +1132,7 @@ mod tests {
 
         let lpg = Arc::new(LpgStore::new().unwrap());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> =
-            Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
         // Pre-create the matching node so the MERGE goes into the ON MATCH branch.
         let id = store.create_node_with_props(
@@ -1204,8 +1199,7 @@ mod tests {
 
         let lpg = Arc::new(LpgStore::new().unwrap());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> =
-            Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
         let coalesce = FilterExpression::FunctionCall {
             name: "coalesce".to_string(),

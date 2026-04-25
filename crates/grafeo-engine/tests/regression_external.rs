@@ -242,9 +242,7 @@ mod merge_action_self_reference {
             )
             .unwrap();
         }
-        let r = s
-            .execute("MATCH (n:Counter {id: 1}) RETURN n.cnt")
-            .unwrap();
+        let r = s.execute("MATCH (n:Counter {id: 1}) RETURN n.cnt").unwrap();
         assert_eq!(r.rows()[0][0], Value::Int64(3));
     }
 

@@ -2,6 +2,12 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.5.42] - Unreleased
+
+### Fixed
+
+- **`MERGE ... ON CREATE/ON MATCH SET` could not reference the MERGE variable** (#317): expressions like `MERGE (c:Category {name: 'Electronics'}) ON MATCH SET c.description = coalesce(c.description, 'fallback')` failed at the binder with `Undefined variable 'c' in property access`, and any non-trivial action expression that did pass through the binder was silently lowered to `Constant(Value::Null)` by the LPG planner. The binder now scopes the MERGE variable into ON CREATE / ON MATCH (per ISO/IEC 39075:2024 §15.5) while keeping it out of the pattern's own match properties; the planner adds a runtime `PropertySource::Expression` source for action expressions that need it; the merge node and relationship operators evaluate those expressions against an augmented row containing the merged entity (created up-front for ON CREATE so the expression can see the new id). Reported by [@Fraenkstan](https://github.com/Fraenkstan).
+
 ## [0.5.41] - 2026-04-24
 
 Compact-store correctness (post-`compact()` read path, signed integer round-trip), search procedures, disk-backed compact base, silent-hybrid-on-persistent-DB fix, memory introspection for RDF and CDC, and test-infrastructure hardening (proptest, persistent spec variants, CodSpeed CI).
