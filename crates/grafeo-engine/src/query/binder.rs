@@ -386,19 +386,14 @@ impl Binder {
             LogicalOperator::Merge(merge) => {
                 // First bind the input
                 self.bind_operator(&merge.input)?;
-                // Validate the match property expressions
+                // Match properties are validated against the outer scope: ISO/IEC 39075:2024
+                // §15.5 forbids the MERGE pattern from referencing the variable it introduces.
                 for (_, expr) in &merge.match_properties {
                     self.validate_expression(expr)?;
                 }
-                // Validate the ON CREATE property expressions
-                for (_, expr) in &merge.on_create {
-                    self.validate_expression(expr)?;
-                }
-                // Validate the ON MATCH property expressions
-                for (_, expr) in &merge.on_match {
-                    self.validate_expression(expr)?;
-                }
-                // MERGE introduces a new variable
+                // The MERGE variable is in scope inside ON CREATE / ON MATCH SET, so add it
+                // before validating those action expressions. Without this, expressions like
+                // `ON MATCH SET n.x = coalesce(n.x, 0)` failed with `Undefined variable 'n'`.
                 self.context.add_variable(
                     merge.variable.clone(),
                     VariableInfo {
@@ -408,6 +403,12 @@ impl Binder {
                         is_edge: false,
                     },
                 );
+                for (_, expr) in &merge.on_create {
+                    self.validate_expression(expr)?;
+                }
+                for (_, expr) in &merge.on_match {
+                    self.validate_expression(expr)?;
+                }
                 Ok(())
             }
             LogicalOperator::MergeRelationship(merge_rel) => {
@@ -427,16 +428,11 @@ impl Binder {
                         " in MERGE relationship target",
                     ));
                 }
+                // Match properties cannot reference the edge variable (same rule as MERGE node).
                 for (_, expr) in &merge_rel.match_properties {
                     self.validate_expression(expr)?;
                 }
-                for (_, expr) in &merge_rel.on_create {
-                    self.validate_expression(expr)?;
-                }
-                for (_, expr) in &merge_rel.on_match {
-                    self.validate_expression(expr)?;
-                }
-                // MERGE relationship introduces the edge variable
+                // Edge variable is in scope inside ON CREATE / ON MATCH SET.
                 self.context.add_variable(
                     merge_rel.variable.clone(),
                     VariableInfo {
@@ -446,6 +442,12 @@ impl Binder {
                         is_edge: true,
                     },
                 );
+                for (_, expr) in &merge_rel.on_create {
+                    self.validate_expression(expr)?;
+                }
+                for (_, expr) in &merge_rel.on_match {
+                    self.validate_expression(expr)?;
+                }
                 Ok(())
             }
             LogicalOperator::AddLabel(add_label) => {
