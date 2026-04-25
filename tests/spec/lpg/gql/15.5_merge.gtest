@@ -148,3 +148,65 @@ tests:
       rows:
         - [1, updated]
         - [2, new]
+
+  # ---------------------------------------------------------------------------
+  # ON CREATE / ON MATCH SET that reference the MERGE variable.
+  # GrafeoDB/grafeo#317. ISO/IEC 39075:2024 §15.5: the variable bound by the
+  # MERGE pattern is in scope inside ON CREATE / ON MATCH SET, so expressions
+  # like `coalesce(c.description, 'fallback')` must evaluate against the
+  # merged node, not error with `Undefined variable 'c'`.
+  # ---------------------------------------------------------------------------
+
+  - name: merge_on_create_set_self_reference_default
+    # Reduced repro from issue #317: ON CREATE coalesces over a property that
+    # is absent on the freshly-created node, so the fallback branch wins.
+    statements:
+      - "MERGE (c:Category {name: 'Electronics'}) ON CREATE SET c.description = coalesce(c.description, 'Consumer electronics')"
+      - "MATCH (c:Category {name: 'Electronics'}) RETURN c.description"
+    expect:
+      rows:
+        - [Consumer electronics]
+
+  - name: merge_on_match_set_self_reference_preserves_existing
+    # Issue #317 follow-up: rerunning MERGE on an existing node with a
+    # coalesce-over-self ON MATCH must keep the prior description.
+    setup:
+      - "INSERT (:Category {name: 'Electronics', description: 'Consumer electronics'})"
+    statements:
+      - "MERGE (c:Category {name: 'Electronics'}) ON CREATE SET c.description = 'unexpected' ON MATCH SET c.description = coalesce(c.description, 'fallback')"
+      - "MATCH (c:Category {name: 'Electronics'}) RETURN c.description"
+    expect:
+      rows:
+        - [Consumer electronics]
+
+  - name: merge_on_match_set_self_reference_falls_back_when_null
+    # ON MATCH coalesce(c.description, 'fallback') must fall back when the
+    # matched node has no description property.
+    setup:
+      - "INSERT (:Category {name: 'Books'})"
+    statements:
+      - "MERGE (c:Category {name: 'Books'}) ON MATCH SET c.description = coalesce(c.description, 'Books and reading')"
+      - "MATCH (c:Category {name: 'Books'}) RETURN c.description"
+    expect:
+      rows:
+        - [Books and reading]
+
+  - name: merge_on_create_self_reference_arithmetic
+    # Reach for a non-coalesce expression to exercise the runtime evaluator.
+    statements:
+      - "MERGE (n:Item {val: 19}) ON CREATE SET n.score = (n.val + 81) * 3"
+      - "MATCH (n:Item {val: 19}) RETURN n.score"
+    expect:
+      rows:
+        - [300]
+
+  - name: merge_on_match_increment_self_property
+    # Counter pattern: ON CREATE seeds, ON MATCH increments a self-reference.
+    statements:
+      - "MERGE (n:Counter {id: 1}) ON CREATE SET n.cnt = 1 ON MATCH SET n.cnt = n.cnt + 1"
+      - "MERGE (n:Counter {id: 1}) ON CREATE SET n.cnt = 1 ON MATCH SET n.cnt = n.cnt + 1"
+      - "MERGE (n:Counter {id: 1}) ON CREATE SET n.cnt = 1 ON MATCH SET n.cnt = n.cnt + 1"
+      - "MATCH (n:Counter {id: 1}) RETURN n.cnt"
+    expect:
+      rows:
+        - [3]
