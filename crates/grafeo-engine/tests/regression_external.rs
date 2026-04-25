@@ -260,6 +260,41 @@ mod merge_action_self_reference {
     }
 
     #[test]
+    fn on_create_self_reference_resolves_against_merged_node_when_variable_is_pre_bound() {
+        // Regression for the planner duplicate-column resolution bug:
+        // when MERGE re-uses a variable already bound by an upstream
+        // MATCH, the action-scope columns vector contains that variable
+        // twice (the bound copy AND the appended merge column). Variable
+        // references in ON CREATE / ON MATCH expressions must resolve to
+        // the appended (output) column whose chunk slot the operator
+        // populates with the freshly merged node id; the older bound
+        // column may still hold a different (pre-merge) node and cause
+        // expressions like coalesce(n.x, ...) to read stale data.
+        let db = db();
+        let s = db.session();
+        // Pre-existing :Old node carries x=99. The MERGE below cannot
+        // attach to it because the pattern requires a :Tag label.
+        s.execute("INSERT (:Old {x: 99})").unwrap();
+        s.execute(
+            "MATCH (n:Old) \
+             MERGE (n:Tag {val: 1}) \
+             ON CREATE SET n.copy_x = coalesce(n.x, -1)",
+        )
+        .unwrap();
+        // The newly-created Tag node had no `x`, so the expression must
+        // see NULL there and fall back to -1. If resolution picks the
+        // pre-bound :Old column instead, the value would be 99.
+        let r = s
+            .execute("MATCH (t:Tag {val: 1}) RETURN t.copy_x")
+            .unwrap();
+        assert_eq!(
+            r.rows()[0][0],
+            Value::Int64(-1),
+            "ON CREATE expression must read the merged Tag node, not the pre-bound :Old node"
+        );
+    }
+
+    #[test]
     fn merge_relationship_on_match_can_reference_edge_variable() {
         // The same scoping rule applies to MERGE on a relationship pattern.
         let db = db();
