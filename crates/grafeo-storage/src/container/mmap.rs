@@ -10,6 +10,8 @@
 
 use grafeo_common::storage::SectionType;
 
+use super::page_fetcher::AccessHint;
+
 /// A read-only memory-mapped view of a section in the `.grafeo` container.
 ///
 /// Created by [`GrafeoFileManager::mmap_section`](crate::file::GrafeoFileManager::mmap_section).
@@ -80,6 +82,30 @@ impl MmapSection {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.mmap.is_empty()
+    }
+
+    /// Advise the OS about the expected access pattern for a range.
+    ///
+    /// On Unix this delegates to `posix_madvise` via `memmap2`. On Windows
+    /// (and other platforms without a portable equivalent) it is a no-op.
+    /// Out-of-range arguments and underlying errors are silently ignored:
+    /// advice is a hint, not a contract.
+    pub fn advise(&self, offset: usize, len: usize, hint: AccessHint) {
+        // On Windows there is no portable madvise without `unsafe` FFI,
+        // so this is a no-op. The args are intentionally unused there.
+        let _ = (offset, len, hint);
+        #[cfg(unix)]
+        {
+            use memmap2::Advice;
+            let advice = match hint {
+                AccessHint::Sequential => Advice::Sequential,
+                AccessHint::Random => Advice::Random,
+                AccessHint::WillNeed => Advice::WillNeed,
+                AccessHint::DontNeed => Advice::DontNeed,
+            };
+            // Out-of-range or otherwise failing advise is best-effort.
+            let _ = self.mmap.advise_range(advice, offset, len);
+        }
     }
 }
 
