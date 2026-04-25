@@ -1,8 +1,8 @@
 //! Page-fetching abstraction for tiered storage.
 //!
-//! Provides an indirection layer over [`MmapSection`](super::mmap::MmapSection)
-//! so the underlying page-fetch mechanism (mmap today; vmcache or an explicit
-//! pager in the future) can be swapped without touching consumers.
+//! Provides an indirection layer over [`MmapSection`] so the underlying
+//! page-fetch mechanism (mmap today; vmcache or an explicit pager in the
+//! future) can be swapped without touching consumers.
 //!
 //! Per the disk-storage decision record (D1):
 //! - Mmap is the v1 implementation.
@@ -145,8 +145,11 @@ mod tests {
 
     #[test]
     fn test_mmap_page_fetcher_roundtrip() {
-        // Build deterministic 4 KiB payload: byte i = (i % 251) as u8.
-        let payload: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        // Build deterministic 4 KiB payload: byte i = (i % 251).
+        // try_from never fails because (i % 251) < u8::MAX.
+        let payload: Vec<u8> = (0u32..4096)
+            .map(|i| u8::try_from(i % 251).expect("i % 251 fits in u8"))
+            .collect();
         let section = Arc::new(make_mmap_section(&payload));
         let fetcher = MmapPageFetcher::new(section);
 
@@ -171,9 +174,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
 
         // Fetch with offset+len overflow → InvalidInput.
-        let err = fetcher
-            .fetch(usize::MAX, 1)
-            .expect_err("expected overflow");
+        let err = fetcher.fetch(usize::MAX, 1).expect_err("expected overflow");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
