@@ -295,21 +295,34 @@ impl MergeOperator {
         None
     }
 
+    /// Merges match and ON CREATE property lists, with ON CREATE values
+    /// overriding match values for the same key.
+    fn merge_node_props(
+        resolved_match_props: &[(String, Value)],
+        resolved_create_props: &[(String, Value)],
+    ) -> Vec<(String, Value)> {
+        let mut merged: Vec<(String, Value)> = resolved_match_props.to_vec();
+        for (k, v) in resolved_create_props {
+            if let Some(existing) = merged.iter_mut().find(|(key, _)| key == k) {
+                existing.1 = v.clone();
+            } else {
+                merged.push((k.clone(), v.clone()));
+            }
+        }
+        merged
+    }
+
     /// Creates a new node with the specified labels and resolved properties.
     fn create_node(
         &self,
         resolved_match_props: &[(String, Value)],
         resolved_create_props: &[(String, Value)],
     ) -> Result<NodeId, super::OperatorError> {
+        let all_props = Self::merge_node_props(resolved_match_props, resolved_create_props);
+
         // Validate constraints before creating the node
         if let Some(ref validator) = self.validator {
             validator.validate_node_labels_allowed(&self.config.labels)?;
-
-            let all_props: Vec<(String, Value)> = resolved_match_props
-                .iter()
-                .chain(resolved_create_props.iter())
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
             for (name, value) in &all_props {
                 validator.validate_node_property(&self.config.labels, name, value)?;
                 validator.check_unique_node_property(&self.config.labels, name, value)?;
@@ -317,21 +330,64 @@ impl MergeOperator {
             validator.validate_node_complete(&self.config.labels, &all_props)?;
         }
 
-        let mut all_props: Vec<(PropertyKey, Value)> = resolved_match_props
+        let prop_pairs: Vec<(PropertyKey, Value)> = all_props
+            .into_iter()
+            .map(|(k, v)| (PropertyKey::new(k.as_str()), v))
+            .collect();
+
+        let labels: Vec<&str> = self.config.labels.iter().map(String::as_str).collect();
+        Ok(self.store.create_node_with_props(&labels, &prop_pairs))
+    }
+
+    /// Phase one of the two-phase create path: creates the node from match
+    /// properties only, deferring the completeness check until ON CREATE
+    /// expression properties are resolved (since those properties may
+    /// satisfy NOT NULL / PRIMARY KEY requirements that match props alone
+    /// would fail). Per-property type checks and uniqueness checks for the
+    /// match properties still run here.
+    fn create_node_phase_one(
+        &self,
+        resolved_match_props: &[(String, Value)],
+    ) -> Result<NodeId, super::OperatorError> {
+        if let Some(ref validator) = self.validator {
+            validator.validate_node_labels_allowed(&self.config.labels)?;
+            for (name, value) in resolved_match_props {
+                validator.validate_node_property(&self.config.labels, name, value)?;
+                validator.check_unique_node_property(&self.config.labels, name, value)?;
+            }
+        }
+
+        let prop_pairs: Vec<(PropertyKey, Value)> = resolved_match_props
             .iter()
             .map(|(k, v)| (PropertyKey::new(k.as_str()), v.clone()))
             .collect();
 
-        for (k, v) in resolved_create_props {
-            if let Some(existing) = all_props.iter_mut().find(|(key, _)| key.as_str() == k) {
-                existing.1 = v.clone();
-            } else {
-                all_props.push((PropertyKey::new(k.as_str()), v.clone()));
-            }
-        }
-
         let labels: Vec<&str> = self.config.labels.iter().map(String::as_str).collect();
-        Ok(self.store.create_node_with_props(&labels, &all_props))
+        Ok(self.store.create_node_with_props(&labels, &prop_pairs))
+    }
+
+    /// Phase two of the two-phase create path: validates ON CREATE
+    /// properties (type, uniqueness) and the full property set
+    /// (completeness) after expressions have been evaluated against the
+    /// freshly created node, but before the values are written. The just
+    /// created node holds only match properties at this point, so a
+    /// uniqueness check on an ON CREATE property cannot conflict with the
+    /// node itself.
+    fn validate_on_create_phase_two(
+        &self,
+        resolved_match_props: &[(String, Value)],
+        resolved_create_props: &[(String, Value)],
+    ) -> Result<(), super::OperatorError> {
+        let Some(ref validator) = self.validator else {
+            return Ok(());
+        };
+        for (name, value) in resolved_create_props {
+            validator.validate_node_property(&self.config.labels, name, value)?;
+            validator.check_unique_node_property(&self.config.labels, name, value)?;
+        }
+        let all_props = Self::merge_node_props(resolved_match_props, resolved_create_props);
+        validator.validate_node_complete(&self.config.labels, &all_props)?;
+        Ok(())
     }
 
     /// Finds or creates a matching node for a single row, applying ON MATCH/ON CREATE.
@@ -361,14 +417,20 @@ impl MergeOperator {
             // Two-phase create: build the node from match properties first so
             // the new id exists, then evaluate ON CREATE against an augmented
             // row referencing it, then write those properties via the same
-            // path used for ON MATCH SET.
-            let new_id = self.create_node(&resolved_match, &[])?;
+            // path used for ON MATCH SET. Completeness and uniqueness on the
+            // ON CREATE properties are validated between phases via
+            // `validate_on_create_phase_two` so neither premature rejection
+            // (when ON CREATE supplies a NOT NULL / PRIMARY KEY property) nor
+            // silent constraint bypass (UNIQUE on an ON CREATE property)
+            // occurs.
+            let new_id = self.create_node_phase_one(&resolved_match)?;
             let resolved_on_create = self.resolve_action_properties(
                 &self.config.on_create_properties,
                 chunk,
                 row,
                 new_id,
             )?;
+            self.validate_on_create_phase_two(&resolved_match, &resolved_on_create)?;
             self.apply_on_match(new_id, &resolved_on_create)?;
             Ok(new_id)
         } else {
@@ -702,37 +764,71 @@ impl MergeRelationshipOperator {
         resolved_match_props: &[(String, Value)],
         resolved_create_props: &[(String, Value)],
     ) -> Result<EdgeId, super::OperatorError> {
+        let all_props = MergeOperator::merge_node_props(resolved_match_props, resolved_create_props);
+
         // Validate constraints before creating the edge
         if let Some(ref validator) = self.validator {
             validator.validate_edge_type_allowed(&self.config.edge_type)?;
-
-            let all_props: Vec<(String, Value)> = resolved_match_props
-                .iter()
-                .chain(resolved_create_props.iter())
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
             for (name, value) in &all_props {
                 validator.validate_edge_property(&self.config.edge_type, name, value)?;
             }
             validator.validate_edge_complete(&self.config.edge_type, &all_props)?;
         }
 
-        let mut all_props: Vec<(PropertyKey, Value)> = resolved_match_props
+        let prop_pairs: Vec<(PropertyKey, Value)> = all_props
+            .into_iter()
+            .map(|(k, v)| (PropertyKey::new(k.as_str()), v))
+            .collect();
+
+        Ok(self
+            .store
+            .create_edge_with_props(src, dst, &self.config.edge_type, &prop_pairs))
+    }
+
+    /// Phase one of the two-phase edge create path: validates per-property
+    /// types on match props and writes the edge, deferring the completeness
+    /// check until ON CREATE expression properties are resolved. See
+    /// [`MergeOperator::create_node_phase_one`] for the rationale.
+    fn create_edge_phase_one(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        resolved_match_props: &[(String, Value)],
+    ) -> Result<EdgeId, super::OperatorError> {
+        if let Some(ref validator) = self.validator {
+            validator.validate_edge_type_allowed(&self.config.edge_type)?;
+            for (name, value) in resolved_match_props {
+                validator.validate_edge_property(&self.config.edge_type, name, value)?;
+            }
+        }
+
+        let prop_pairs: Vec<(PropertyKey, Value)> = resolved_match_props
             .iter()
             .map(|(k, v)| (PropertyKey::new(k.as_str()), v.clone()))
             .collect();
 
-        for (k, v) in resolved_create_props {
-            if let Some(existing) = all_props.iter_mut().find(|(key, _)| key.as_str() == k) {
-                existing.1 = v.clone();
-            } else {
-                all_props.push((PropertyKey::new(k.as_str()), v.clone()));
-            }
-        }
-
         Ok(self
             .store
-            .create_edge_with_props(src, dst, &self.config.edge_type, &all_props))
+            .create_edge_with_props(src, dst, &self.config.edge_type, &prop_pairs))
+    }
+
+    /// Phase two of the two-phase edge create path: validates ON CREATE
+    /// edge properties and the full property set for completeness after
+    /// expressions have been evaluated against the freshly created edge.
+    fn validate_on_create_edge_phase_two(
+        &self,
+        resolved_match_props: &[(String, Value)],
+        resolved_create_props: &[(String, Value)],
+    ) -> Result<(), super::OperatorError> {
+        let Some(ref validator) = self.validator else {
+            return Ok(());
+        };
+        for (name, value) in resolved_create_props {
+            validator.validate_edge_property(&self.config.edge_type, name, value)?;
+        }
+        let all_props = MergeOperator::merge_node_props(resolved_match_props, resolved_create_props);
+        validator.validate_edge_complete(&self.config.edge_type, &all_props)?;
+        Ok(())
     }
 
     /// Applies ON MATCH properties to an existing edge.
@@ -808,13 +904,22 @@ impl Operator for MergeRelationshipOperator {
                     self.apply_on_match_edge(existing, &resolved_on_match)?;
                     existing
                 } else if MergeOperator::has_expression_source(&self.config.on_create_properties) {
-                    // Two-phase create so ON CREATE expressions can reference the new edge.
-                    let new_id = self.create_edge(src_val, dst_val, &resolved_match, &[])?;
+                    // Two-phase create so ON CREATE expressions can reference
+                    // the new edge. Completeness validation is deferred to
+                    // `validate_on_create_edge_phase_two` so an ON CREATE
+                    // property is allowed to satisfy a NOT NULL constraint
+                    // that match properties alone would fail.
+                    let new_id =
+                        self.create_edge_phase_one(src_val, dst_val, &resolved_match)?;
                     let resolved_on_create = self.resolve_action_properties(
                         &self.config.on_create_properties,
                         &chunk,
                         row,
                         new_id,
+                    )?;
+                    self.validate_on_create_edge_phase_two(
+                        &resolved_match,
+                        &resolved_on_create,
                     )?;
                     self.apply_on_match_edge(new_id, &resolved_on_create)?;
                     new_id
@@ -1245,6 +1350,354 @@ mod tests {
             node.properties.get(&PropertyKey::new("x")),
             Some(&Value::Int64(99))
         );
+    }
+
+    // ── Two-phase constraint validation regression tests ──────────────
+    //
+    // The two-phase create path (ON CREATE expression sources) used to call
+    // `create_node` / `create_edge` with an empty on_create list, which made
+    // `validate_node_complete` and `check_unique_node_property` only see the
+    // match properties. The fix routes the two phases through dedicated
+    // helpers that validate the full property set at the right time.
+
+    use super::ConstraintValidator;
+
+    /// Minimal validator that enforces NOT NULL on a single named property.
+    struct RequirePropertyValidator {
+        required_property: &'static str,
+    }
+
+    impl ConstraintValidator for RequirePropertyValidator {
+        fn validate_node_property(
+            &self,
+            _labels: &[String],
+            _key: &str,
+            _value: &Value,
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+        fn validate_node_complete(
+            &self,
+            _labels: &[String],
+            properties: &[(String, Value)],
+        ) -> Result<(), super::super::OperatorError> {
+            if !properties.iter().any(|(k, _)| k == self.required_property) {
+                return Err(super::super::OperatorError::ConstraintViolation(format!(
+                    "missing required property '{}'",
+                    self.required_property
+                )));
+            }
+            Ok(())
+        }
+        fn check_unique_node_property(
+            &self,
+            _labels: &[String],
+            _key: &str,
+            _value: &Value,
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+        fn validate_edge_property(
+            &self,
+            _edge_type: &str,
+            _key: &str,
+            _value: &Value,
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+        fn validate_edge_complete(
+            &self,
+            _edge_type: &str,
+            properties: &[(String, Value)],
+        ) -> Result<(), super::super::OperatorError> {
+            if !properties.iter().any(|(k, _)| k == self.required_property) {
+                return Err(super::super::OperatorError::ConstraintViolation(format!(
+                    "missing required edge property '{}'",
+                    self.required_property
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    /// Validator that records every uniqueness check it sees, so the test
+    /// can assert ON CREATE properties were not silently bypassed.
+    struct RecordingUniqueValidator {
+        seen: std::sync::Mutex<Vec<(String, Value)>>,
+    }
+
+    impl RecordingUniqueValidator {
+        fn new() -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ConstraintValidator for RecordingUniqueValidator {
+        fn validate_node_property(
+            &self,
+            _labels: &[String],
+            _key: &str,
+            _value: &Value,
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+        fn validate_node_complete(
+            &self,
+            _labels: &[String],
+            _properties: &[(String, Value)],
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+        fn check_unique_node_property(
+            &self,
+            _labels: &[String],
+            key: &str,
+            value: &Value,
+        ) -> Result<(), super::super::OperatorError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((key.to_string(), value.clone()));
+            Ok(())
+        }
+        fn validate_edge_property(
+            &self,
+            _edge_type: &str,
+            _key: &str,
+            _value: &Value,
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+        fn validate_edge_complete(
+            &self,
+            _edge_type: &str,
+            _properties: &[(String, Value)],
+        ) -> Result<(), super::super::OperatorError> {
+            Ok(())
+        }
+    }
+
+    fn coalesce_n_x_else(default: i64) -> super::super::filter::FilterExpression {
+        use super::super::filter::FilterExpression;
+        FilterExpression::FunctionCall {
+            name: "coalesce".to_string(),
+            args: vec![
+                FilterExpression::Property {
+                    variable: "n".to_string(),
+                    property: "x".to_string(),
+                },
+                FilterExpression::Literal(Value::Int64(default)),
+            ],
+        }
+    }
+
+    #[test]
+    fn test_merge_two_phase_completeness_uses_full_property_set() {
+        // Regression: phase one used to run completeness against match
+        // properties only, falsely rejecting an ON CREATE property that
+        // satisfies a NOT NULL requirement. With the fix, completeness is
+        // checked once both phases have produced their properties.
+        use crate::graph::lpg::LpgStore;
+        use std::collections::HashMap;
+
+        let lpg = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
+        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+
+        let mut variable_columns = HashMap::new();
+        variable_columns.insert("n".to_string(), 0_usize);
+
+        let mut merge = MergeOperator::new(
+            Arc::clone(&store),
+            None,
+            MergeConfig {
+                variable: "n".to_string(),
+                labels: vec!["Item".to_string()],
+                match_properties: const_props(vec![("val", Value::Int64(1))]),
+                // ON CREATE supplies the NOT NULL property `x`.
+                on_create_properties: vec![(
+                    "x".to_string(),
+                    PropertySource::Expression {
+                        expr: Box::new(coalesce_n_x_else(99)),
+                        variable_columns,
+                    },
+                )],
+                on_match_properties: vec![],
+                output_schema: vec![LogicalType::Node],
+                output_column: 0,
+                bound_variable_column: None,
+            },
+        )
+        .with_search_store(Arc::clone(&search))
+        .with_validator(Arc::new(RequirePropertyValidator {
+            required_property: "x",
+        }));
+
+        merge
+            .next()
+            .expect("MERGE must succeed because ON CREATE supplies the required property");
+
+        let nodes = store.nodes_by_label("Item");
+        assert_eq!(nodes.len(), 1);
+        let node = store.get_node(nodes[0]).unwrap();
+        assert_eq!(
+            node.properties.get(&PropertyKey::new("x")),
+            Some(&Value::Int64(99)),
+            "ON CREATE expression value must be persisted"
+        );
+    }
+
+    #[test]
+    fn test_merge_two_phase_unique_check_runs_on_on_create_props() {
+        // Regression: phase one used to skip uniqueness checks on ON CREATE
+        // properties because the empty list passed to `create_node` hid
+        // them. The fix runs `check_unique_node_property` for ON CREATE
+        // values in phase two.
+        use crate::graph::lpg::LpgStore;
+        use std::collections::HashMap;
+
+        let lpg = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
+        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+
+        let mut variable_columns = HashMap::new();
+        variable_columns.insert("n".to_string(), 0_usize);
+
+        let recorder = Arc::new(RecordingUniqueValidator::new());
+
+        let mut merge = MergeOperator::new(
+            Arc::clone(&store),
+            None,
+            MergeConfig {
+                variable: "n".to_string(),
+                labels: vec!["Item".to_string()],
+                match_properties: const_props(vec![("val", Value::Int64(1))]),
+                on_create_properties: vec![(
+                    "x".to_string(),
+                    PropertySource::Expression {
+                        expr: Box::new(coalesce_n_x_else(42)),
+                        variable_columns,
+                    },
+                )],
+                on_match_properties: vec![],
+                output_schema: vec![LogicalType::Node],
+                output_column: 0,
+                bound_variable_column: None,
+            },
+        )
+        .with_search_store(Arc::clone(&search))
+        .with_validator(Arc::clone(&recorder) as Arc<dyn ConstraintValidator>);
+
+        merge.next().unwrap();
+
+        let seen = recorder.seen.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|(k, v)| k == "x" && *v == Value::Int64(42)),
+            "uniqueness check must fire for ON CREATE expression property `x`, observed: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn test_merge_relationship_two_phase_completeness_uses_full_property_set() {
+        // Edge-equivalent of the node completeness regression.
+        use super::super::filter::FilterExpression;
+        use crate::execution::chunk::DataChunkBuilder;
+        use crate::graph::lpg::LpgStore;
+        use std::collections::HashMap;
+
+        let lpg = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
+        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+
+        let src_id = store.create_node_with_props(
+            &["Node"],
+            &[(PropertyKey::new("name"), Value::String("Vincent".into()))],
+        );
+        let dst_id = store.create_node_with_props(
+            &["Node"],
+            &[(PropertyKey::new("name"), Value::String("Mia".into()))],
+        );
+
+        // Build an input chunk: [src_id, dst_id] with the edge column at index 2.
+        let input_schema = vec![LogicalType::Node, LogicalType::Node];
+        let mut builder = DataChunkBuilder::with_capacity(&input_schema, 1);
+        builder.column_mut(0).unwrap().push_node_id(src_id);
+        builder.column_mut(1).unwrap().push_node_id(dst_id);
+        builder.advance_row();
+        let chunk = builder.finish();
+
+        struct OneShot(Option<DataChunk>);
+        impl Operator for OneShot {
+            fn next(&mut self) -> OperatorResult {
+                Ok(self.0.take())
+            }
+            fn reset(&mut self) {}
+            fn name(&self) -> &'static str {
+                "OneShot"
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+                self
+            }
+        }
+
+        // ON CREATE supplies NOT NULL property `x` via expression.
+        let coalesce = FilterExpression::FunctionCall {
+            name: "coalesce".to_string(),
+            args: vec![
+                FilterExpression::Property {
+                    variable: "r".to_string(),
+                    property: "x".to_string(),
+                },
+                FilterExpression::Literal(Value::Int64(7)),
+            ],
+        };
+        let mut variable_columns = HashMap::new();
+        // Augmented edge chunk: [src, dst, r] → r at index 2.
+        variable_columns.insert("r".to_string(), 2_usize);
+
+        let mut merge_rel = MergeRelationshipOperator::new(
+            Arc::clone(&store),
+            Box::new(OneShot(Some(chunk))),
+            MergeRelationshipConfig {
+                source_column: 0,
+                target_column: 1,
+                source_variable: "a".to_string(),
+                target_variable: "b".to_string(),
+                edge_type: "KNOWS".to_string(),
+                match_properties: vec![],
+                on_create_properties: vec![(
+                    "x".to_string(),
+                    PropertySource::Expression {
+                        expr: Box::new(coalesce),
+                        variable_columns,
+                    },
+                )],
+                on_match_properties: vec![],
+                output_schema: vec![LogicalType::Node, LogicalType::Node, LogicalType::Edge],
+                edge_output_column: 2,
+            },
+        )
+        .with_search_store(Arc::clone(&search))
+        .with_validator(Arc::new(RequirePropertyValidator {
+            required_property: "x",
+        }));
+
+        merge_rel
+            .next()
+            .expect("MERGE relationship must succeed because ON CREATE supplies the required property");
+
+        // Confirm the edge was created with `x` set to the expression value.
+        use crate::graph::Direction;
+        let edges: Vec<EdgeId> = store
+            .edges_from(src_id, Direction::Outgoing)
+            .into_iter()
+            .filter_map(|(target, edge_id)| (target == dst_id).then_some(edge_id))
+            .collect();
+        assert_eq!(edges.len(), 1, "expected exactly one outgoing edge");
+        let edge = store.get_edge(edges[0]).unwrap();
+        assert_eq!(edge.get_property("x"), Some(&Value::Int64(7)));
     }
 
     #[test]
