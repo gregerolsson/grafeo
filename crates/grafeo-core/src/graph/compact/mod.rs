@@ -5,8 +5,6 @@
 //! snapshot data in WASM, edge workers, and embedded devices.
 //! Fully behind `#[cfg(feature = "compact-store")]`.
 
-/// Block descriptors for columnar storage (Phase 2 tiered-storage).
-pub mod block;
 /// Builder API for constructing a [`CompactStore`] from raw data.
 pub mod builder;
 /// Columnar codecs for node and edge properties.

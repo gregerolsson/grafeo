@@ -9,8 +9,7 @@ use std::sync::Arc;
 use arcstr::ArcStr;
 use grafeo_common::types::Value;
 
-use super::block::BlockEntry;
-use crate::codec::{BitPackedInts, BitVector, DictionaryEncoding};
+use crate::codec::{BitPackedInts, BitVector, BlockEntry, DictionaryEncoding};
 
 /// A single column of data backed by one of Grafeo's storage codecs.
 ///
