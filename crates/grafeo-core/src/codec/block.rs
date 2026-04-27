@@ -25,12 +25,23 @@
 //! upstream readers can be extended block-aware before any on-disk
 //! format changes.
 
+/// Default number of rows per block when serializing v2 columns.
+///
+/// Chosen so a `BitPacked` column with `bits_per_value == 4` fills exactly
+/// 64 `u64` words per block (4 KiB); other widths land within ~1 KiB of
+/// the same target. Per-block stats (Phase 2c) and iterator early-stop
+/// (Phase 4) get coarse-but-useful skip granularity at this size without
+/// blowing up the block-index footprint.
+pub const DEFAULT_BLOCK_ROWS: u32 = 1024;
+
 /// Descriptor for a logical block within a column.
 ///
-/// In Phase 2a this only carries the block's row count. Phase 2b adds a
-/// `byte_offset` and `byte_len` for serialized layouts; Phase 2c adds
-/// optional `min`, `max`, `null_count`, and `bloom` fields for per-block
-/// pruning.
+/// `row_count` is the runtime view: how many logical rows the block
+/// covers. Phase 2c will add optional `min`, `max`, `null_count`, and
+/// `bloom` fields for per-block pruning. The on-disk block index used
+/// by v2 column serialization carries additional `byte_offset` and
+/// `byte_len` fields, but those are an internal serialization detail
+/// and not exposed on this runtime descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEntry {
     /// Number of logical rows (values) in this block.

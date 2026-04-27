@@ -270,25 +270,35 @@ impl MergeOperator {
         };
 
         for node_id in candidates {
-            if let Some(node) = self.store.get_node(node_id) {
-                let has_all_labels = self.config.labels.iter().all(|label| node.has_label(label));
-                if !has_all_labels {
-                    continue;
-                }
+            // Transactional creates write their version at `EpochId::PENDING`,
+            // so the unversioned `get_node` (which checks visibility against
+            // the current real epoch) hides nodes this same transaction has
+            // just created. UNWIND-driven MERGE relies on seeing those rows
+            // to dedupe, so route through the versioned read when we have a
+            // transaction context attached.
+            let node_opt = match (self.viewing_epoch, self.transaction_id) {
+                (Some(epoch), Some(tid)) => self.store.get_node_versioned(node_id, epoch, tid),
+                _ => self.store.get_node(node_id),
+            };
+            let Some(node) = node_opt else { continue };
 
-                let has_all_props = resolved_match_props.iter().all(|(key, expected_value)| {
-                    let prop = node.properties.get(&PropertyKey::new(key.as_str()));
-                    if expected_value.is_null() {
-                        // Null in a MERGE pattern matches both absent and explicitly null properties
-                        prop.map_or(true, |v| v.is_null())
-                    } else {
-                        prop.is_some_and(|v| v == expected_value)
-                    }
-                });
+            let has_all_labels = self.config.labels.iter().all(|label| node.has_label(label));
+            if !has_all_labels {
+                continue;
+            }
 
-                if has_all_props {
-                    return Some(node_id);
+            let has_all_props = resolved_match_props.iter().all(|(key, expected_value)| {
+                let prop = node.properties.get(&PropertyKey::new(key.as_str()));
+                if expected_value.is_null() {
+                    // Null in a MERGE pattern matches both absent and explicitly null properties
+                    prop.map_or(true, |v| v.is_null())
+                } else {
+                    prop.is_some_and(|v| v == expected_value)
                 }
+            });
+
+            if has_all_props {
+                return Some(node_id);
             }
         }
 
@@ -1771,6 +1781,78 @@ mod tests {
         assert_eq!(edges.len(), 1, "expected exactly one outgoing edge");
         let edge = store.get_edge(edges[0]).unwrap();
         assert_eq!(edge.get_property("x"), Some(&Value::Int64(7)));
+    }
+
+    #[test]
+    fn test_merge_in_transaction_dedupes_within_unwind() {
+        // Regression: MERGE inside UNWIND, executed in a transaction (auto-
+        // commit or otherwise), tags its creates at `EpochId::PENDING`.
+        // `find_matching_node`'s read path used to call the unversioned
+        // `get_node`, which rejects PENDING records, so subsequent rows of
+        // the same UNWIND could not see the node the operator had just
+        // created and produced a duplicate per row.
+        use crate::execution::chunk::DataChunkBuilder;
+        use crate::graph::lpg::LpgStore;
+        use grafeo_common::types::EpochId;
+
+        let lpg = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
+
+        // Build an input chunk emulating `UNWIND [1, 1, 1] AS i`.
+        let input_schema = vec![LogicalType::Int64];
+        let mut builder = DataChunkBuilder::with_capacity(&input_schema, 3);
+        for _ in 0..3 {
+            builder.column_mut(0).unwrap().push_value(Value::Int64(1));
+            builder.advance_row();
+        }
+        let chunk = builder.finish();
+
+        struct OneShot(Option<DataChunk>);
+        impl Operator for OneShot {
+            fn next(&mut self) -> OperatorResult {
+                Ok(self.0.take())
+            }
+            fn reset(&mut self) {}
+            fn name(&self) -> &'static str {
+                "OneShot"
+            }
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+                self
+            }
+        }
+
+        // Use a non-SYSTEM transaction so versioned creates land at PENDING.
+        let tx = TransactionId::new(1);
+        let mut merge = MergeOperator::new(
+            Arc::clone(&store),
+            Some(Box::new(OneShot(Some(chunk)))),
+            MergeConfig {
+                variable: "n".to_string(),
+                labels: vec!["Item".to_string()],
+                match_properties: vec![("val".to_string(), PropertySource::Column(0))],
+                on_create_properties: vec![],
+                on_match_properties: vec![],
+                output_schema: vec![LogicalType::Int64, LogicalType::Node],
+                output_column: 1,
+                bound_variable_column: None,
+            },
+        )
+        .with_transaction_context(EpochId::INITIAL, Some(tx));
+
+        while merge.next().unwrap().is_some() {}
+
+        // All three rows had val = 1, so MERGE must observe the node it
+        // created on iteration 1 in iterations 2 and 3 and skip the create.
+        let nodes = store.nodes_by_label("Item");
+        let visible: Vec<_> = nodes
+            .iter()
+            .filter_map(|&id| store.get_node_versioned(id, EpochId::INITIAL, tx))
+            .collect();
+        assert_eq!(
+            visible.len(),
+            1,
+            "MERGE inside UNWIND must dedupe nodes its own transaction created in earlier rows"
+        );
     }
 
     #[test]

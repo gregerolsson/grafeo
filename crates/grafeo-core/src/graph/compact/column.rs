@@ -177,31 +177,38 @@ impl ColumnCodec {
 
     /// Number of logical blocks in this column.
     ///
-    /// Phase 2a treats every column as a single block (returns `1`),
-    /// even when the column is empty. Phase 2b will return the actual
-    /// block count from the v2 serialized layout.
+    /// Empty columns report `1` (a single zero-row block) so downstream
+    /// serializers and iterators can treat block emission uniformly.
+    /// Non-empty columns return `ceil(len / DEFAULT_BLOCK_ROWS)`.
     #[must_use]
     pub fn block_count(&self) -> usize {
-        1
+        if self.is_empty() {
+            return 1;
+        }
+        let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+        self.len().div_ceil(block_rows)
     }
 
     /// Descriptor for the block at index `i`, or `None` if `i` is out of
     /// range.
     ///
-    /// Phase 2a returns `Some(BlockEntry { row_count: self.len() })` for
-    /// `i == 0` and `None` otherwise. Phase 2b will return per-block
-    /// row counts from the multi-block v2 layout; Phase 2c will fill in
-    /// per-block statistics.
+    /// Block `i` covers rows `[i * DEFAULT_BLOCK_ROWS, min((i+1) *
+    /// DEFAULT_BLOCK_ROWS, len()))`. Empty columns return a single
+    /// zero-row block at index 0.
+    ///
+    /// Phase 2c will fill in per-block statistics (`min`, `max`,
+    /// `null_count`, optional `bloom`).
     #[must_use]
     pub fn block_at(&self, i: usize) -> Option<BlockEntry> {
-        if i != 0 {
+        if i >= self.block_count() {
             return None;
         }
-        // reason: column lengths fit in u32 well before they hit any
-        // realistic Phase 2 block budget; truncation here would also
-        // truncate downstream usage that already operates on u32 stats.
+        let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+        let start = i * block_rows;
+        let end = (start + block_rows).min(self.len());
+        // reason: block lengths fit in u32 since DEFAULT_BLOCK_ROWS itself is u32.
         #[allow(clippy::cast_possible_truncation)]
-        let row_count = self.len() as u32;
+        let row_count = (end - start) as u32;
         Some(BlockEntry::new(row_count))
     }
 
@@ -577,6 +584,435 @@ impl ColumnCodec {
         }
     }
 
+    /// Serializes this codec to v2 format with a per-block index.
+    ///
+    /// Layout:
+    /// ```text
+    /// [disc:u8]
+    /// [global_params...]                  // codec-specific (empty for RawI64/Bitmap/Float64)
+    /// [block_count:u32]
+    /// [block_index]                       // block_count x [byte_offset:u32, byte_len:u32, row_count:u32]
+    /// [block_data]                        // concatenated per-block bodies
+    /// ```
+    ///
+    /// Block bodies carry just the row data for their range; codec
+    /// parameters that apply to the whole column (bit width, dictionary,
+    /// vector dimensions) live in `global_params`. Phase 2c will extend
+    /// the per-block index entry with stats fields by bumping section
+    /// version to 3.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any per-block byte length or the block count exceeds
+    /// `u32::MAX`. CompactStore columns are bounded by `u32::MAX` rows
+    /// (the section format's hard limit), so this is unreachable for
+    /// any column built through the public APIs.
+    pub fn write_to_v2(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::BitPacked(bp) => {
+                buf.push(0);
+                buf.push(bp.bits_per_value());
+                let bits_per_value = bp.bits_per_value();
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start = i * block_rows;
+                    let end = (start + block_rows).min(bp.len());
+                    // reason: block sizes fit in u32 by DEFAULT_BLOCK_ROWS.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end - start) as u32;
+                    // reason: bodies length grows in step with block packing; bounded by
+                    // total column size which is documented to fit u32.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    let row_values: Vec<u64> = (start..end)
+                        .map(|j| bp.get(j).expect("row in range"))
+                        .collect();
+                    let block_packed =
+                        crate::codec::BitPackedInts::pack_with_bits(&row_values, bits_per_value);
+                    write_usize_as_u32(&mut bodies, block_packed.data().len());
+                    for &word in block_packed.data() {
+                        bodies.extend_from_slice(&word.to_le_bytes());
+                    }
+                    // reason: same as above
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+            Self::Dict(dict) => {
+                buf.push(1);
+                // Global dictionary (shared across blocks).
+                let entries = dict.dictionary();
+                write_usize_as_u32(buf, entries.len());
+                for entry in entries.iter() {
+                    let s = entry.as_ref().as_bytes();
+                    write_usize_as_u32(buf, s.len());
+                    buf.extend_from_slice(s);
+                }
+                let codes = dict.codes();
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start = i * block_rows;
+                    let end = (start + block_rows).min(codes.len());
+                    // reason: same row-count bound as BitPacked
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end - start) as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    for &code in &codes[start..end] {
+                        bodies.extend_from_slice(&code.to_le_bytes());
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+            Self::Bitmap(bv) => {
+                buf.push(2);
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start = i * block_rows;
+                    let end = (start + block_rows).min(bv.len());
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end - start) as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    let bits: Vec<bool> = (start..end)
+                        .map(|j| bv.get(j).expect("row in range"))
+                        .collect();
+                    let block_bv = crate::codec::BitVector::from_bools(&bits);
+                    write_usize_as_u32(&mut bodies, block_bv.data().len());
+                    for &word in block_bv.data() {
+                        bodies.extend_from_slice(&word.to_le_bytes());
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+            Self::Int8Vector { data, dimensions } => {
+                buf.push(3);
+                buf.extend_from_slice(&dimensions.to_le_bytes());
+                let dims = *dimensions as usize;
+                let row_count_total = data.len().checked_div(dims).unwrap_or(0);
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start_row = i * block_rows;
+                    let end_row = (start_row + block_rows).min(row_count_total);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end_row - start_row) as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    if dims > 0 {
+                        let start = start_row * dims;
+                        let end = end_row * dims;
+                        for &v in &data[start..end] {
+                            bodies.push(v.to_le_bytes()[0]);
+                        }
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+            Self::Float64(vec) => {
+                buf.push(4);
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start = i * block_rows;
+                    let end = (start + block_rows).min(vec.len());
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end - start) as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    for &v in &vec[start..end] {
+                        bodies.extend_from_slice(&v.to_le_bytes());
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+            Self::Float32Vector { data, dimensions } => {
+                buf.push(5);
+                buf.extend_from_slice(&dimensions.to_le_bytes());
+                let dims = *dimensions as usize;
+                let row_count_total = data.len().checked_div(dims).unwrap_or(0);
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start_row = i * block_rows;
+                    let end_row = (start_row + block_rows).min(row_count_total);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end_row - start_row) as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    if dims > 0 {
+                        let start = start_row * dims;
+                        let end = end_row * dims;
+                        for &v in &data[start..end] {
+                            bodies.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+            Self::RawI64(vec) => {
+                buf.push(6);
+                let block_count = self.block_count();
+                let mut bodies: Vec<u8> = Vec::new();
+                let mut metas: Vec<BlockMeta> = Vec::with_capacity(block_count);
+                let block_rows = crate::codec::DEFAULT_BLOCK_ROWS as usize;
+                for i in 0..block_count {
+                    let start = i * block_rows;
+                    let end = (start + block_rows).min(vec.len());
+                    #[allow(clippy::cast_possible_truncation)]
+                    let row_count = (end - start) as u32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_offset = bodies.len() as u32;
+                    for &v in &vec[start..end] {
+                        bodies.extend_from_slice(&v.to_le_bytes());
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let byte_len = (bodies.len() as u32) - byte_offset;
+                    metas.push(BlockMeta {
+                        byte_offset,
+                        byte_len,
+                        row_count,
+                    });
+                }
+                write_block_index_and_bodies(buf, &metas, &bodies);
+            }
+        }
+    }
+
+    /// Deserializes a codec from v2 format.
+    ///
+    /// Inverse of [`write_to_v2`](Self::write_to_v2). The reader is
+    /// strict: it requires the block index and concatenated bodies to
+    /// match exactly, and refuses unknown discriminants.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static-string error on truncation, unknown discriminant,
+    /// or block-index inconsistency (offset + len out of bounds).
+    pub fn read_from_v2(data: &[u8], pos: &mut usize) -> Result<Self, &'static str> {
+        let discriminant = *data.get(*pos).ok_or("truncated codec discriminant")?;
+        *pos += 1;
+        match discriminant {
+            0 => {
+                // BitPacked: bits_per_value, then block index + bodies.
+                let bits = *data.get(*pos).ok_or("truncated bits_per_value")?;
+                *pos += 1;
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let mut all_values: Vec<u64> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let body_end = body_start + meta.byte_len as usize;
+                    if body_end > data.len() {
+                        return Err("BitPacked block body out of bounds");
+                    }
+                    let mut bp = body_start;
+                    let word_count = read_u32_le(data, &mut bp)? as usize;
+                    let mut words = Vec::with_capacity(word_count);
+                    for _ in 0..word_count {
+                        words.push(read_u64_le(data, &mut bp)?);
+                    }
+                    let block_bp = crate::codec::BitPackedInts::from_raw_parts(
+                        words,
+                        bits,
+                        meta.row_count as usize,
+                    );
+                    for j in 0..meta.row_count as usize {
+                        all_values.push(
+                            block_bp
+                                .get(j)
+                                .ok_or("BitPacked block index out of range")?,
+                        );
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::BitPacked(
+                    crate::codec::BitPackedInts::pack_with_bits(&all_values, bits),
+                ))
+            }
+            1 => {
+                // Dict: global dictionary, then block index of u32 codes.
+                let dict_len = read_u32_le(data, pos)? as usize;
+                let mut entries: Vec<Arc<str>> = Vec::with_capacity(dict_len);
+                for _ in 0..dict_len {
+                    let slen = read_u32_le(data, pos)? as usize;
+                    if *pos + slen > data.len() {
+                        return Err("truncated dict string");
+                    }
+                    let s = std::str::from_utf8(&data[*pos..*pos + slen])
+                        .map_err(|_| "invalid UTF-8 in dict")?;
+                    entries.push(Arc::from(s));
+                    *pos += slen;
+                }
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let mut codes: Vec<u32> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let mut bp = body_start;
+                    for _ in 0..meta.row_count {
+                        codes.push(read_u32_le(data, &mut bp)?);
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::Dict(DictionaryEncoding::new(
+                    Arc::from(entries.into_boxed_slice()),
+                    codes,
+                )))
+            }
+            2 => {
+                // Bitmap
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let mut all_bits: Vec<bool> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let mut bp = body_start;
+                    let word_count = read_u32_le(data, &mut bp)? as usize;
+                    let mut words = Vec::with_capacity(word_count);
+                    for _ in 0..word_count {
+                        words.push(read_u64_le(data, &mut bp)?);
+                    }
+                    let block_bv =
+                        crate::codec::BitVector::from_raw_parts(words, meta.row_count as usize);
+                    for j in 0..meta.row_count as usize {
+                        all_bits.push(block_bv.get(j).ok_or("Bitmap block index out of range")?);
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::Bitmap(crate::codec::BitVector::from_bools(&all_bits)))
+            }
+            3 => {
+                // Int8Vector
+                let dimensions = read_u16_le(data, pos)?;
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let dims = dimensions as usize;
+                let mut all_data: Vec<i8> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let body_end = body_start + meta.byte_len as usize;
+                    if body_end > data.len() {
+                        return Err("Int8Vector block body out of bounds");
+                    }
+                    let expected = (meta.row_count as usize) * dims;
+                    if (meta.byte_len as usize) != expected {
+                        return Err("Int8Vector block byte_len mismatch");
+                    }
+                    for &b in &data[body_start..body_end] {
+                        all_data.push(i8::from_le_bytes([b]));
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::Int8Vector {
+                    data: all_data,
+                    dimensions,
+                })
+            }
+            4 => {
+                // Float64
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let mut all_vals: Vec<f64> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let mut bp = body_start;
+                    for _ in 0..meta.row_count {
+                        all_vals.push(read_f64_le(data, &mut bp)?);
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::Float64(all_vals))
+            }
+            5 => {
+                // Float32Vector
+                let dimensions = read_u16_le(data, pos)?;
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let dims = dimensions as usize;
+                let mut all_data: Vec<f32> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let mut bp = body_start;
+                    let elem_count = (meta.row_count as usize) * dims;
+                    for _ in 0..elem_count {
+                        all_data.push(read_f32_le(data, &mut bp)?);
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::Float32Vector {
+                    data: all_data,
+                    dimensions,
+                })
+            }
+            6 => {
+                // RawI64
+                let (metas, bodies_start) = read_block_index(data, pos)?;
+                let mut all_vals: Vec<i64> = Vec::new();
+                for meta in &metas {
+                    let body_start = bodies_start + meta.byte_offset as usize;
+                    let mut bp = body_start;
+                    for _ in 0..meta.row_count {
+                        all_vals.push(read_i64_le(data, &mut bp)?);
+                    }
+                }
+                *pos = bodies_start + total_bodies_len(&metas);
+                Ok(Self::RawI64(all_vals))
+            }
+            _ => Err("unknown codec discriminant"),
+        }
+    }
+
     /// Returns an estimate of heap memory used by this column in bytes.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
@@ -594,6 +1030,64 @@ impl ColumnCodec {
             Self::RawI64(vec) => vec.len() * std::mem::size_of::<i64>(),
         }
     }
+}
+
+// ── v2 block-index helpers ──────────────────────────────────────
+
+/// Per-block metadata in the v2 column index.
+///
+/// Phase 2c will extend this with stats fields by bumping the section
+/// version to 3; the current 12-byte layout pins the v2 format.
+#[derive(Debug, Clone, Copy)]
+struct BlockMeta {
+    byte_offset: u32,
+    byte_len: u32,
+    row_count: u32,
+}
+
+const BLOCK_META_BYTES: usize = 12;
+
+/// Total byte length of all bodies described by `metas`.
+fn total_bodies_len(metas: &[BlockMeta]) -> usize {
+    metas
+        .last()
+        .map_or(0, |m| (m.byte_offset + m.byte_len) as usize)
+}
+
+/// Writes the v2 block index followed by the concatenated block bodies.
+fn write_block_index_and_bodies(buf: &mut Vec<u8>, metas: &[BlockMeta], bodies: &[u8]) {
+    write_usize_as_u32(buf, metas.len());
+    for meta in metas {
+        buf.extend_from_slice(&meta.byte_offset.to_le_bytes());
+        buf.extend_from_slice(&meta.byte_len.to_le_bytes());
+        buf.extend_from_slice(&meta.row_count.to_le_bytes());
+    }
+    buf.extend_from_slice(bodies);
+}
+
+/// Reads the v2 block index and returns the parsed metas and the byte
+/// position where the concatenated bodies start.
+fn read_block_index(data: &[u8], pos: &mut usize) -> Result<(Vec<BlockMeta>, usize), &'static str> {
+    let block_count = read_u32_le(data, pos)? as usize;
+    let index_bytes = block_count
+        .checked_mul(BLOCK_META_BYTES)
+        .ok_or("block index overflow")?;
+    if *pos + index_bytes > data.len() {
+        return Err("truncated block index");
+    }
+    let mut metas = Vec::with_capacity(block_count);
+    for _ in 0..block_count {
+        let byte_offset = read_u32_le(data, pos)?;
+        let byte_len = read_u32_le(data, pos)?;
+        let row_count = read_u32_le(data, pos)?;
+        metas.push(BlockMeta {
+            byte_offset,
+            byte_len,
+            row_count,
+        });
+    }
+    let bodies_start = *pos;
+    Ok((metas, bodies_start))
 }
 
 // ── Binary read helpers ─────────────────────────────────────────
@@ -2139,6 +2633,155 @@ mod tests {
         ] {
             let total: u32 = col.block_iter().map(|b| b.row_count).sum();
             assert_eq!(total as usize, col.len());
+        }
+    }
+
+    // ── Phase 2b: v2 multi-block on-disk format ───────────────────────
+    //
+    // v2 layout per column (after the section header):
+    //   [disc:u8][global_params...]
+    //   [block_count:u32]
+    //   [block_index: block_count x (byte_offset:u32, byte_len:u32, row_count:u32)]
+    //   [block_data: concatenated per-block bodies]
+    //
+    // The runtime API (block_count(), block_at(), len(), get(...)) is
+    // unchanged after a round-trip — only the on-disk layout differs.
+
+    fn assert_round_trip_v2_equals(col: &ColumnCodec) {
+        let mut buf = Vec::new();
+        col.write_to_v2(&mut buf);
+        let mut pos = 0;
+        let recovered = ColumnCodec::read_from_v2(&buf, &mut pos).expect("v2 round-trip");
+        assert_eq!(pos, buf.len(), "v2 reader should consume entire buffer");
+        assert_eq!(recovered.len(), col.len(), "len after v2 round-trip");
+        for i in 0..col.len() {
+            assert_eq!(
+                recovered.get(i),
+                col.get(i),
+                "value at row {i} after v2 round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn django_v2_round_trip_raw_i64_single_block() {
+        let col = ColumnCodec::RawI64(vec![-1, 2, -3, 4, -5]);
+        assert_eq!(col.block_count(), 1);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_raw_i64_multi_block() {
+        // 2049 rows: 1024 + 1024 + 1 → 3 blocks at default block size.
+        // reason: i is bounded by 2049 which fits in i64.
+        #[allow(clippy::cast_possible_wrap)]
+        let values: Vec<i64> = (0..2049i64).map(|i| i - 1024).collect();
+        let col = ColumnCodec::RawI64(values);
+        assert_eq!(col.block_count(), 3);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_bitpacked_multi_block() {
+        let values: Vec<u64> = (0..2500u64).map(|i| i % 16).collect();
+        let col = ColumnCodec::BitPacked(BitPackedInts::pack(&values));
+        assert!(col.block_count() >= 2, "expect multi-block at 2500 rows");
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_dict_multi_block() {
+        let mut b = DictionaryBuilder::new();
+        for i in 0..1500u32 {
+            b.add(if i % 3 == 0 {
+                "alpha"
+            } else if i % 3 == 1 {
+                "beta"
+            } else {
+                "gamma"
+            });
+        }
+        let col = ColumnCodec::Dict(b.build());
+        assert_eq!(col.block_count(), 2);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_bitmap_multi_block() {
+        let bools: Vec<bool> = (0..1100u32).map(|i| i % 2 == 0).collect();
+        let col = ColumnCodec::Bitmap(BitVector::from_bools(&bools));
+        assert!(col.block_count() >= 2);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_float64_multi_block() {
+        let vals: Vec<f64> = (0..1100u32).map(|i| f64::from(i) * 0.5).collect();
+        let col = ColumnCodec::Float64(vals);
+        assert!(col.block_count() >= 2);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_int8_vector_multi_block() {
+        // 1100 vectors of dim 4 = 4400 i8 entries.
+        // reason: known small integer literals
+        #[allow(clippy::cast_possible_wrap)]
+        let data: Vec<i8> = (0..4400u32).map(|i| (i % 200) as i8).collect();
+        let col = ColumnCodec::Int8Vector {
+            data,
+            dimensions: 4,
+        };
+        assert!(col.block_count() >= 2);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn django_v2_round_trip_float32_vector_multi_block() {
+        // 1100 vectors of dim 4 = 4400 f32 entries.
+        let data: Vec<f32> = (0..4400u32).map(|i| i as f32 * 0.5).collect();
+        let col = ColumnCodec::Float32Vector {
+            data,
+            dimensions: 4,
+        };
+        assert!(col.block_count() >= 2);
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn shosanna_v2_round_trip_empty_column() {
+        // Empty columns should still serialize/deserialize cleanly with v2.
+        let col = ColumnCodec::RawI64(Vec::new());
+        assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn hans_v1_and_v2_produce_different_bytes() {
+        // Sanity: the v1 (flat) and v2 (block-indexed) layouts differ
+        // even for a small single-block column. This pins the format
+        // separation so a future "did we forget to switch?" regression
+        // is caught.
+        let col = ColumnCodec::RawI64(vec![1, 2, 3, 4, 5]);
+        let mut v1 = Vec::new();
+        col.write_to(&mut v1);
+        let mut v2 = Vec::new();
+        col.write_to_v2(&mut v2);
+        assert_ne!(v1, v2, "v1 and v2 layouts must differ");
+    }
+
+    #[test]
+    fn beatrix_v1_round_trip_still_works() {
+        // v1 (flat) reader/writer must keep working for one release as
+        // the section reader's compat path. We round-trip via the
+        // unchanged write_to / read_from pair.
+        let col = ColumnCodec::RawI64(vec![-1, 2, -3, 4, -5]);
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let recovered = ColumnCodec::read_from(&buf, &mut pos).expect("v1 round-trip");
+        assert_eq!(recovered.len(), col.len());
+        for i in 0..col.len() {
+            assert_eq!(recovered.get(i), col.get(i));
         }
     }
 }

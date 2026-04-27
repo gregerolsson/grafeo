@@ -23,8 +23,16 @@ use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 /// Magic bytes identifying a CompactStore section.
 const MAGIC: [u8; 4] = *b"GCST";
 
-/// Current section format version.
-const FORMAT_VERSION: u8 = 1;
+/// Current section format version. Phase 2b bumped this from 1 to 2 to
+/// switch column bodies from a flat layout to a per-block index +
+/// concatenated bodies. Phase 2c will bump to 3 when per-block stats
+/// (min/max/null/bloom) are added.
+const FORMAT_VERSION: u8 = 2;
+
+/// Legacy section format version, retained for one release as a
+/// read-only compat path. Files written by 0.5.41 and earlier carry
+/// this byte; 0.5.42+ writers always emit [`FORMAT_VERSION`].
+const FORMAT_VERSION_V1: u8 = 1;
 
 /// Wraps a [`CompactStore`] as a container [`Section`].
 pub struct CompactStoreSection {
@@ -61,18 +69,17 @@ impl CompactStoreSection {
     pub fn store(&self) -> Option<Arc<CompactStore>> {
         self.store.read().clone()
     }
-}
 
-impl Section for CompactStoreSection {
-    fn section_type(&self) -> SectionType {
-        SectionType::CompactStore
-    }
-
-    fn version(&self) -> u8 {
-        FORMAT_VERSION
-    }
-
-    fn serialize(&self) -> grafeo_common::utils::error::Result<Vec<u8>> {
+    /// Serializes at the requested format version.
+    ///
+    /// The default [`Section::serialize`] always writes [`FORMAT_VERSION`].
+    /// This entry point is kept (test-only outside this crate) so the
+    /// v1 compat reader can be exercised without keeping any externally
+    /// committed v1 fixtures.
+    pub(crate) fn serialize_with_version(
+        &self,
+        version: u8,
+    ) -> grafeo_common::utils::error::Result<Vec<u8>> {
         let guard = self.store.read();
         let store = guard.as_ref().ok_or_else(|| {
             grafeo_common::utils::error::Error::Internal("no CompactStore to serialize".into())
@@ -82,7 +89,7 @@ impl Section for CompactStoreSection {
 
         // Header.
         buf.extend_from_slice(&MAGIC);
-        buf.push(FORMAT_VERSION);
+        buf.push(version);
         let flags: u8 = u8::from(store.preserves_ids());
         buf.push(flags);
 
@@ -103,7 +110,7 @@ impl Section for CompactStoreSection {
                 } else {
                     buf.push(0);
                 }
-                codec.write_to(&mut buf);
+                write_codec(codec, &mut buf, version);
             }
         }
 
@@ -124,10 +131,20 @@ impl Section for CompactStoreSection {
             write_len(&mut buf, properties.len());
             for (key, codec) in properties {
                 write_str(&mut buf, key.as_str());
-                codec.write_to(&mut buf);
+                write_codec(codec, &mut buf, version);
             }
         }
+        // Continue building buf in `serialize()` epilogue.
+        Ok(self.append_id_maps_and_crc(buf, store, version))
+    }
 
+    /// Appends ID maps (if applicable) and trailing CRC to the buffer.
+    fn append_id_maps_and_crc(
+        &self,
+        mut buf: Vec<u8>,
+        store: &CompactStore,
+        _version: u8,
+    ) -> Vec<u8> {
         // ID maps.
         if store.preserves_ids() {
             if let Some(ref node_map) = store.node_id_map {
@@ -151,8 +168,30 @@ impl Section for CompactStoreSection {
         // CRC32 at end.
         let crc = crc32fast::hash(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
+        buf
+    }
+}
 
-        Ok(buf)
+/// Writes a single column codec body using the layout matching the
+/// section's format version. v1 = flat; v2 = per-block index + bodies.
+fn write_codec(codec: &ColumnCodec, buf: &mut Vec<u8>, version: u8) {
+    match version {
+        FORMAT_VERSION_V1 => codec.write_to(buf),
+        _ => codec.write_to_v2(buf),
+    }
+}
+
+impl Section for CompactStoreSection {
+    fn section_type(&self) -> SectionType {
+        SectionType::CompactStore
+    }
+
+    fn version(&self) -> u8 {
+        FORMAT_VERSION
+    }
+
+    fn serialize(&self) -> grafeo_common::utils::error::Result<Vec<u8>> {
+        self.serialize_with_version(FORMAT_VERSION)
     }
 
     fn deserialize(&mut self, data: &[u8]) -> grafeo_common::utils::error::Result<()> {
@@ -180,6 +219,16 @@ impl Section for CompactStoreSection {
 }
 
 // ── Deserialization ────────────────────────────────────────────────
+
+/// Reads a single column codec body, dispatching to v1 (flat) or v2
+/// (per-block index) based on the section's version byte.
+fn read_codec(data: &[u8], pos: &mut usize, version: u8) -> Result<ColumnCodec, String> {
+    match version {
+        FORMAT_VERSION_V1 => ColumnCodec::read_from(data, pos).map_err(|e| e.to_string()),
+        FORMAT_VERSION => ColumnCodec::read_from_v2(data, pos).map_err(|e| e.to_string()),
+        _ => Err(format!("unsupported CompactStore version {version}")),
+    }
+}
 
 fn deserialize_compact_store(data: &[u8]) -> Result<CompactStore, String> {
     if data.len() < 10 {
@@ -210,8 +259,10 @@ fn deserialize_compact_store(data: &[u8]) -> Result<CompactStore, String> {
     pos += 4;
     let version = data[pos];
     pos += 1;
-    if version != FORMAT_VERSION {
-        return Err(format!("unsupported version {version}"));
+    if version != FORMAT_VERSION && version != FORMAT_VERSION_V1 {
+        return Err(format!(
+            "unsupported CompactStore section version {version} (supported: {FORMAT_VERSION_V1}, {FORMAT_VERSION})"
+        ));
     }
     let flags = data[pos];
     pos += 1;
@@ -245,8 +296,7 @@ fn deserialize_compact_store(data: &[u8]) -> Result<CompactStore, String> {
                 zone_maps.insert(key.clone(), zm);
             }
 
-            let codec =
-                ColumnCodec::read_from(data, &mut pos).map_err(|e| format!("codec: {e}"))?;
+            let codec = read_codec(data, &mut pos, version).map_err(|e| format!("codec: {e}"))?;
             let col_type = infer_column_type_from_codec(&codec);
             col_defs.push(ColumnDef::new(&key_str, col_type));
             columns.insert(key, codec);
@@ -289,7 +339,7 @@ fn deserialize_compact_store(data: &[u8]) -> Result<CompactStore, String> {
             let key_str = read_string(data, &mut pos)?;
             let key = PropertyKey::new(&key_str);
             let codec =
-                ColumnCodec::read_from(data, &mut pos).map_err(|e| format!("edge codec: {e}"))?;
+                read_codec(data, &mut pos, version).map_err(|e| format!("edge codec: {e}"))?;
             let col_type = infer_column_type_from_codec(&codec);
             prop_defs.push(ColumnDef::new(&key_str, col_type));
             properties.insert(key, codec);
@@ -693,6 +743,76 @@ mod tests {
         assert!(section.is_dirty());
         section.mark_clean();
         assert!(!section.is_dirty());
+    }
+
+    /// Phase 2b: confirm the v1 (flat-column) on-disk format still
+    /// round-trips through the v2-aware deserializer, exercising the
+    /// compat path users on 0.5.41 and earlier rely on for one release.
+    #[test]
+    fn nelson_v1_section_reads_through_v2_aware_deserializer() {
+        let store = LpgStore::new().unwrap();
+        let alix = store.create_node(&["Person"]);
+        store.set_node_property(alix, "name", Value::from("Alix"));
+        store.set_node_property(alix, "age", Value::Int64(30));
+
+        let gus = store.create_node(&["Person"]);
+        store.set_node_property(gus, "name", Value::from("Gus"));
+        store.set_node_property(gus, "age", Value::Int64(25));
+
+        store.create_edge(alix, gus, "KNOWS");
+
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let section = CompactStoreSection::new(Arc::new(compact));
+
+        // Force v1 layout (flat columns, version byte = 1).
+        let v1_bytes = section.serialize_with_version(FORMAT_VERSION_V1).unwrap();
+        // First byte after MAGIC must be the v1 marker.
+        assert_eq!(
+            v1_bytes[4], FORMAT_VERSION_V1,
+            "expected v1 marker in version byte"
+        );
+
+        // The v2-aware deserializer must handle both versions.
+        let mut section2 = CompactStoreSection::empty();
+        section2.deserialize(&v1_bytes).unwrap();
+        let restored = section2.store().unwrap();
+
+        assert_eq!(restored.node_count(), 2);
+        assert_eq!(restored.edge_count(), 1);
+        assert_eq!(
+            restored.get_node_property(alix, &PropertyKey::new("name")),
+            Some(Value::String(arcstr::ArcStr::from("Alix")))
+        );
+        assert_eq!(
+            restored.get_node_property(alix, &PropertyKey::new("age")),
+            Some(Value::Int64(30))
+        );
+    }
+
+    /// Phase 2b: an unsupported version byte must produce a clean error,
+    /// not panic or silently misread the section.
+    #[test]
+    fn rita_unknown_version_returns_clear_error() {
+        let store = LpgStore::new().unwrap();
+        let _ = store.create_node(&["Item"]);
+        let compact = from_graph_store_preserving_ids(&store).unwrap();
+        let section = CompactStoreSection::new(Arc::new(compact));
+        let mut bytes = section.serialize().unwrap();
+        // Strip CRC, flip version byte to a future v9, recompute CRC.
+        let crc_pos = bytes.len() - 4;
+        bytes[4] = 9;
+        let crc = crc32fast::hash(&bytes[..crc_pos]);
+        bytes[crc_pos..].copy_from_slice(&crc.to_le_bytes());
+
+        let mut section2 = CompactStoreSection::empty();
+        let err = section2
+            .deserialize(&bytes)
+            .expect_err("expected version error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported CompactStore section version"),
+            "unexpected error message: {msg}"
+        );
     }
 
     #[test]
