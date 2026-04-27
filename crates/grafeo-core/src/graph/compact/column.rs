@@ -9,6 +9,7 @@ use std::sync::Arc;
 use arcstr::ArcStr;
 use grafeo_common::types::Value;
 
+use super::block::BlockEntry;
 use crate::codec::{BitPackedInts, BitVector, DictionaryEncoding};
 
 /// A single column of data backed by one of Grafeo's storage codecs.
@@ -173,6 +174,45 @@ impl ColumnCodec {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Number of logical blocks in this column.
+    ///
+    /// Phase 2a treats every column as a single block (returns `1`),
+    /// even when the column is empty. Phase 2b will return the actual
+    /// block count from the v2 serialized layout.
+    #[must_use]
+    pub fn block_count(&self) -> usize {
+        1
+    }
+
+    /// Descriptor for the block at index `i`, or `None` if `i` is out of
+    /// range.
+    ///
+    /// Phase 2a returns `Some(BlockEntry { row_count: self.len() })` for
+    /// `i == 0` and `None` otherwise. Phase 2b will return per-block
+    /// row counts from the multi-block v2 layout; Phase 2c will fill in
+    /// per-block statistics.
+    #[must_use]
+    pub fn block_at(&self, i: usize) -> Option<BlockEntry> {
+        if i != 0 {
+            return None;
+        }
+        // reason: column lengths fit in u32 well before they hit any
+        // realistic Phase 2 block budget; truncation here would also
+        // truncate downstream usage that already operates on u32 stats.
+        #[allow(clippy::cast_possible_truncation)]
+        let row_count = self.len() as u32;
+        Some(BlockEntry::new(row_count))
+    }
+
+    /// Iterator over this column's block descriptors.
+    ///
+    /// Phase 2a yields exactly one block (covering all rows). The
+    /// invariant that each block's `row_count`s sum to `self.len()` will
+    /// remain true through Phase 2b's multi-block layout.
+    pub fn block_iter(&self) -> impl Iterator<Item = BlockEntry> + '_ {
+        (0..self.block_count()).filter_map(move |i| self.block_at(i))
     }
 
     /// Returns the offsets of all rows whose value equals `target`.
@@ -2005,5 +2045,101 @@ mod tests {
 
         let empty = ColumnCodec::RawI64(Vec::new());
         assert_eq!(empty.heap_bytes(), 0);
+    }
+
+    // ── Phase 2a: Block API ────────────────────────────────────────────
+    //
+    // Phase 2a treats every column as a single block (block_count == 1).
+    // Phase 2b will introduce multi-block layouts. These tests pin the
+    // contract so the API is stable before the format changes.
+
+    #[test]
+    fn alix_block_count_is_one_for_every_codec() {
+        // BitPacked
+        let bp = ColumnCodec::BitPacked(BitPackedInts::pack(&[1, 2, 3]));
+        assert_eq!(bp.block_count(), 1);
+
+        // Dict
+        let mut b = DictionaryBuilder::new();
+        b.add("x");
+        let dict = ColumnCodec::Dict(b.build());
+        assert_eq!(dict.block_count(), 1);
+
+        // Bitmap
+        let bm = ColumnCodec::Bitmap(BitVector::from_bools(&[true, false]));
+        assert_eq!(bm.block_count(), 1);
+
+        // Int8Vector
+        let iv = ColumnCodec::Int8Vector {
+            data: vec![1i8, 2, 3, 4],
+            dimensions: 2,
+        };
+        assert_eq!(iv.block_count(), 1);
+
+        // Float64
+        let f64 = ColumnCodec::Float64(vec![1.0, 2.0]);
+        assert_eq!(f64.block_count(), 1);
+
+        // Float32Vector
+        let fv = ColumnCodec::Float32Vector {
+            data: vec![1.0f32, 2.0, 3.0, 4.0],
+            dimensions: 2,
+        };
+        assert_eq!(fv.block_count(), 1);
+
+        // RawI64
+        let r64 = ColumnCodec::RawI64(vec![-1, 2, -3]);
+        assert_eq!(r64.block_count(), 1);
+    }
+
+    #[test]
+    fn gus_block_at_zero_carries_full_row_count() {
+        let bp = ColumnCodec::BitPacked(BitPackedInts::pack(&[1, 2, 3, 4, 5]));
+        let entry = bp.block_at(0).expect("block 0 exists");
+        assert_eq!(entry.row_count, 5);
+
+        let r64 = ColumnCodec::RawI64(vec![-1, 2, -3, 4]);
+        let entry = r64.block_at(0).expect("block 0 exists");
+        assert_eq!(entry.row_count, 4);
+    }
+
+    #[test]
+    fn vincent_empty_column_has_one_zero_row_block() {
+        // Phase 2a convention: empty columns still report block_count == 1
+        // so downstream serializers can treat block emission uniformly.
+        let empty = ColumnCodec::RawI64(Vec::new());
+        assert_eq!(empty.block_count(), 1);
+        let entry = empty.block_at(0).expect("zero-row block at 0");
+        assert_eq!(entry.row_count, 0);
+    }
+
+    #[test]
+    fn jules_block_at_out_of_bounds_returns_none() {
+        let bp = ColumnCodec::BitPacked(BitPackedInts::pack(&[1, 2, 3]));
+        assert!(bp.block_at(1).is_none());
+        assert!(bp.block_at(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn mia_block_iter_yields_block_count_entries() {
+        let r64 = ColumnCodec::RawI64(vec![-1, 2, -3, 4]);
+        let entries: Vec<_> = r64.block_iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].row_count, 4);
+    }
+
+    #[test]
+    fn butch_block_row_counts_sum_to_column_len() {
+        // Phase 2a: trivially true (one block, row_count == len).
+        // Phase 2b: this contract is the migration test — multi-block
+        // serializers must preserve total row count.
+        for col in [
+            ColumnCodec::BitPacked(BitPackedInts::pack(&[1, 2, 3, 4, 5, 6, 7])),
+            ColumnCodec::Float64(vec![1.0, 2.0, 3.0]),
+            ColumnCodec::RawI64(vec![-1, 2, -3, 4, -5]),
+        ] {
+            let total: u32 = col.block_iter().map(|b| b.row_count).sum();
+            assert_eq!(total as usize, col.len());
+        }
     }
 }
