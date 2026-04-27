@@ -572,6 +572,52 @@ impl<Id: EntityId> PropertyStorage<Id> {
         columns.get(key).map(|col| col.block_zone_maps().to_vec())
     }
 
+    /// Returns the number of compressed blocks for a property column.
+    ///
+    /// Returns `None` when the column doesn't exist; returns `Some(0)` for
+    /// an uncompressed column.
+    #[cfg(not(feature = "temporal"))]
+    #[must_use]
+    pub fn block_count_for(&self, key: &PropertyKey) -> Option<usize> {
+        self.columns.read().get(key).map(|col| col.block_count())
+    }
+
+    /// Decodes a single compressed block of a property column.
+    ///
+    /// See [`PropertyColumn::decode_block`] for semantics. Returns `None`
+    /// when the column doesn't exist, the column is uncompressed, or
+    /// `block_idx` is out of range.
+    #[cfg(not(feature = "temporal"))]
+    #[must_use]
+    pub fn decode_block_for(
+        &self,
+        key: &PropertyKey,
+        block_idx: usize,
+    ) -> Option<DecodedBlock<Id>> {
+        self.columns
+            .read()
+            .get(key)
+            .and_then(|col| col.decode_block(block_idx))
+    }
+
+    /// Decodes every compressed block of a property column under a single
+    /// read-lock acquisition, returning them as a `Vec`.
+    ///
+    /// Returns an empty `Vec` when the column doesn't exist or is
+    /// uncompressed. Phase 4's iterator-bounds operator prefers
+    /// [`Self::decode_block_for`] (after pruning by zone map) over
+    /// decoding all blocks up-front; this method exists for tests and
+    /// debug tools that want the whole picture.
+    #[cfg(not(feature = "temporal"))]
+    #[must_use]
+    pub fn decoded_blocks_for(&self, key: &PropertyKey) -> Vec<DecodedBlock<Id>> {
+        let columns = self.columns.read();
+        match columns.get(key) {
+            Some(col) => col.iter_decoded_blocks().collect(),
+            None => Vec::new(),
+        }
+    }
+
     /// Checks if a range predicate might match any values (using zone maps).
     ///
     /// Returns `false` only when we're *certain* no values match the range.
@@ -771,6 +817,21 @@ impl CompressedColumnData {
             }
         }
     }
+}
+
+/// A decoded compressed block of `(id, value)` pairs from a property column.
+///
+/// Phase 4's iterator-bounds operator consumes these after pruning via
+/// per-block zone maps. The `entries` are sorted by entity id (matching
+/// the underlying compressed layout).
+#[cfg(not(feature = "temporal"))]
+#[derive(Debug, Clone)]
+pub struct DecodedBlock<Id: EntityId> {
+    /// Per-block min/max/null/row counts populated when the block was
+    /// compressed.
+    pub zone_map: ZoneMapEntry,
+    /// `(id, value)` pairs, sorted by id.
+    pub entries: Vec<(Id, Value)>,
 }
 
 /// Statistics about column compression.
@@ -1356,6 +1417,96 @@ impl<Id: EntityId> PropertyColumn<Id> {
     #[must_use]
     pub fn block_zone_maps(&self) -> &[ZoneMapEntry] {
         &self.block_zone_maps
+    }
+
+    /// Returns the number of compressed blocks. Equal to
+    /// `block_zone_maps().len()`. Returns 0 for uncompressed columns.
+    #[must_use]
+    pub fn block_count(&self) -> usize {
+        self.block_zone_maps.len()
+    }
+
+    /// Decodes a single compressed block into `(id, value)` pairs.
+    ///
+    /// Returns `None` when the column is uncompressed or when `block_idx`
+    /// is out of range. The block contains exactly the rows that
+    /// [`block_zone_maps`](Self::block_zone_maps) at the same index
+    /// describes (`row_count` entries).
+    ///
+    /// **Today** the implementation decodes the full compressed array
+    /// once and slices the result; both calls are O(N). When Phase 5/6
+    /// makes blocks independently decodable on-disk, the API contract
+    /// stays the same and the implementation becomes per-block.
+    #[must_use]
+    pub fn decode_block(&self, block_idx: usize) -> Option<DecodedBlock<Id>> {
+        let zone_map = self.block_zone_maps.get(block_idx)?.clone();
+        let compressed = self.compressed.as_ref()?;
+
+        let block_size = DEFAULT_BLOCK_ROWS as usize;
+        let start = block_idx * block_size;
+        let end = match self.compressed_count.min(start + block_size) {
+            // Bounds-check: the last block may be short.
+            n if n > start => n,
+            _ => return None,
+        };
+
+        let entries = match compressed {
+            CompressedColumnData::Integers {
+                data, index_to_id, ..
+            } => {
+                let raw = TypeSpecificCompressor::decompress_integers(data).ok()?;
+                let signed: Vec<i64> = raw
+                    .iter()
+                    .map(|&v| crate::codec::zigzag_decode(v))
+                    .collect();
+                index_to_id
+                    .iter()
+                    .zip(signed.iter())
+                    .skip(start)
+                    .take(end - start)
+                    .map(|(&id_u64, &value)| (Id::from_u64(id_u64), Value::Int64(value)))
+                    .collect()
+            }
+            CompressedColumnData::Strings {
+                encoding,
+                index_to_id,
+                ..
+            } => index_to_id
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(end - start)
+                .filter_map(|(i, &id_u64)| {
+                    encoding
+                        .get(i)
+                        .map(|s| (Id::from_u64(id_u64), Value::String(ArcStr::from(s))))
+                })
+                .collect(),
+            CompressedColumnData::Booleans {
+                data, index_to_id, ..
+            } => {
+                let raw = TypeSpecificCompressor::decompress_booleans(data).ok()?;
+                index_to_id
+                    .iter()
+                    .zip(raw.iter())
+                    .skip(start)
+                    .take(end - start)
+                    .map(|(&id_u64, &value)| (Id::from_u64(id_u64), Value::Bool(value)))
+                    .collect()
+            }
+        };
+
+        Some(DecodedBlock { zone_map, entries })
+    }
+
+    /// Iterates all compressed blocks, decoding each in turn.
+    ///
+    /// Empty for uncompressed columns. Phase 4's iterator-bounds operator
+    /// will prefer `decode_block(idx)` after pruning via
+    /// [`block_zone_maps`](Self::block_zone_maps); this iterator is the
+    /// "decode everything" fallback.
+    pub fn iter_decoded_blocks(&self) -> impl Iterator<Item = DecodedBlock<Id>> + '_ {
+        (0..self.block_count()).filter_map(|idx| self.decode_block(idx))
     }
 
     /// Uses zone map to check if any values could satisfy the predicate.
@@ -2307,6 +2458,126 @@ mod tests {
         assert_eq!(blocks[0].min, Some(Value::Float64(0.0)));
         assert_eq!(blocks[0].max, Some(Value::Float64(1023.0 * 0.5)));
         assert_eq!(blocks[1].min, Some(Value::Float64(1024.0 * 0.5)));
+    }
+
+    // ── Phase 2e: vectorized batch decoders ──────────────────────────
+
+    #[test]
+    fn test_block_count_zero_for_uncompressed_column() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..50 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
+        }
+        assert_eq!(col.block_count(), 0);
+    }
+
+    #[test]
+    fn test_block_count_matches_zone_maps_after_compression() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..2500 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
+        }
+        col.force_compress();
+        assert_eq!(col.block_count(), col.block_zone_maps().len());
+        assert_eq!(col.block_count(), 3);
+    }
+
+    #[test]
+    fn test_decode_block_returns_correct_pairs_integer() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..2500 {
+            col.set(
+                NodeId::new(i),
+                Value::Int64(1000 + i64::try_from(i).unwrap()),
+            );
+        }
+        col.force_compress();
+
+        let block0 = col.decode_block(0).expect("block 0 must exist");
+        assert_eq!(block0.entries.len(), 1024);
+        assert_eq!(block0.entries[0], (NodeId::new(0), Value::Int64(1000)));
+        assert_eq!(
+            block0.entries[1023],
+            (NodeId::new(1023), Value::Int64(2023))
+        );
+        assert_eq!(block0.zone_map.row_count, 1024);
+
+        let block2 = col.decode_block(2).expect("block 2 must exist");
+        assert_eq!(block2.entries.len(), 452);
+        assert_eq!(block2.entries[0], (NodeId::new(2048), Value::Int64(3048)));
+    }
+
+    #[test]
+    fn test_decode_block_returns_correct_pairs_boolean() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..2500 {
+            col.set(NodeId::new(i), Value::Bool(i % 2 == 0));
+        }
+        col.force_compress();
+
+        let block0 = col.decode_block(0).expect("block 0 must exist");
+        assert_eq!(block0.entries.len(), 1024);
+        assert_eq!(block0.entries[0], (NodeId::new(0), Value::Bool(true)));
+        assert_eq!(block0.entries[1], (NodeId::new(1), Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_decode_block_returns_correct_pairs_string() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        let strings = ["alpha", "bravo", "charlie", "delta"];
+        for i in 0u64..2500 {
+            col.set(
+                NodeId::new(i),
+                Value::String(ArcStr::from(strings[(i % 4) as usize])),
+            );
+        }
+        col.force_compress();
+
+        let block0 = col.decode_block(0).expect("block 0 must exist");
+        assert_eq!(block0.entries.len(), 1024);
+        assert_eq!(
+            block0.entries[0],
+            (NodeId::new(0), Value::String(ArcStr::from("alpha")))
+        );
+        assert_eq!(
+            block0.entries[3],
+            (NodeId::new(3), Value::String(ArcStr::from("delta")))
+        );
+    }
+
+    #[test]
+    fn test_decode_block_out_of_range_returns_none() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..2500 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
+        }
+        col.force_compress();
+
+        assert!(col.decode_block(99).is_none());
+    }
+
+    #[test]
+    fn test_decode_block_uncompressed_returns_none() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..50 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
+        }
+        // No force_compress — column is uncompressed.
+        assert!(col.decode_block(0).is_none());
+    }
+
+    #[test]
+    fn test_iter_decoded_blocks_yields_all_blocks() {
+        let mut col: PropertyColumn<NodeId> = PropertyColumn::new();
+        for i in 0u64..2500 {
+            col.set(NodeId::new(i), Value::Int64(i64::try_from(i).unwrap()));
+        }
+        col.force_compress();
+
+        let blocks: Vec<_> = col.iter_decoded_blocks().collect();
+        assert_eq!(blocks.len(), 3);
+        let total_rows: usize = blocks.iter().map(|b| b.entries.len()).sum();
+        assert_eq!(total_rows, 2500);
     }
 
     #[test]

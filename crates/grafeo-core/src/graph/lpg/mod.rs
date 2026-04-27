@@ -25,6 +25,8 @@ mod store;
 // Types are always available (used by GraphStore trait and RDF adapter)
 pub use edge::{Edge, EdgeFlags, EdgeRecord};
 pub use node::{Node, NodeFlags, NodeRecord};
+#[cfg(not(feature = "temporal"))]
+pub use property::DecodedBlock;
 pub use property::{CompareOp, PropertyStorage};
 
 // Store and section require the lpg feature
