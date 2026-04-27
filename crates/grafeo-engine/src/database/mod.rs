@@ -2226,9 +2226,16 @@ impl GrafeoDB {
         #[cfg(feature = "ring-index")]
         if self.rdf_store.ring().is_some() {
             let ring = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store));
-            self.buffer_manager.register_consumer(Arc::new(
-                section_consumer::SectionConsumer::new(Arc::new(ring)),
-            ));
+            // Ring is the first index section to opt into spill wiring.
+            // The Ring's `swap_to_mmap` still returns `NotSupported` until
+            // its packed disk format lands, so a spill attempt today fails
+            // cleanly without leaking files; once the format is in place,
+            // no engine-side change is required to enable real eviction.
+            let consumer = match self.buffer_manager.config().spill_path.clone() {
+                Some(path) => section_consumer::SectionConsumer::with_spill(Arc::new(ring), path),
+                None => section_consumer::SectionConsumer::new(Arc::new(ring)),
+            };
+            self.buffer_manager.register_consumer(Arc::new(consumer));
         }
 
         // Vector indexes: dynamic consumer that re-queries the store on each

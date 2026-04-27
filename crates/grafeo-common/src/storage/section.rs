@@ -8,8 +8,12 @@
 //! and the container I/O layer (grafeo-storage). Serializers produce opaque
 //! bytes; the container writes them to disk without knowing the contents.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
+use crate::memory::buffer::SpillError;
+use crate::storage::page_fetcher::PageFetcher;
 use crate::utils::error::Result;
 
 // ── Section Type ────────────────────────────────────────────────────
@@ -206,6 +210,46 @@ pub trait Section: Send + Sync {
 
     /// Estimated memory usage of this section in bytes.
     fn memory_usage(&self) -> usize;
+
+    /// Switch to a mmap-backed read mode using bytes from `fetcher`.
+    ///
+    /// Called by the spill path after the section has been serialized
+    /// to a spill file and that file has been memory-mapped. The
+    /// `fetcher` lifetime is tied to the `Arc`: the section should
+    /// retain the `Arc` for as long as it serves reads from the mmap.
+    ///
+    /// Implementations use interior mutability to swap their backing
+    /// storage. Eager-deserialize sections may decode `fetcher.fetch(0,
+    /// fetcher.len())` into a fresh in-memory copy and keep the
+    /// `fetcher` alive only for OS page-cache warmth; zero-copy
+    /// sections (a future addition) read directly from the fetcher on
+    /// demand.
+    ///
+    /// # Errors
+    ///
+    /// The default returns [`SpillError::NotSupported`]. Concrete
+    /// sections override this to enable spill-to-disk; failures during
+    /// the swap should be reported via [`SpillError::IoError`] or
+    /// another appropriate variant.
+    fn swap_to_mmap(&self, _fetcher: Arc<dyn PageFetcher>) -> std::result::Result<(), SpillError> {
+        Err(SpillError::NotSupported)
+    }
+
+    /// Release any mmap-backed view and return to a fully in-memory
+    /// representation.
+    ///
+    /// The default is a no-op (already in-memory). Sections that
+    /// override [`swap_to_mmap`](Section::swap_to_mmap) should also
+    /// override this to drop their `Arc<dyn PageFetcher>` and, if
+    /// needed, deserialize from a saved buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SpillError`] if the reload fails (for example,
+    /// because the spill file is no longer readable).
+    fn reload_to_ram(&self) -> std::result::Result<(), SpillError> {
+        Ok(())
+    }
 }
 
 // ── Tier Override ───────────────────────────────────────────────────

@@ -4,8 +4,10 @@
 //! addressable and checksummed. This module defines the contract between
 //! section serializers (in `grafeo-core`) and section I/O (in `grafeo-storage`).
 
+pub mod page_fetcher;
 pub mod section;
 
+pub use page_fetcher::{AccessHint, PageFetcher};
 pub use section::{
     Section, SectionDirectoryEntry, SectionFlags, SectionMemoryConfig, SectionType, TierOverride,
 };

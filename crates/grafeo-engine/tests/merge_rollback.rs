@@ -100,12 +100,8 @@ fn test_merge_relationship_create_rolled_back_does_not_orphan_edge() {
     let db = GrafeoDB::new_in_memory();
     let mut session = db.session();
 
-    session
-        .execute("INSERT (:N {name: 'Alix'})")
-        .unwrap();
-    session
-        .execute("INSERT (:N {name: 'Gus'})")
-        .unwrap();
+    session.execute("INSERT (:N {name: 'Alix'})").unwrap();
+    session.execute("INSERT (:N {name: 'Gus'})").unwrap();
 
     session.begin_transaction().unwrap();
     session

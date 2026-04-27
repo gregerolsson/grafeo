@@ -22,6 +22,9 @@ pub mod mmap;
 #[cfg(feature = "wal")]
 pub mod page_fetcher;
 
+#[cfg(feature = "wal")]
+pub mod spill;
+
 pub use directory::SectionDirectory;
 
 #[cfg(feature = "wal")]
@@ -29,3 +32,6 @@ pub use mmap::MmapSection;
 
 #[cfg(feature = "wal")]
 pub use page_fetcher::{AccessHint, MmapPageFetcher, PageFetcher};
+
+#[cfg(feature = "wal")]
+pub use spill::write_and_mmap_spill_file;
