@@ -59,4 +59,6 @@ pub use grant::{CompositeGrant, GrantReleaser, MemoryGrant};
 pub use manager::{BufferManager, BufferManagerConfig};
 pub use region::MemoryRegion;
 pub use stats::{BufferStats, PressureLevel};
-pub use tiered::{StorageTier, TieredStore};
+pub use tiered::StorageTier;
+#[allow(deprecated)]
+pub use tiered::TieredStore;

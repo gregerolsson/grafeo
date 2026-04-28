@@ -51,6 +51,15 @@ impl StorageTier {
 
 /// A storage subsystem that can transition between RAM and disk tiers.
 ///
+/// **Deprecated (Phase 8c, 0.5.42):** the [`crate::storage::section::Section`]
+/// trait subsumed this trait's responsibilities — its `swap_to_mmap` and
+/// `reload_to_ram` methods cover the same lifecycle, and every wired
+/// section type (LPG, RDF, Vector, Ring, Compact) implements `Section`,
+/// not `TieredStore`. This trait was never implemented anywhere; it is
+/// kept for one release as a no-op to avoid breaking downstream callers
+/// who may have prepared their own impls. Migrate to `Section` for new
+/// code; the standalone trait will be removed in 0.6.0.
+///
 /// Implementors manage their own data layout for both tiers. The
 /// [`BufferManager`](super::BufferManager) triggers transitions via the
 /// [`MemoryConsumer`](super::MemoryConsumer) trait; this trait provides
@@ -62,6 +71,11 @@ impl StorageTier {
 /// `grafeo-core` (section serializers) and `grafeo-engine` (orchestration).
 /// Implementations that need filesystem I/O (mmap, file creation) should
 /// live in `grafeo-engine`, not `grafeo-core`.
+#[deprecated(
+    since = "0.5.42",
+    note = "Use the `Section` trait (with `swap_to_mmap` / `reload_to_ram`) and `MemoryConsumer` instead. \
+            This trait was never implemented anywhere; it will be removed in 0.6.0."
+)]
 pub trait TieredStore: Send + Sync {
     /// Estimated RAM footprint in bytes if built entirely in memory.
     ///

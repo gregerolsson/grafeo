@@ -279,6 +279,134 @@ impl BufferManager {
         total_freed
     }
 
+    /// Spills all consumers whose [`MemoryConsumer::name`] equals `name`.
+    ///
+    /// Used for targeted [`crate::storage::TierOverride::ForceDisk`] enforcement
+    /// at database open: each section type configured as `ForceDisk` triggers a
+    /// spill on its matching consumer only, leaving other consumers untouched.
+    ///
+    /// Best-effort: a failure on one consumer does not stop the others. Returns
+    /// total bytes freed across all matching consumers.
+    pub fn spill_consumer_by_name(&self, name: &str) -> usize {
+        let consumers = self.consumers.read();
+        let mut total_freed = 0;
+        for consumer in consumers.iter() {
+            if consumer.name() == name
+                && consumer.can_spill()
+                && let Ok(freed) = consumer.spill(usize::MAX)
+            {
+                total_freed += freed;
+            }
+        }
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            target: "grafeo::buffer",
+            consumer = name,
+            freed_bytes = total_freed,
+            "tier transition: spill"
+        );
+        total_freed
+    }
+
+    /// Reloads OnDisk consumers back into RAM, in priority order (highest
+    /// priority first), as long as projected usage stays below
+    /// `target_fraction` of the budget.
+    ///
+    /// Phase 9a: closes the loop on the spill / reload lifecycle. Today
+    /// consumers spill on memory pressure and stay OnDisk forever; this
+    /// method gives users (or a future background thread) an explicit
+    /// trigger to bring spilled state back into RAM after pressure drops.
+    ///
+    /// The walk visits consumers whose
+    /// [`MemoryConsumer::current_tier`] is
+    /// [`super::tiered::StorageTier::OnDisk`] and calls
+    /// [`MemoryConsumer::reload`] on each. After each reload, if current
+    /// allocation exceeds `target_fraction * budget`, the loop stops and
+    /// leaves remaining consumers on disk. `reload()` errors are
+    /// logged-and-skipped: the operation is best-effort.
+    ///
+    /// Returns the number of consumers successfully reloaded.
+    ///
+    /// `target_fraction` is clamped to `[0.0, 1.0]`. A value of 0.7 means
+    /// "stop bringing things back when we'd hit 70% of the budget" —
+    /// matching the soft-limit threshold default.
+    pub fn reload_eligible(&self, target_fraction: f64) -> usize {
+        let target_fraction = target_fraction.clamp(0.0, 1.0);
+        // reason: target byte count from a bounded fraction is non-negative and bounded by budget
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let target_bytes = (self.config.budget as f64 * target_fraction) as usize;
+
+        let candidates: Vec<Arc<dyn MemoryConsumer>> = {
+            let consumers = self.consumers.read();
+            let mut out: Vec<_> = consumers
+                .iter()
+                .filter(|c| c.current_tier() == super::tiered::StorageTier::OnDisk)
+                .map(Arc::clone)
+                .collect();
+            // Highest priority first: graph storage > active txn > index > query cache.
+            out.sort_by_key(|c| std::cmp::Reverse(c.eviction_priority()));
+            out
+        };
+
+        let mut reloaded = 0;
+        for consumer in candidates {
+            let current = self.allocated.load(Ordering::Relaxed);
+            if current >= target_bytes {
+                break;
+            }
+            match consumer.reload() {
+                Ok(()) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        target: "grafeo::buffer",
+                        consumer = consumer.name(),
+                        "tier transition: reload"
+                    );
+                    reloaded += 1;
+                }
+                Err(_e) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        target: "grafeo::buffer",
+                        consumer = consumer.name(),
+                        error = %_e,
+                        "tier reload failed"
+                    );
+                    continue;
+                }
+            }
+        }
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            target: "grafeo::buffer",
+            reloaded_count = reloaded,
+            target_fraction = target_fraction,
+            "reload_eligible cycle complete"
+        );
+        reloaded
+    }
+
+    /// Returns the current tier reported by each registered consumer that
+    /// wraps a section.
+    ///
+    /// Tier is sourced from [`MemoryConsumer::current_tier`]. Consumers whose
+    /// names don't follow the `"section:<TypeName>"` convention are skipped
+    /// (e.g. CDC, overlay).
+    #[must_use]
+    pub fn snapshot_consumer_tiers(&self) -> Vec<(String, super::tiered::StorageTier)> {
+        let consumers = self.consumers.read();
+        consumers
+            .iter()
+            .filter_map(|c| {
+                let name = c.name();
+                if !name.starts_with("section:") {
+                    return None;
+                }
+                Some((name.to_string(), c.current_tier()))
+            })
+            .collect()
+    }
+
     /// Returns the configuration.
     #[must_use]
     pub fn config(&self) -> &BufferManagerConfig {

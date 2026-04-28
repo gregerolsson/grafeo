@@ -685,17 +685,12 @@ impl GrafeoDB {
         ))]
         db.restore_spill_files();
 
-        // If VectorStore is configured as ForceDisk, immediately spill embeddings.
-        // This must happen after register_section_consumers() which creates the consumer.
-        #[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
-        if db
-            .config
-            .section_configs
-            .get(&grafeo_common::storage::SectionType::VectorStore)
-            .is_some_and(|c| c.tier == grafeo_common::storage::TierOverride::ForceDisk)
-        {
-            db.buffer_manager.spill_all();
-        }
+        // Phase 8a: apply per-section ForceDisk overrides. Each section
+        // type configured as ForceDisk triggers a targeted spill of its
+        // matching consumer; sections with Auto/ForceRam are left alone.
+        // Must happen after register_section_consumers() which creates
+        // the consumers we're about to spill.
+        db.apply_force_disk_overrides();
 
         Ok(db)
     }
@@ -2389,6 +2384,96 @@ impl GrafeoDB {
         self.buffer_manager.register_consumer(
             Arc::clone(&self.cdc_log) as Arc<dyn grafeo_common::memory::MemoryConsumer>
         );
+    }
+
+    /// Applies `TierOverride::ForceDisk` overrides at database open time.
+    ///
+    /// For each section type configured as `ForceDisk` in
+    /// [`Config::section_configs`], spills the matching registered consumer
+    /// (named `"section:<TypeName>"`). Sections configured as `Auto` or
+    /// `ForceRam` are left alone — `Auto` lets the BufferManager react to
+    /// pressure normally; `ForceRam` is purely declarative until Phase 8g
+    /// adds runtime enforcement.
+    ///
+    /// Must be called after [`Self::register_section_consumers`].
+    fn apply_force_disk_overrides(&self) {
+        use grafeo_common::storage::TierOverride;
+
+        for (section_type, mem_config) in &self.config.section_configs {
+            if mem_config.tier != TierOverride::ForceDisk {
+                continue;
+            }
+            let consumer_name = format!("section:{section_type:?}");
+            #[cfg(feature = "tracing")]
+            tracing::info!(
+                target: "grafeo::tier",
+                section = ?section_type,
+                tier = "ForceDisk",
+                "applying tier override at db open"
+            );
+            self.buffer_manager.spill_consumer_by_name(&consumer_name);
+        }
+    }
+
+    /// Reloads spilled consumers back into RAM up to a target memory fraction.
+    ///
+    /// Phase 9a: closes the spill / reload loop. After memory pressure drops
+    /// (e.g. a workload finishes, or a checkpoint freed mutation overlay
+    /// state), call this to bring spilled section data back into RAM for
+    /// faster subsequent reads.
+    ///
+    /// Walks consumers currently reporting `StorageTier::OnDisk`, in priority
+    /// order (highest first), reloading each as long as projected memory
+    /// usage stays below `target_fraction * memory_limit`.
+    ///
+    /// Returns the number of consumers successfully reloaded.
+    ///
+    /// `target_fraction` is clamped to `[0.0, 1.0]`. A typical value is `0.7`
+    /// (matching the default `soft_limit_fraction`).
+    pub fn reload_eligible(&self, target_fraction: f64) -> usize {
+        self.buffer_manager.reload_eligible(target_fraction)
+    }
+
+    /// Returns the current [`StorageTier`] of every registered section consumer.
+    ///
+    /// The map keys are the [`SectionType`]s parsed from each consumer's name
+    /// (consumers whose names don't follow the `"section:<TypeName>"` convention
+    /// are skipped). Tier classification is best-effort: a consumer reporting
+    /// zero `memory_usage()` and `can_spill() == true` is reported as `OnDisk`,
+    /// otherwise `InMemory` (or `Uninitialized` if both are zero).
+    ///
+    /// Useful for tests, observability, and binding-side introspection.
+    ///
+    /// [`StorageTier`]: grafeo_common::memory::buffer::StorageTier
+    /// [`SectionType`]: grafeo_common::storage::SectionType
+    #[must_use]
+    pub fn storage_tiers(
+        &self,
+    ) -> hashbrown::HashMap<
+        grafeo_common::storage::SectionType,
+        grafeo_common::memory::buffer::StorageTier,
+    > {
+        use grafeo_common::storage::SectionType;
+        let snapshot = self.buffer_manager.snapshot_consumer_tiers();
+        let mut out = hashbrown::HashMap::new();
+        for (name, tier) in snapshot {
+            let Some(suffix) = name.strip_prefix("section:") else {
+                continue;
+            };
+            let section_type = match suffix {
+                "LpgStore" => SectionType::LpgStore,
+                "RdfStore" => SectionType::RdfStore,
+                "CompactStore" => SectionType::CompactStore,
+                "VectorStore" => SectionType::VectorStore,
+                "TextIndex" => SectionType::TextIndex,
+                "RdfRing" => SectionType::RdfRing,
+                "PropertyIndex" => SectionType::PropertyIndex,
+                "Catalog" => SectionType::Catalog,
+                _ => continue,
+            };
+            out.insert(section_type, tier);
+        }
+        out
     }
 
     /// Discovers and re-opens spill files from a previous session.

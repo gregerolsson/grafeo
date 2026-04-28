@@ -346,6 +346,7 @@ nav:
       - architecture/optimization/index.md
     - Memory Management:
       - architecture/memory/index.md
+      - Storage Tiers: architecture/memory/storage-tiers.md
     - Transactions:
       - architecture/transactions/index.md
 

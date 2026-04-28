@@ -69,6 +69,23 @@ pub trait MemoryConsumer: Send + Sync {
     fn reload(&self) -> Result<(), SpillError> {
         Ok(())
     }
+
+    /// Reports the consumer's current storage tier (Phase 8b introspection).
+    ///
+    /// Default: [`StorageTier::InMemory`] for any consumer that has nonzero
+    /// `memory_usage()`, [`StorageTier::Uninitialized`] otherwise. Specialized
+    /// consumers that maintain explicit on-disk state (e.g. `CompactStoreConsumer`,
+    /// `VectorIndexConsumer`) override this with their own tier-tracking logic.
+    ///
+    /// Used by [`crate::memory::buffer::BufferManager::snapshot_consumer_tiers`]
+    /// for observability and tests; not on any hot path.
+    fn current_tier(&self) -> super::tiered::StorageTier {
+        if self.memory_usage() == 0 {
+            super::tiered::StorageTier::Uninitialized
+        } else {
+            super::tiered::StorageTier::InMemory
+        }
+    }
 }
 
 /// Standard priority levels for common consumer types.

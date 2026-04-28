@@ -638,6 +638,47 @@ impl Config {
         self
     }
 
+    /// Pins a section to a specific storage tier (Phase 8d convenience).
+    ///
+    /// Shorthand for `with_section_config(section_type, SectionMemoryConfig {
+    /// tier, max_ram: None })`. Pass [`TierOverride::ForceDisk`] to spill the
+    /// section at database open, [`TierOverride::ForceRam`] to declare it
+    /// must stay in RAM (declarative only until Phase 8g), or
+    /// [`TierOverride::Auto`] (the default).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use grafeo_engine::Config;
+    /// use grafeo_common::storage::{SectionType, TierOverride};
+    ///
+    /// // Force the LPG compact base to mmap mode at open.
+    /// let config = Config::in_memory()
+    ///     .with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
+    /// ```
+    ///
+    /// [`TierOverride::ForceDisk`]: grafeo_common::storage::TierOverride::ForceDisk
+    /// [`TierOverride::ForceRam`]: grafeo_common::storage::TierOverride::ForceRam
+    /// [`TierOverride::Auto`]: grafeo_common::storage::TierOverride::Auto
+    #[must_use]
+    pub fn with_section_tier(
+        self,
+        section_type: grafeo_common::storage::SectionType,
+        tier: grafeo_common::storage::TierOverride,
+    ) -> Self {
+        let existing_max_ram = self
+            .section_configs
+            .get(&section_type)
+            .and_then(|c| c.max_ram);
+        self.with_section_config(
+            section_type,
+            grafeo_common::storage::SectionMemoryConfig {
+                max_ram: existing_max_ram,
+                tier,
+            },
+        )
+    }
+
     /// Sets the automatic checkpoint interval.
     ///
     /// When set, the engine periodically flushes dirty sections to disk.

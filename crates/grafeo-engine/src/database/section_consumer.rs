@@ -362,6 +362,22 @@ impl MemoryConsumer for VectorIndexConsumer {
         self.spill_path.is_some()
     }
 
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        use grafeo_common::memory::StorageTier;
+        // Any spilled per-index storage means at least one index's
+        // embeddings live on disk via MmapStorage. Report OnDisk in
+        // that case; otherwise InMemory if any index has data, else
+        // Uninitialized.
+        if !self.spilled.read().is_empty() {
+            return StorageTier::OnDisk;
+        }
+        if self.memory_usage() == 0 {
+            StorageTier::Uninitialized
+        } else {
+            StorageTier::InMemory
+        }
+    }
+
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
         let store = self
             .store
@@ -553,6 +569,20 @@ impl MemoryConsumer for CompactStoreConsumer {
             return false;
         };
         self.spill_path.is_some() && !tiered.is_on_disk()
+    }
+
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        use grafeo_common::memory::StorageTier;
+        let Some(tiered) = self.tiered.upgrade() else {
+            return StorageTier::Uninitialized;
+        };
+        if tiered.is_on_disk() {
+            StorageTier::OnDisk
+        } else if self.memory_usage() == 0 {
+            StorageTier::Uninitialized
+        } else {
+            StorageTier::InMemory
+        }
     }
 
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
