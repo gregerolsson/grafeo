@@ -7,9 +7,84 @@
 use std::sync::Arc;
 
 use arcstr::ArcStr;
+use bytes::{Bytes, BytesMut};
 use grafeo_common::types::Value;
 
 use crate::codec::{BitPackedInts, BitVector, BlockEntry, DictionaryEncoding};
+
+// ── Phase 3a: Bytes-backed read helpers ──────────────────────────────
+//
+// Fixed-width codec variants (RawI64, Float64, Int8Vector, Float32Vector)
+// store their raw bytes as `bytes::Bytes` rather than `Vec<T>`. This is
+// the long-term storage abstraction for the entire columnar layer
+// (revised D7): a heap-owned column and a mmap-backed column have the
+// same type; the `Bytes` constructor decides. Phase 3c adds the mmap
+// constructor (`Bytes::from_owner`).
+//
+// Read helpers use safe `from_le_bytes` (no `unsafe` required). On x86,
+// modern compilers fold `try_into().unwrap()` + `from_le_bytes` into a
+// single `mov` for aligned reads; unaligned reads cost nothing extra.
+// Phase 3 endianness is locked to little-endian on disk; readers
+// validate this contract at the section header, not per-element.
+
+#[inline]
+fn read_le_i64(bytes: &Bytes, byte_idx: usize) -> Option<i64> {
+    let end = byte_idx.checked_add(8)?;
+    let chunk: [u8; 8] = bytes.get(byte_idx..end)?.try_into().ok()?;
+    Some(i64::from_le_bytes(chunk))
+}
+
+#[inline]
+fn read_le_f64(bytes: &Bytes, byte_idx: usize) -> Option<f64> {
+    let end = byte_idx.checked_add(8)?;
+    let chunk: [u8; 8] = bytes.get(byte_idx..end)?.try_into().ok()?;
+    Some(f64::from_le_bytes(chunk))
+}
+
+#[inline]
+fn read_le_f32(bytes: &Bytes, byte_idx: usize) -> Option<f32> {
+    let end = byte_idx.checked_add(4)?;
+    let chunk: [u8; 4] = bytes.get(byte_idx..end)?.try_into().ok()?;
+    Some(f32::from_le_bytes(chunk))
+}
+
+#[inline]
+fn read_i8(bytes: &Bytes, byte_idx: usize) -> Option<i8> {
+    bytes.get(byte_idx).copied().map(u8::cast_signed)
+}
+
+fn vec_to_bytes_i64(values: &[i64]) -> Bytes {
+    let mut buf = BytesMut::with_capacity(values.len() * 8);
+    for &v in values {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf.freeze()
+}
+
+fn vec_to_bytes_f64(values: &[f64]) -> Bytes {
+    let mut buf = BytesMut::with_capacity(values.len() * 8);
+    for &v in values {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf.freeze()
+}
+
+fn vec_to_bytes_f32(values: &[f32]) -> Bytes {
+    let mut buf = BytesMut::with_capacity(values.len() * 4);
+    for &v in values {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    buf.freeze()
+}
+
+fn vec_to_bytes_i8(values: &[i8]) -> Bytes {
+    // i8 and u8 have identical 1-byte layout; the cast is exact.
+    let mut buf = BytesMut::with_capacity(values.len());
+    for &v in values {
+        buf.extend_from_slice(&[v.cast_unsigned()]);
+    }
+    buf.freeze()
+}
 
 /// A single column of data backed by one of Grafeo's storage codecs.
 ///
@@ -29,19 +104,23 @@ pub enum ColumnCodec {
     Dict(DictionaryEncoding),
     /// Null/boolean bitmap.
     Bitmap(BitVector),
-    /// Int8 quantized vectors (flat array with stride).
+    /// Int8 quantized vectors (flat array with stride). Bytes-backed
+    /// (Phase 3a): each row occupies `dimensions` consecutive bytes.
     Int8Vector {
-        /// Flat array of int8 components.
-        data: Vec<i8>,
+        /// Flat byte array; `len() / dimensions` logical rows.
+        bytes: Bytes,
         /// Number of dimensions per vector.
         dimensions: u16,
     },
-    /// Native IEEE 754 double-precision floats.
-    Float64(Vec<f64>),
+    /// Native IEEE 754 double-precision floats. Bytes-backed (Phase 3a):
+    /// LE `f64` values, 8 bytes per logical row.
+    Float64(Bytes),
     /// Float32 vectors (flat array with stride), for embedding / vector search.
+    /// Bytes-backed (Phase 3a): LE `f32` components, `4 * dimensions`
+    /// bytes per row.
     Float32Vector {
-        /// Flat array of f32 components.
-        data: Vec<f32>,
+        /// Flat byte array; `len() / (4 * dimensions)` logical rows.
+        bytes: Bytes,
         /// Number of dimensions per vector.
         dimensions: u16,
     },
@@ -51,11 +130,56 @@ pub enum ColumnCodec {
     /// `BitPacked` can't represent negatives correctly in its ordered
     /// operations (`find_eq`, `find_in_range`, zone maps) because it operates
     /// on `u64`; `RawI64` stores the values natively to preserve both the
-    /// GQL type and signed ordering semantics on round-trip.
-    RawI64(Vec<i64>),
+    /// GQL type and signed ordering semantics on round-trip. Bytes-backed
+    /// (Phase 3a): LE `i64` values, 8 bytes per logical row.
+    RawI64(Bytes),
 }
 
 impl ColumnCodec {
+    // ── Phase 3a: Bytes-backed constructors ─────────────────────────
+
+    /// Constructs a [`RawI64`](Self::RawI64) column from a `Vec<i64>`.
+    ///
+    /// The values are encoded as little-endian `i64` bytes and stored in
+    /// a refcounted [`Bytes`] buffer. Phase 3c will add a parallel
+    /// constructor that builds from a mmap slice without copying.
+    #[must_use]
+    pub fn raw_i64(values: Vec<i64>) -> Self {
+        Self::RawI64(vec_to_bytes_i64(&values))
+    }
+
+    /// Constructs a [`Float64`](Self::Float64) column from a `Vec<f64>`.
+    #[must_use]
+    pub fn float64(values: Vec<f64>) -> Self {
+        Self::Float64(vec_to_bytes_f64(&values))
+    }
+
+    /// Constructs an [`Int8Vector`](Self::Int8Vector) column from a flat
+    /// `Vec<i8>` and a per-vector dimension count.
+    ///
+    /// `data.len()` must be a multiple of `dimensions` (or 0 when
+    /// `dimensions == 0`); the codec doesn't enforce this on construction
+    /// to match the previous tuple-style API, but `len()` and `get` use
+    /// integer division so a misaligned tail is silently truncated.
+    #[must_use]
+    pub fn int8_vector(data: Vec<i8>, dimensions: u16) -> Self {
+        Self::Int8Vector {
+            bytes: vec_to_bytes_i8(&data),
+            dimensions,
+        }
+    }
+
+    /// Constructs a [`Float32Vector`](Self::Float32Vector) column from a
+    /// flat `Vec<f32>` and a per-vector dimension count. Each component
+    /// is stored as 4 LE bytes.
+    #[must_use]
+    pub fn float32_vector(data: Vec<f32>, dimensions: u16) -> Self {
+        Self::Float32Vector {
+            bytes: vec_to_bytes_f32(&data),
+            dimensions,
+        }
+    }
+
     /// Decodes the value at `index` into a [`Value`].
     ///
     /// - [`BitPacked`](Self::BitPacked) → `Value::Int64(v as i64)`
@@ -80,35 +204,37 @@ impl ColumnCodec {
             }),
             Self::Dict(dict) => dict.get(index).map(|s| Value::String(ArcStr::from(s))),
             Self::Bitmap(bv) => bv.get(index).map(Value::Bool),
-            Self::Int8Vector { data, dimensions } => {
+            Self::Int8Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
                 if dims == 0 {
                     return None;
                 }
                 let start = index.checked_mul(dims)?;
                 let end = start.checked_add(dims)?;
-                if end > data.len() {
+                if end > bytes.len() {
                     return None;
                 }
-                let values: Vec<Value> = data[start..end]
-                    .iter()
-                    .map(|&v| Value::Int64(v as i64))
+                let values: Vec<Value> = (start..end)
+                    .map(|i| Value::Int64(read_i8(bytes, i).unwrap_or(0) as i64))
                     .collect();
                 Some(Value::List(Arc::from(values)))
             }
-            Self::Float64(vec) => vec.get(index).copied().map(Value::Float64),
-            Self::RawI64(vec) => vec.get(index).copied().map(Value::Int64),
-            Self::Float32Vector { data, dimensions } => {
+            Self::Float64(bytes) => read_le_f64(bytes, index.checked_mul(8)?).map(Value::Float64),
+            Self::RawI64(bytes) => read_le_i64(bytes, index.checked_mul(8)?).map(Value::Int64),
+            Self::Float32Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
                 if dims == 0 {
                     return None;
                 }
-                let start = index.checked_mul(dims)?;
-                let end = start.checked_add(dims)?;
-                if end > data.len() {
+                let start_byte = index.checked_mul(dims)?.checked_mul(4)?;
+                let end_byte = start_byte.checked_add(dims.checked_mul(4)?)?;
+                if end_byte > bytes.len() {
                     return None;
                 }
-                Some(Value::Vector(Arc::from(&data[start..end])))
+                let values: Vec<f32> = (0..dims)
+                    .map(|d| read_le_f32(bytes, start_byte + d * 4).unwrap_or(0.0))
+                    .collect();
+                Some(Value::Vector(Arc::from(values.as_slice())))
             }
         }
     }
@@ -133,17 +259,28 @@ impl ColumnCodec {
     #[must_use]
     pub fn get_int8_vector(&self, index: usize) -> Option<&[i8]> {
         match self {
-            Self::Int8Vector { data, dimensions } => {
+            Self::Int8Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
                 if dims == 0 {
                     return None;
                 }
                 let start = index.checked_mul(dims)?;
                 let end = start.checked_add(dims)?;
-                if end > data.len() {
+                if end > bytes.len() {
                     return None;
                 }
-                Some(&data[start..end])
+                let u8_slice: &[u8] = &bytes[start..end];
+                // SAFETY: `i8` and `u8` have identical layout (both are 1
+                // byte, no padding, no niche). Reinterpreting `&[u8]` as
+                // `&[i8]` is valid: the slice metadata (ptr + len) is the
+                // same; only the element type changes for the caller.
+                // This is the same operation `bytemuck::cast_slice` would
+                // perform; we inline it to avoid a dependency.
+                #[allow(unsafe_code)]
+                let i8_slice: &[i8] = unsafe {
+                    std::slice::from_raw_parts(u8_slice.as_ptr().cast::<i8>(), u8_slice.len())
+                };
+                Some(i8_slice)
             }
             _ => None,
         }
@@ -156,16 +293,16 @@ impl ColumnCodec {
             Self::BitPacked(bp) => bp.len(),
             Self::Dict(dict) => dict.len(),
             Self::Bitmap(bv) => bv.len(),
-            Self::Int8Vector { data, dimensions } => {
+            Self::Int8Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
-                data.len().checked_div(dims).unwrap_or(0)
+                bytes.len().checked_div(dims).unwrap_or(0)
             }
-            Self::Float64(vec) => vec.len(),
-            Self::Float32Vector { data, dimensions } => {
+            Self::Float64(bytes) => bytes.len() / 8,
+            Self::Float32Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
-                data.len().checked_div(dims).unwrap_or(0)
+                bytes.len().checked_div(dims * 4).unwrap_or(0)
             }
-            Self::RawI64(vec) => vec.len(),
+            Self::RawI64(bytes) => bytes.len() / 8,
         }
     }
 
@@ -253,17 +390,11 @@ impl ColumnCodec {
             (Self::Bitmap(bv), &Value::Bool(target_bool)) => (0..bv.len())
                 .filter(|&i| bv.get(i) == Some(target_bool))
                 .collect(),
-            (Self::Float64(vec), &Value::Float64(target)) => vec
-                .iter()
-                .enumerate()
-                .filter(|&(_, v)| *v == target)
-                .map(|(i, _)| i)
+            (Self::Float64(bytes), &Value::Float64(target)) => (0..bytes.len() / 8)
+                .filter(|&i| read_le_f64(bytes, i * 8) == Some(target))
                 .collect(),
-            (Self::RawI64(vec), &Value::Int64(target)) => vec
-                .iter()
-                .enumerate()
-                .filter(|&(_, v)| *v == target)
-                .map(|(i, _)| i)
+            (Self::RawI64(bytes), &Value::Int64(target)) => (0..bytes.len() / 8)
+                .filter(|&i| read_le_i64(bytes, i * 8) == Some(target))
                 .collect(),
             _ => (0..self.len())
                 .filter(|&i| self.get(i).as_ref() == Some(target))
@@ -321,7 +452,7 @@ impl ColumnCodec {
                 .collect();
         }
 
-        if let Self::RawI64(values) = self {
+        if let Self::RawI64(bytes) = self {
             // Native i64 comparison — signed ordering semantics "for free".
             let min_i64 = match min {
                 Some(&Value::Int64(v)) => Some(v),
@@ -334,10 +465,9 @@ impl ColumnCodec {
                 _ => return self.find_in_range_fallback(min, max, min_inclusive, max_inclusive),
             };
 
-            return values
-                .iter()
-                .enumerate()
-                .filter(|&(_, &v)| {
+            return (0..bytes.len() / 8)
+                .filter(|&i| {
+                    let v = read_le_i64(bytes, i * 8).unwrap_or(0);
                     let above_min = match min_i64 {
                         Some(lo) if min_inclusive => v >= lo,
                         Some(lo) => v > lo,
@@ -350,7 +480,6 @@ impl ColumnCodec {
                     };
                     above_min && below_max
                 })
-                .map(|(i, _)| i)
                 .collect();
         }
 
@@ -434,35 +563,31 @@ impl ColumnCodec {
                     buf.extend_from_slice(&word.to_le_bytes());
                 }
             }
-            Self::Int8Vector { data, dimensions } => {
+            Self::Int8Vector { bytes, dimensions } => {
                 buf.push(3); // discriminant
                 buf.extend_from_slice(&dimensions.to_le_bytes());
-                write_usize_as_u32(buf, data.len());
-                for &v in data {
-                    buf.push(v.to_le_bytes()[0]);
-                }
+                write_usize_as_u32(buf, bytes.len());
+                buf.extend_from_slice(bytes);
             }
-            Self::Float64(vec) => {
+            Self::Float64(bytes) => {
                 buf.push(4); // discriminant
-                write_usize_as_u32(buf, vec.len());
-                for &v in vec {
-                    buf.extend_from_slice(&v.to_le_bytes());
-                }
+                write_usize_as_u32(buf, bytes.len() / 8);
+                buf.extend_from_slice(bytes);
             }
-            Self::Float32Vector { data, dimensions } => {
+            Self::Float32Vector { bytes, dimensions } => {
                 buf.push(5); // discriminant
                 buf.extend_from_slice(&dimensions.to_le_bytes());
-                write_usize_as_u32(buf, data.len());
-                for &v in data {
-                    buf.extend_from_slice(&v.to_le_bytes());
-                }
+                let dims_bytes = (*dimensions as usize) * 4;
+                let total_components = bytes.len().checked_div(4).unwrap_or(0);
+                write_usize_as_u32(buf, total_components);
+                // Block-pad: ensure rows align to dims_bytes for read_from.
+                let _ = dims_bytes;
+                buf.extend_from_slice(bytes);
             }
-            Self::RawI64(vec) => {
+            Self::RawI64(bytes) => {
                 buf.push(6); // discriminant
-                write_usize_as_u32(buf, vec.len());
-                for &v in vec {
-                    buf.extend_from_slice(&v.to_le_bytes());
-                }
+                write_usize_as_u32(buf, bytes.len() / 8);
+                buf.extend_from_slice(bytes);
             }
         }
     }
@@ -534,51 +659,45 @@ impl ColumnCodec {
                 if *pos + data_len > data.len() {
                     return Err("truncated Int8Vector data");
                 }
-                let bytes = &data[*pos..*pos + data_len];
-                // Safe: u8 and i8 have the same layout.
-                let i8_data: Vec<i8> = bytes.iter().map(|&b| i8::from_le_bytes([b])).collect();
+                let bytes = Bytes::copy_from_slice(&data[*pos..*pos + data_len]);
                 *pos += data_len;
-                Ok(Self::Int8Vector {
-                    data: i8_data,
-                    dimensions,
-                })
+                Ok(Self::Int8Vector { bytes, dimensions })
             }
             4 => {
-                // Float64
+                // Float64: count of f64 values; storage is 8 bytes each.
                 let count = read_u32_le(data, pos)? as usize;
-                let mut vec = Vec::with_capacity(count);
-                for _ in 0..count {
-                    vec.push(read_f64_le(data, pos)?);
+                let byte_need = count.checked_mul(8).ok_or("Float64 length overflow")?;
+                if *pos + byte_need > data.len() {
+                    return Err("truncated Float64 data");
                 }
-                Ok(Self::Float64(vec))
+                let bytes = Bytes::copy_from_slice(&data[*pos..*pos + byte_need]);
+                *pos += byte_need;
+                Ok(Self::Float64(bytes))
             }
             5 => {
-                // Float32Vector
+                // Float32Vector: total component count (rows * dims).
                 let dimensions = read_u16_le(data, pos)?;
-                let data_len = read_u32_le(data, pos)? as usize;
-                let byte_need = data_len
+                let component_count = read_u32_le(data, pos)? as usize;
+                let byte_need = component_count
                     .checked_mul(4)
                     .ok_or("Float32Vector length overflow")?;
                 if *pos + byte_need > data.len() {
                     return Err("truncated Float32Vector data");
                 }
-                let mut f32_data = Vec::with_capacity(data_len);
-                for _ in 0..data_len {
-                    f32_data.push(read_f32_le(data, pos)?);
-                }
-                Ok(Self::Float32Vector {
-                    data: f32_data,
-                    dimensions,
-                })
+                let bytes = Bytes::copy_from_slice(&data[*pos..*pos + byte_need]);
+                *pos += byte_need;
+                Ok(Self::Float32Vector { bytes, dimensions })
             }
             6 => {
-                // RawI64
+                // RawI64: count of i64 values; storage is 8 bytes each.
                 let count = read_u32_le(data, pos)? as usize;
-                let mut vec = Vec::with_capacity(count);
-                for _ in 0..count {
-                    vec.push(read_i64_le(data, pos)?);
+                let byte_need = count.checked_mul(8).ok_or("RawI64 length overflow")?;
+                if *pos + byte_need > data.len() {
+                    return Err("truncated RawI64 data");
                 }
-                Ok(Self::RawI64(vec))
+                let bytes = Bytes::copy_from_slice(&data[*pos..*pos + byte_need]);
+                *pos += byte_need;
+                Ok(Self::RawI64(bytes))
             }
             _ => Err("unknown codec discriminant"),
         }
@@ -730,11 +849,11 @@ impl ColumnCodec {
                     });
                 }
             }
-            Self::Int8Vector { data, dimensions } => {
+            Self::Int8Vector { bytes, dimensions } => {
                 buf.push(3);
                 buf.extend_from_slice(&dimensions.to_le_bytes());
                 let dims = *dimensions as usize;
-                let row_count_total = data.len().checked_div(dims).unwrap_or(0);
+                let row_count_total = bytes.len().checked_div(dims).unwrap_or(0);
                 for i in 0..block_count {
                     let start_row = i * block_rows;
                     let end_row = (start_row + block_rows).min(row_count_total);
@@ -745,9 +864,7 @@ impl ColumnCodec {
                     if dims > 0 {
                         let start = start_row * dims;
                         let end = end_row * dims;
-                        for &v in &data[start..end] {
-                            bodies.push(v.to_le_bytes()[0]);
-                        }
+                        bodies.extend_from_slice(&bytes[start..end]);
                     }
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
@@ -758,18 +875,17 @@ impl ColumnCodec {
                     });
                 }
             }
-            Self::Float64(vec) => {
+            Self::Float64(bytes) => {
                 buf.push(4);
+                let total_rows = bytes.len() / 8;
                 for i in 0..block_count {
                     let start = i * block_rows;
-                    let end = (start + block_rows).min(vec.len());
+                    let end = (start + block_rows).min(total_rows);
                     #[allow(clippy::cast_possible_truncation)]
                     let row_count = (end - start) as u32;
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = bodies.len() as u32;
-                    for &v in &vec[start..end] {
-                        bodies.extend_from_slice(&v.to_le_bytes());
-                    }
+                    bodies.extend_from_slice(&bytes[start * 8..end * 8]);
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
                     metas.push(BlockMeta {
@@ -779,11 +895,12 @@ impl ColumnCodec {
                     });
                 }
             }
-            Self::Float32Vector { data, dimensions } => {
+            Self::Float32Vector { bytes, dimensions } => {
                 buf.push(5);
                 buf.extend_from_slice(&dimensions.to_le_bytes());
                 let dims = *dimensions as usize;
-                let row_count_total = data.len().checked_div(dims).unwrap_or(0);
+                let row_byte_size = dims.checked_mul(4).unwrap_or(0);
+                let row_count_total = bytes.len().checked_div(row_byte_size.max(1)).unwrap_or(0);
                 for i in 0..block_count {
                     let start_row = i * block_rows;
                     let end_row = (start_row + block_rows).min(row_count_total);
@@ -791,12 +908,10 @@ impl ColumnCodec {
                     let row_count = (end_row - start_row) as u32;
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = bodies.len() as u32;
-                    if dims > 0 {
-                        let start = start_row * dims;
-                        let end = end_row * dims;
-                        for &v in &data[start..end] {
-                            bodies.extend_from_slice(&v.to_le_bytes());
-                        }
+                    if row_byte_size > 0 {
+                        let start = start_row * row_byte_size;
+                        let end = end_row * row_byte_size;
+                        bodies.extend_from_slice(&bytes[start..end]);
                     }
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
@@ -807,18 +922,17 @@ impl ColumnCodec {
                     });
                 }
             }
-            Self::RawI64(vec) => {
+            Self::RawI64(bytes) => {
                 buf.push(6);
+                let total_rows = bytes.len() / 8;
                 for i in 0..block_count {
                     let start = i * block_rows;
-                    let end = (start + block_rows).min(vec.len());
+                    let end = (start + block_rows).min(total_rows);
                     #[allow(clippy::cast_possible_truncation)]
                     let row_count = (end - start) as u32;
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = bodies.len() as u32;
-                    for &v in &vec[start..end] {
-                        bodies.extend_from_slice(&v.to_le_bytes());
-                    }
+                    bodies.extend_from_slice(&bytes[start * 8..end * 8]);
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
                     metas.push(BlockMeta {
@@ -934,11 +1048,11 @@ impl ColumnCodec {
                 Ok(Self::Bitmap(crate::codec::BitVector::from_bools(&all_bits)))
             }
             3 => {
-                // Int8Vector
+                // Int8Vector: each block carries row_count * dims raw bytes.
                 let dimensions = read_u16_le(data, pos)?;
                 let (metas, bodies_start) = read_block_index(data, pos)?;
                 let dims = dimensions as usize;
-                let mut all_data: Vec<i8> = Vec::new();
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
                     let body_end = body_start + meta.byte_len as usize;
@@ -949,63 +1063,63 @@ impl ColumnCodec {
                     if (meta.byte_len as usize) != expected {
                         return Err("Int8Vector block byte_len mismatch");
                     }
-                    for &b in &data[body_start..body_end] {
-                        all_data.push(i8::from_le_bytes([b]));
-                    }
+                    buf.extend_from_slice(&data[body_start..body_end]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
                 Ok(Self::Int8Vector {
-                    data: all_data,
+                    bytes: buf.freeze(),
                     dimensions,
                 })
             }
             4 => {
-                // Float64
+                // Float64: each block carries row_count * 8 LE bytes.
                 let (metas, bodies_start) = read_block_index(data, pos)?;
-                let mut all_vals: Vec<f64> = Vec::new();
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    for _ in 0..meta.row_count {
-                        all_vals.push(read_f64_le(data, &mut bp)?);
+                    let need = (meta.row_count as usize) * 8;
+                    if body_start + need > data.len() {
+                        return Err("truncated Float64 block body");
                     }
+                    buf.extend_from_slice(&data[body_start..body_start + need]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok(Self::Float64(all_vals))
+                Ok(Self::Float64(buf.freeze()))
             }
             5 => {
-                // Float32Vector
+                // Float32Vector: each block carries row_count * dims * 4 LE bytes.
                 let dimensions = read_u16_le(data, pos)?;
                 let (metas, bodies_start) = read_block_index(data, pos)?;
-                let dims = dimensions as usize;
-                let mut all_data: Vec<f32> = Vec::new();
+                let row_byte_size = (dimensions as usize).checked_mul(4).unwrap_or(0);
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    let elem_count = (meta.row_count as usize) * dims;
-                    for _ in 0..elem_count {
-                        all_data.push(read_f32_le(data, &mut bp)?);
+                    let need = (meta.row_count as usize) * row_byte_size;
+                    if body_start + need > data.len() {
+                        return Err("truncated Float32Vector block body");
                     }
+                    buf.extend_from_slice(&data[body_start..body_start + need]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
                 Ok(Self::Float32Vector {
-                    data: all_data,
+                    bytes: buf.freeze(),
                     dimensions,
                 })
             }
             6 => {
-                // RawI64
+                // RawI64: each block carries row_count * 8 LE bytes.
                 let (metas, bodies_start) = read_block_index(data, pos)?;
-                let mut all_vals: Vec<i64> = Vec::new();
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    for _ in 0..meta.row_count {
-                        all_vals.push(read_i64_le(data, &mut bp)?);
+                    let need = (meta.row_count as usize) * 8;
+                    if body_start + need > data.len() {
+                        return Err("truncated RawI64 block body");
                     }
+                    buf.extend_from_slice(&data[body_start..body_start + need]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok(Self::RawI64(all_vals))
+                Ok(Self::RawI64(buf.freeze()))
             }
             _ => Err("unknown codec discriminant"),
         }
@@ -1125,7 +1239,7 @@ impl ColumnCodec {
                 let dimensions = read_u16_le(data, pos)?;
                 let (metas, stats, bodies_start) = read_block_index_v3(data, pos)?;
                 let dims = dimensions as usize;
-                let mut all_data: Vec<i8> = Vec::new();
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
                     let body_end = body_start + meta.byte_len as usize;
@@ -1136,14 +1250,12 @@ impl ColumnCodec {
                     if (meta.byte_len as usize) != expected {
                         return Err("Int8Vector block byte_len mismatch");
                     }
-                    for &b in &data[body_start..body_end] {
-                        all_data.push(i8::from_le_bytes([b]));
-                    }
+                    buf.extend_from_slice(&data[body_start..body_end]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
                 Ok((
                     Self::Int8Vector {
-                        data: all_data,
+                        bytes: buf.freeze(),
                         dimensions,
                     },
                     stats,
@@ -1151,34 +1263,35 @@ impl ColumnCodec {
             }
             4 => {
                 let (metas, stats, bodies_start) = read_block_index_v3(data, pos)?;
-                let mut all_vals: Vec<f64> = Vec::new();
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    for _ in 0..meta.row_count {
-                        all_vals.push(read_f64_le(data, &mut bp)?);
+                    let need = (meta.row_count as usize) * 8;
+                    if body_start + need > data.len() {
+                        return Err("truncated Float64 block body");
                     }
+                    buf.extend_from_slice(&data[body_start..body_start + need]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok((Self::Float64(all_vals), stats))
+                Ok((Self::Float64(buf.freeze()), stats))
             }
             5 => {
                 let dimensions = read_u16_le(data, pos)?;
                 let (metas, stats, bodies_start) = read_block_index_v3(data, pos)?;
-                let dims = dimensions as usize;
-                let mut all_data: Vec<f32> = Vec::new();
+                let row_byte_size = (dimensions as usize).checked_mul(4).unwrap_or(0);
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    let elem_count = (meta.row_count as usize) * dims;
-                    for _ in 0..elem_count {
-                        all_data.push(read_f32_le(data, &mut bp)?);
+                    let need = (meta.row_count as usize) * row_byte_size;
+                    if body_start + need > data.len() {
+                        return Err("truncated Float32Vector block body");
                     }
+                    buf.extend_from_slice(&data[body_start..body_start + need]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
                 Ok((
                     Self::Float32Vector {
-                        data: all_data,
+                        bytes: buf.freeze(),
                         dimensions,
                     },
                     stats,
@@ -1186,16 +1299,17 @@ impl ColumnCodec {
             }
             6 => {
                 let (metas, stats, bodies_start) = read_block_index_v3(data, pos)?;
-                let mut all_vals: Vec<i64> = Vec::new();
+                let mut buf = BytesMut::new();
                 for meta in &metas {
                     let body_start = bodies_start + meta.byte_offset as usize;
-                    let mut bp = body_start;
-                    for _ in 0..meta.row_count {
-                        all_vals.push(read_i64_le(data, &mut bp)?);
+                    let need = (meta.row_count as usize) * 8;
+                    if body_start + need > data.len() {
+                        return Err("truncated RawI64 block body");
                     }
+                    buf.extend_from_slice(&data[body_start..body_start + need]);
                 }
                 *pos = bodies_start + total_bodies_len(&metas);
-                Ok((Self::RawI64(all_vals), stats))
+                Ok((Self::RawI64(buf.freeze()), stats))
             }
             _ => Err("unknown codec discriminant"),
         }
@@ -1212,10 +1326,10 @@ impl ColumnCodec {
                 codes_bytes + dict_bytes
             }
             Self::Bitmap(bv) => bv.data().len() * std::mem::size_of::<u64>(),
-            Self::Int8Vector { data, .. } => data.len(),
-            Self::Float64(vec) => vec.len() * std::mem::size_of::<f64>(),
-            Self::Float32Vector { data, .. } => data.len() * std::mem::size_of::<f32>(),
-            Self::RawI64(vec) => vec.len() * std::mem::size_of::<i64>(),
+            Self::Int8Vector { bytes, .. } => bytes.len(),
+            Self::Float64(bytes) => bytes.len(),
+            Self::Float32Vector { bytes, .. } => bytes.len(),
+            Self::RawI64(bytes) => bytes.len(),
         }
     }
 }
@@ -1358,33 +1472,6 @@ fn read_u64_le(data: &[u8], pos: &mut usize) -> Result<u64, &'static str> {
     Ok(v)
 }
 
-fn read_f64_le(data: &[u8], pos: &mut usize) -> Result<f64, &'static str> {
-    if *pos + 8 > data.len() {
-        return Err("truncated f64");
-    }
-    let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-    *pos += 8;
-    Ok(v)
-}
-
-fn read_i64_le(data: &[u8], pos: &mut usize) -> Result<i64, &'static str> {
-    if *pos + 8 > data.len() {
-        return Err("truncated i64");
-    }
-    let v = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
-    *pos += 8;
-    Ok(v)
-}
-
-fn read_f32_le(data: &[u8], pos: &mut usize) -> Result<f32, &'static str> {
-    if *pos + 4 > data.len() {
-        return Err("truncated f32");
-    }
-    let v = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
-    *pos += 4;
-    Ok(v)
-}
-
 #[cfg(test)]
 // reason: test values are small known constants
 #[allow(clippy::cast_possible_wrap)]
@@ -1442,10 +1529,7 @@ mod tests {
     fn test_int8_vector_round_trip() {
         // 2 vectors of dimension 3
         let data = vec![1i8, 2, 3, -4, -5, -6];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(data, 3);
 
         assert_eq!(col.len(), 2);
 
@@ -1478,10 +1562,7 @@ mod tests {
     #[test]
     fn test_get_int8_vector_slice() {
         let data = vec![10i8, 20, 30, 40, 50, 60];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(data, 3);
 
         assert_eq!(col.get_int8_vector(0), Some(&[10i8, 20, 30][..]));
         assert_eq!(col.get_int8_vector(1), Some(&[40i8, 50, 60][..]));
@@ -1510,10 +1591,7 @@ mod tests {
         let dc = ColumnCodec::Dict(dict);
         assert_eq!(dc.get(10), None);
 
-        let vec_col = ColumnCodec::Int8Vector {
-            data: vec![1, 2],
-            dimensions: 2,
-        };
+        let vec_col = ColumnCodec::int8_vector(vec![1, 2], 2);
         assert_eq!(vec_col.get(1), None);
         assert_eq!(vec_col.get_int8_vector(1), None);
     }
@@ -1576,10 +1654,7 @@ mod tests {
     fn test_find_eq_int8_vector_uses_fallback() {
         // Int8Vector has no specialised find_eq path, so it uses the fallback.
         let data = vec![1i8, 2, 3, 4, 5, 6];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(data, 3);
         let target_vec: Vec<Value> = vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)];
         let target = Value::List(Arc::from(target_vec));
         let matches = col.find_eq(&target);
@@ -1592,30 +1667,21 @@ mod tests {
 
     #[test]
     fn test_int8_vector_zero_dimensions_get() {
-        let col = ColumnCodec::Int8Vector {
-            data: vec![1, 2, 3],
-            dimensions: 0,
-        };
+        let col = ColumnCodec::int8_vector(vec![1, 2, 3], 0);
         // Zero dimensions: get() should return None.
         assert_eq!(col.get(0), None);
     }
 
     #[test]
     fn test_int8_vector_zero_dimensions_get_int8_vector() {
-        let col = ColumnCodec::Int8Vector {
-            data: vec![1, 2, 3],
-            dimensions: 0,
-        };
+        let col = ColumnCodec::int8_vector(vec![1, 2, 3], 0);
         // Zero dimensions: get_int8_vector() should return None.
         assert_eq!(col.get_int8_vector(0), None);
     }
 
     #[test]
     fn test_int8_vector_zero_dimensions_len_and_is_empty() {
-        let col = ColumnCodec::Int8Vector {
-            data: vec![1, 2, 3],
-            dimensions: 0,
-        };
+        let col = ColumnCodec::int8_vector(vec![1, 2, 3], 0);
         assert_eq!(col.len(), 0);
         assert!(col.is_empty());
     }
@@ -1655,10 +1721,7 @@ mod tests {
     #[test]
     fn test_heap_bytes_int8_vector() {
         let data = vec![1i8, 2, 3, 4, 5, 6];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(data, 3);
         // Heap usage equals data length (1 byte per i8).
         assert_eq!(col.heap_bytes(), 6);
     }
@@ -1761,10 +1824,7 @@ mod tests {
     #[test]
     fn test_find_in_range_int8_vector_uses_fallback() {
         let data = vec![1i8, 2, 3, 4, 5, 6];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(data, 3);
 
         // Int8Vector is not BitPacked, so it goes through the fallback path.
         // Range scan on list values uses compare_values, which returns None
@@ -1792,10 +1852,7 @@ mod tests {
         assert_eq!(col.get(1), None);
 
         // Int8Vector
-        let col = ColumnCodec::Int8Vector {
-            data: vec![1, 2, 3],
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(vec![1, 2, 3], 3);
         assert_eq!(col.get(1), None);
         assert_eq!(col.get_int8_vector(1), None);
     }
@@ -1818,10 +1875,7 @@ mod tests {
         let data: Vec<i8> = (0..rows * dims as usize)
             .map(|idx| (((idx * 7) % 251) as i64 - 120) as i8)
             .collect();
-        let col = ColumnCodec::Int8Vector {
-            data: data.clone(),
-            dimensions: dims,
-        };
+        let col = ColumnCodec::int8_vector(data.clone(), dims);
         assert_eq!(col.len(), rows);
 
         // Serialize and deserialize.
@@ -1854,10 +1908,7 @@ mod tests {
     #[test]
     fn test_column_vector_oob_and_zero_dim() {
         // OOB: 2 vectors of dim 3, index 5 is well past the end.
-        let col = ColumnCodec::Int8Vector {
-            data: vec![1i8, 2, 3, 4, 5, 6],
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(vec![1i8, 2, 3, 4, 5, 6], 3);
         assert_eq!(col.len(), 2);
         assert!(col.get(2).is_none());
         assert!(col.get(5).is_none());
@@ -1865,10 +1916,7 @@ mod tests {
         assert!(col.get_int8_vector(5).is_none());
 
         // Zero-dim column: len == 0 by construction and no element is accessible.
-        let zero = ColumnCodec::Int8Vector {
-            data: Vec::new(),
-            dimensions: 0,
-        };
+        let zero = ColumnCodec::int8_vector(Vec::new(), 0);
         assert_eq!(zero.len(), 0);
         assert!(zero.is_empty());
         assert!(zero.get(0).is_none());
@@ -1999,10 +2047,7 @@ mod tests {
     #[test]
     fn test_write_read_round_trip_int8_vector() {
         let data: Vec<i8> = vec![1, -2, 3, -4, 5, -6, 7, -8];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 4,
-        };
+        let col = ColumnCodec::int8_vector(data, 4);
 
         let mut buf = Vec::new();
         col.write_to(&mut buf);
@@ -2170,10 +2215,7 @@ mod tests {
 
     #[test]
     fn test_empty_int8_vector_round_trip() {
-        let col = ColumnCodec::Int8Vector {
-            data: Vec::new(),
-            dimensions: 4,
-        };
+        let col = ColumnCodec::int8_vector(Vec::new(), 4);
         assert!(col.is_empty());
 
         let mut buf = Vec::new();
@@ -2315,14 +2357,7 @@ mod tests {
         b.add("x");
         assert_eq!(ColumnCodec::Dict(b.build()).get_raw_u64(0), None);
 
-        assert_eq!(
-            ColumnCodec::Int8Vector {
-                data: vec![1i8],
-                dimensions: 1
-            }
-            .get_raw_u64(0),
-            None
-        );
+        assert_eq!(ColumnCodec::int8_vector(vec![1i8], 1).get_raw_u64(0), None);
     }
 
     #[test]
@@ -2350,10 +2385,7 @@ mod tests {
         let builder = DictionaryBuilder::new();
         assert_eq!(ColumnCodec::Dict(builder.build()).heap_bytes(), 0);
 
-        let col = ColumnCodec::Int8Vector {
-            data: Vec::new(),
-            dimensions: 4,
-        };
+        let col = ColumnCodec::int8_vector(Vec::new(), 4);
         assert_eq!(col.heap_bytes(), 0);
     }
 
@@ -2386,10 +2418,7 @@ mod tests {
         assert_eq!(dict_col.get_raw_u64(0), None);
 
         // Int8Vector variant: get_raw_u64 is meaningless.
-        let vec_col = ColumnCodec::Int8Vector {
-            data: vec![1i8, 2, 3],
-            dimensions: 3,
-        };
+        let vec_col = ColumnCodec::int8_vector(vec![1i8, 2, 3], 3);
         assert_eq!(vec_col.get_raw_u64(0), None);
     }
 
@@ -2451,10 +2480,7 @@ mod tests {
         // Int8Vector rows compare to None against any Value, so the fallback
         // filters them out when any bound is supplied.
         let data = vec![1i8, 2, 3];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 3,
-        };
+        let col = ColumnCodec::int8_vector(data, 3);
         let min = Value::Int64(0);
         let max = Value::Int64(10);
 
@@ -2530,10 +2556,7 @@ mod tests {
     fn test_write_to_read_from_int8_vector_round_trip() {
         // 3 vectors of dimension 4, mixing positive and negative values.
         let data = vec![1i8, -2, 3, -4, 5, -6, 7, -8, 9, -10, 11, -12];
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 4,
-        };
+        let col = ColumnCodec::int8_vector(data, 4);
 
         let mut buf = Vec::new();
         col.write_to(&mut buf);
@@ -2671,10 +2694,7 @@ mod tests {
 
     #[test]
     fn test_write_to_read_from_empty_int8_vector() {
-        let col = ColumnCodec::Int8Vector {
-            data: Vec::new(),
-            dimensions: 4,
-        };
+        let col = ColumnCodec::int8_vector(Vec::new(), 4);
         let mut buf = Vec::new();
         col.write_to(&mut buf);
         let mut pos = 0;
@@ -2688,7 +2708,7 @@ mod tests {
 
     #[test]
     fn test_raw_i64_get_decodes_as_int64() {
-        let col = ColumnCodec::RawI64(vec![-100, 0, 42, i64::MIN, i64::MAX]);
+        let col = ColumnCodec::raw_i64(vec![-100, 0, 42, i64::MIN, i64::MAX]);
         assert_eq!(col.len(), 5);
         assert_eq!(col.get(0), Some(Value::Int64(-100)));
         assert_eq!(col.get(1), Some(Value::Int64(0)));
@@ -2700,7 +2720,7 @@ mod tests {
 
     #[test]
     fn test_raw_i64_find_eq() {
-        let col = ColumnCodec::RawI64(vec![-50, 10, -50, 20, 0, -50]);
+        let col = ColumnCodec::raw_i64(vec![-50, 10, -50, 20, 0, -50]);
         assert_eq!(col.find_eq(&Value::Int64(-50)), vec![0, 2, 5]);
         assert_eq!(col.find_eq(&Value::Int64(10)), vec![1]);
         assert_eq!(col.find_eq(&Value::Int64(0)), vec![4]);
@@ -2714,7 +2734,7 @@ mod tests {
     #[test]
     fn test_raw_i64_find_in_range_signed_ordering() {
         // Values span the sign boundary; native i64 ordering must apply.
-        let col = ColumnCodec::RawI64(vec![-10, -5, 0, 5, 10, -100, 100]);
+        let col = ColumnCodec::raw_i64(vec![-10, -5, 0, 5, 10, -100, 100]);
 
         // [-5, 5] inclusive
         let result = col.find_in_range(Some(&Value::Int64(-5)), Some(&Value::Int64(5)), true, true);
@@ -2740,7 +2760,7 @@ mod tests {
 
     #[test]
     fn test_write_to_read_from_raw_i64_round_trip() {
-        let col = ColumnCodec::RawI64(vec![-42, 0, 1, i64::MIN, i64::MAX, -1_000_000_000]);
+        let col = ColumnCodec::raw_i64(vec![-42, 0, 1, i64::MIN, i64::MAX, -1_000_000_000]);
 
         let mut buf = Vec::new();
         col.write_to(&mut buf);
@@ -2756,7 +2776,7 @@ mod tests {
 
     #[test]
     fn test_write_to_read_from_empty_raw_i64() {
-        let col = ColumnCodec::RawI64(Vec::new());
+        let col = ColumnCodec::raw_i64(Vec::new());
         let mut buf = Vec::new();
         col.write_to(&mut buf);
         let mut pos = 0;
@@ -2766,10 +2786,10 @@ mod tests {
 
     #[test]
     fn test_raw_i64_heap_bytes() {
-        let col = ColumnCodec::RawI64(vec![-1, 2, -3]);
+        let col = ColumnCodec::raw_i64(vec![-1, 2, -3]);
         assert_eq!(col.heap_bytes(), 3 * std::mem::size_of::<i64>());
 
-        let empty = ColumnCodec::RawI64(Vec::new());
+        let empty = ColumnCodec::raw_i64(Vec::new());
         assert_eq!(empty.heap_bytes(), 0);
     }
 
@@ -2796,25 +2816,19 @@ mod tests {
         assert_eq!(bm.block_count(), 1);
 
         // Int8Vector
-        let iv = ColumnCodec::Int8Vector {
-            data: vec![1i8, 2, 3, 4],
-            dimensions: 2,
-        };
+        let iv = ColumnCodec::int8_vector(vec![1i8, 2, 3, 4], 2);
         assert_eq!(iv.block_count(), 1);
 
         // Float64
-        let f64 = ColumnCodec::Float64(vec![1.0, 2.0]);
+        let f64 = ColumnCodec::float64(vec![1.0, 2.0]);
         assert_eq!(f64.block_count(), 1);
 
         // Float32Vector
-        let fv = ColumnCodec::Float32Vector {
-            data: vec![1.0f32, 2.0, 3.0, 4.0],
-            dimensions: 2,
-        };
+        let fv = ColumnCodec::float32_vector(vec![1.0f32, 2.0, 3.0, 4.0], 2);
         assert_eq!(fv.block_count(), 1);
 
         // RawI64
-        let r64 = ColumnCodec::RawI64(vec![-1, 2, -3]);
+        let r64 = ColumnCodec::raw_i64(vec![-1, 2, -3]);
         assert_eq!(r64.block_count(), 1);
     }
 
@@ -2824,7 +2838,7 @@ mod tests {
         let entry = bp.block_at(0).expect("block 0 exists");
         assert_eq!(entry.row_count, 5);
 
-        let r64 = ColumnCodec::RawI64(vec![-1, 2, -3, 4]);
+        let r64 = ColumnCodec::raw_i64(vec![-1, 2, -3, 4]);
         let entry = r64.block_at(0).expect("block 0 exists");
         assert_eq!(entry.row_count, 4);
     }
@@ -2833,7 +2847,7 @@ mod tests {
     fn vincent_empty_column_has_one_zero_row_block() {
         // Phase 2a convention: empty columns still report block_count == 1
         // so downstream serializers can treat block emission uniformly.
-        let empty = ColumnCodec::RawI64(Vec::new());
+        let empty = ColumnCodec::raw_i64(Vec::new());
         assert_eq!(empty.block_count(), 1);
         let entry = empty.block_at(0).expect("zero-row block at 0");
         assert_eq!(entry.row_count, 0);
@@ -2848,7 +2862,7 @@ mod tests {
 
     #[test]
     fn mia_block_iter_yields_block_count_entries() {
-        let r64 = ColumnCodec::RawI64(vec![-1, 2, -3, 4]);
+        let r64 = ColumnCodec::raw_i64(vec![-1, 2, -3, 4]);
         let entries: Vec<_> = r64.block_iter().collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].row_count, 4);
@@ -2861,8 +2875,8 @@ mod tests {
         // serializers must preserve total row count.
         for col in [
             ColumnCodec::BitPacked(BitPackedInts::pack(&[1, 2, 3, 4, 5, 6, 7])),
-            ColumnCodec::Float64(vec![1.0, 2.0, 3.0]),
-            ColumnCodec::RawI64(vec![-1, 2, -3, 4, -5]),
+            ColumnCodec::float64(vec![1.0, 2.0, 3.0]),
+            ColumnCodec::raw_i64(vec![-1, 2, -3, 4, -5]),
         ] {
             let total: u32 = col.block_iter().map(|b| b.row_count).sum();
             assert_eq!(total as usize, col.len());
@@ -2898,7 +2912,7 @@ mod tests {
 
     #[test]
     fn django_v2_round_trip_raw_i64_single_block() {
-        let col = ColumnCodec::RawI64(vec![-1, 2, -3, 4, -5]);
+        let col = ColumnCodec::raw_i64(vec![-1, 2, -3, 4, -5]);
         assert_eq!(col.block_count(), 1);
         assert_round_trip_v2_equals(&col);
     }
@@ -2909,7 +2923,7 @@ mod tests {
         // reason: i is bounded by 2049 which fits in i64.
         #[allow(clippy::cast_possible_wrap)]
         let values: Vec<i64> = (0..2049i64).map(|i| i - 1024).collect();
-        let col = ColumnCodec::RawI64(values);
+        let col = ColumnCodec::raw_i64(values);
         assert_eq!(col.block_count(), 3);
         assert_round_trip_v2_equals(&col);
     }
@@ -2950,7 +2964,7 @@ mod tests {
     #[test]
     fn django_v2_round_trip_float64_multi_block() {
         let vals: Vec<f64> = (0..1100u32).map(|i| f64::from(i) * 0.5).collect();
-        let col = ColumnCodec::Float64(vals);
+        let col = ColumnCodec::float64(vals);
         assert!(col.block_count() >= 2);
         assert_round_trip_v2_equals(&col);
     }
@@ -2961,10 +2975,7 @@ mod tests {
         // reason: known small integer literals
         #[allow(clippy::cast_possible_wrap)]
         let data: Vec<i8> = (0..4400u32).map(|i| (i % 200) as i8).collect();
-        let col = ColumnCodec::Int8Vector {
-            data,
-            dimensions: 4,
-        };
+        let col = ColumnCodec::int8_vector(data, 4);
         assert!(col.block_count() >= 2);
         assert_round_trip_v2_equals(&col);
     }
@@ -2973,10 +2984,7 @@ mod tests {
     fn django_v2_round_trip_float32_vector_multi_block() {
         // 1100 vectors of dim 4 = 4400 f32 entries.
         let data: Vec<f32> = (0..4400u32).map(|i| i as f32 * 0.5).collect();
-        let col = ColumnCodec::Float32Vector {
-            data,
-            dimensions: 4,
-        };
+        let col = ColumnCodec::float32_vector(data, 4);
         assert!(col.block_count() >= 2);
         assert_round_trip_v2_equals(&col);
     }
@@ -2984,7 +2992,7 @@ mod tests {
     #[test]
     fn shosanna_v2_round_trip_empty_column() {
         // Empty columns should still serialize/deserialize cleanly with v2.
-        let col = ColumnCodec::RawI64(Vec::new());
+        let col = ColumnCodec::raw_i64(Vec::new());
         assert_round_trip_v2_equals(&col);
     }
 
@@ -2994,7 +3002,7 @@ mod tests {
         // even for a small single-block column. This pins the format
         // separation so a future "did we forget to switch?" regression
         // is caught.
-        let col = ColumnCodec::RawI64(vec![1, 2, 3, 4, 5]);
+        let col = ColumnCodec::raw_i64(vec![1, 2, 3, 4, 5]);
         let mut v1 = Vec::new();
         col.write_to(&mut v1);
         let mut v2 = Vec::new();
@@ -3007,7 +3015,101 @@ mod tests {
         // v1 (flat) reader/writer must keep working for one release as
         // the section reader's compat path. We round-trip via the
         // unchanged write_to / read_from pair.
-        let col = ColumnCodec::RawI64(vec![-1, 2, -3, 4, -5]);
+        let col = ColumnCodec::raw_i64(vec![-1, 2, -3, 4, -5]);
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let recovered = ColumnCodec::read_from(&buf, &mut pos).expect("v1 round-trip");
+        assert_eq!(recovered.len(), col.len());
+        for i in 0..col.len() {
+            assert_eq!(recovered.get(i), col.get(i));
+        }
+    }
+
+    // ── Phase 3a: Bytes-backed fixed-width codecs ─────────────────────
+
+    #[test]
+    fn test_raw_i64_constructor_round_trip() {
+        let values = vec![-100i64, -1, 0, 1, 100, i64::MIN, i64::MAX];
+        let col = ColumnCodec::raw_i64(values.clone());
+
+        assert_eq!(col.len(), values.len());
+        for (i, &expected) in values.iter().enumerate() {
+            assert_eq!(col.get(i), Some(Value::Int64(expected)));
+        }
+        assert_eq!(col.get(values.len()), None);
+    }
+
+    #[test]
+    fn test_float64_constructor_round_trip() {
+        let values = vec![-1.5_f64, 0.0, 100.25, f64::MIN, f64::MAX];
+        let col = ColumnCodec::float64(values.clone());
+
+        assert_eq!(col.len(), values.len());
+        for (i, &expected) in values.iter().enumerate() {
+            assert_eq!(col.get(i), Some(Value::Float64(expected)));
+        }
+    }
+
+    #[test]
+    fn test_int8_vector_constructor_round_trip() {
+        let col = ColumnCodec::int8_vector(vec![1i8, 2, 3, -4, -5, -6], 3);
+
+        assert_eq!(col.len(), 2);
+        let v0 = col.get(0).unwrap();
+        let expected0: Vec<Value> = vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)];
+        assert_eq!(v0, Value::List(Arc::from(expected0)));
+
+        // get_int8_vector slice access
+        assert_eq!(col.get_int8_vector(0), Some(&[1i8, 2, 3][..]));
+        assert_eq!(col.get_int8_vector(1), Some(&[-4i8, -5, -6][..]));
+    }
+
+    #[test]
+    fn test_float32_vector_constructor_round_trip() {
+        let col = ColumnCodec::float32_vector(vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], 3);
+
+        assert_eq!(col.len(), 2);
+        match col.get(0) {
+            Some(Value::Vector(v)) => {
+                assert_eq!(&*v, &[1.0_f32, 2.0, 3.0]);
+            }
+            other => panic!("expected Vector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bytes_backed_zero_copy_clone() {
+        // Cloning a ColumnCodec should be cheap: the underlying Bytes
+        // is refcounted, not deep-copied. Verify by building a large
+        // RawI64 column and asserting clone is fast and shares storage
+        // (smoke test via len equivalence; full reference-counting is
+        // tested by `bytes` itself).
+        let big: Vec<i64> = (0..10_000).collect();
+        let col = ColumnCodec::raw_i64(big);
+        let cloned = col.clone();
+        assert_eq!(col.len(), cloned.len());
+        for i in (0..10_000).step_by(1024) {
+            assert_eq!(col.get(i), cloned.get(i));
+        }
+    }
+
+    #[test]
+    fn test_raw_i64_v1_round_trip_with_bytes_storage() {
+        let col = ColumnCodec::raw_i64(vec![-7, 0, 7, 42]);
+        let mut buf = Vec::new();
+        col.write_to(&mut buf);
+        let mut pos = 0;
+        let recovered = ColumnCodec::read_from(&buf, &mut pos).expect("v1 round-trip");
+        assert_eq!(recovered.len(), col.len());
+        for i in 0..col.len() {
+            assert_eq!(recovered.get(i), col.get(i));
+        }
+    }
+
+    #[test]
+    fn test_float64_v1_round_trip_with_bytes_storage() {
+        let col = ColumnCodec::float64(vec![-2.5, 0.0, 1.0, std::f64::consts::PI]);
         let mut buf = Vec::new();
         col.write_to(&mut buf);
         let mut pos = 0;

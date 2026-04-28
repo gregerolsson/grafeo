@@ -162,7 +162,7 @@ impl NodeTableBuilder {
         // No meaningful zone map for vector columns.
         self.columns.push((
             PropertyKey::new(name),
-            ColumnCodec::Int8Vector { data, dimensions },
+            ColumnCodec::int8_vector(data, dimensions),
         ));
         self
     }
@@ -845,7 +845,7 @@ pub fn from_graph_store(
                         let zone_map = compute_zone_map_i64(&i64_values);
                         t.zone_maps.push((key.clone(), zone_map));
                         t.columns
-                            .push((key.clone(), ColumnCodec::RawI64(i64_values)));
+                            .push((key.clone(), ColumnCodec::raw_i64(i64_values)));
                         t.record_len(values.len());
                     }
                     InferredType::Float64 => {
@@ -858,7 +858,7 @@ pub fn from_graph_store(
                             })
                             .collect();
                         t.columns
-                            .push((key.clone(), ColumnCodec::Float64(f64_values)));
+                            .push((key.clone(), ColumnCodec::float64(f64_values)));
                         t.record_len(values.len());
                     }
                     InferredType::Float32Vector { dimensions } => {
@@ -875,13 +875,8 @@ pub fn from_graph_store(
                                 }
                             }
                         }
-                        t.columns.push((
-                            key.clone(),
-                            ColumnCodec::Float32Vector {
-                                data: flat,
-                                dimensions,
-                            },
-                        ));
+                        t.columns
+                            .push((key.clone(), ColumnCodec::float32_vector(flat, dimensions)));
                         t.record_len(values.len());
                     }
                     InferredType::Bitmap => {
@@ -1013,7 +1008,7 @@ pub fn from_graph_store(
                                     })
                                     .collect();
                                 r.properties
-                                    .push((key.clone(), ColumnCodec::RawI64(i64_values)));
+                                    .push((key.clone(), ColumnCodec::raw_i64(i64_values)));
                             }
                             InferredType::Float64 => {
                                 let f64_values: Vec<f64> = values
@@ -1025,7 +1020,7 @@ pub fn from_graph_store(
                                     })
                                     .collect();
                                 r.properties
-                                    .push((key.clone(), ColumnCodec::Float64(f64_values)));
+                                    .push((key.clone(), ColumnCodec::float64(f64_values)));
                             }
                             InferredType::Float32Vector { dimensions } => {
                                 let mut flat: Vec<f32> =
@@ -1041,10 +1036,7 @@ pub fn from_graph_store(
                                 }
                                 r.properties.push((
                                     key.clone(),
-                                    ColumnCodec::Float32Vector {
-                                        data: flat,
-                                        dimensions,
-                                    },
+                                    ColumnCodec::float32_vector(flat, dimensions),
                                 ));
                             }
                             InferredType::Bitmap => {
