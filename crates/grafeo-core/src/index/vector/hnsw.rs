@@ -342,7 +342,10 @@ impl HnswIndex {
 
     /// Restore topology from a snapshot. Replaces all current data.
     ///
-    /// Always switches the backend to [`TopologyBackend::Heap`].
+    /// Always switches the backend to the heap representation; subsequent
+    /// mutations work without needing a reload. Equivalent to constructing
+    /// a fresh index and calling `insert` for each node, but skips the
+    /// graph-build cost.
     pub fn restore_topology(
         &self,
         entry_point: Option<NodeId>,

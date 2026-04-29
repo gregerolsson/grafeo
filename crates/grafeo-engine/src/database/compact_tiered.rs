@@ -183,12 +183,11 @@ impl CompactStoreTiered {
     ///
     /// Naively re-tagging the existing `Arc<CompactStore>` as `InMemory`
     /// would still leave column codec storage referencing the mmap-backed
-    /// `Bytes` produced by [`open_and_deserialize`] — the data would
-    /// continue to be served from the OS page cache and the `Mmap`
-    /// would stay alive through the codec slices. To make the tier label
-    /// truthful we re-serialize the live store and deserialize from a
-    /// heap-backed `Bytes`, so the new codec storage no longer references
-    /// the mapping.
+    /// `Bytes` produced by the original open path: the data would continue
+    /// to be served from the OS page cache and the `Mmap` would stay alive
+    /// through the codec slices. To make the tier label truthful we
+    /// re-serialize the live store and deserialize from a heap-backed
+    /// `Bytes`, so the new codec storage no longer references the mapping.
     ///
     /// No-op when already `InMemory`.
     ///

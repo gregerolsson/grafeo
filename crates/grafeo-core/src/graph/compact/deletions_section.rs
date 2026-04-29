@@ -1,15 +1,15 @@
 //! [`Section`](grafeo_common::storage::section::Section) implementation for
 //! the layered overlay deletion log.
 //!
-//! The [`LayeredStore`](super::layered::LayeredStore) tracks deletions of
-//! base-store entities in the in-memory `deleted_from_base_nodes` /
-//! `deleted_from_base_edges` sets. Without this section, those sets are
-//! lost across a close/reopen cycle: the overlay scan in
-//! `LayeredStore::with_overlay` cannot distinguish a deleted base node
-//! (which has no overlay entry) from a base node that was never modified,
-//! so previously-deleted base entities would silently reappear after
-//! reload until the next [`compact()`](super::layered::LayeredStore::compact)
-//! merges the overlay into the base.
+//! The [`LayeredStore`](crate::graph::compact::layered::LayeredStore)
+//! tracks deletions of base-store entities in the in-memory
+//! `deleted_from_base_nodes` / `deleted_from_base_edges` sets. Without
+//! this section, those sets are lost across a close/reopen cycle: the
+//! overlay scan in `LayeredStore::with_overlay` cannot distinguish a
+//! deleted base node (which has no overlay entry) from a base node that
+//! was never modified, so previously-deleted base entities would silently
+//! reappear after reload until the next `compact()` merges the overlay
+//! into the base.
 //!
 //! This section persists the deletion log alongside the rest of the
 //! container so that reload restores the deleted sets verbatim.

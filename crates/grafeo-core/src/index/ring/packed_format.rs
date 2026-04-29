@@ -3,11 +3,11 @@
 //! Composes the four packed sub-formats from Phase 6a-d into a single
 //! mmap-friendly byte buffer:
 //!
-//! - [`PackedTermDictionary`](super::PackedTermDictionary) (Phase 6b)
-//! - [`PackedWaveletTree`](super::packed_wavelet) for subjects, predicates,
-//!   objects (Phase 6c)
-//! - [`PackedPermutation`](super::packed_permutation) for spo→pos and
-//!   spo→osp (Phase 6d)
+//! - [`PackedTermDictionary`] (Phase 6b)
+//! - `PackedWaveletTree` (see [`super::packed_wavelet`]) for subjects,
+//!   predicates, objects (Phase 6c)
+//! - `PackedPermutation` (see [`super::packed_permutation`]) for spo→pos
+//!   and spo→osp (Phase 6d)
 //!
 //! ## Layout
 //!

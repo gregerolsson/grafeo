@@ -46,7 +46,7 @@ pub enum PackedPermutationError {
     },
     /// `n` field overflows the platform-native usize.
     SizeOverflow,
-    /// A forward[i] entry references an index >= n (not a valid
+    /// A `forward\[i\]` entry references an index >= n (not a valid
     /// permutation).
     InvalidPermutation {
         /// Position that contained the bad value.

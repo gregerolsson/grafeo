@@ -150,7 +150,7 @@ impl DictionaryEncoding {
 
     /// Returns the encoded codes as raw LE u32 bytes.
     ///
-    /// Phase 3b: codes storage is `bytes::Bytes`. Use [`code_at`] for
+    /// Phase 3b: codes storage is `bytes::Bytes`. Use [`Self::code_at`] for
     /// indexed access; this returns the raw byte storage for serializers
     /// that write the storage out directly.
     pub fn codes_bytes(&self) -> &Bytes {
@@ -172,8 +172,8 @@ impl DictionaryEncoding {
 
     /// Returns the codes as a materialized `Vec<u32>` (allocates).
     ///
-    /// Prefer [`code_at`] or [`code_count`] for reads. This exists for
-    /// callers that need a contiguous slice and accept the allocation
+    /// Prefer [`Self::code_at`] or [`Self::code_count`] for reads. This exists
+    /// for callers that need a contiguous slice and accept the allocation
     /// (e.g., legacy serialization paths).
     pub fn codes(&self) -> Vec<u32> {
         (0..self.code_count)

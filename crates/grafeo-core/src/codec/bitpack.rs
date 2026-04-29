@@ -234,7 +234,7 @@ impl BitPackedInts {
 
     /// Returns the raw packed bytes.
     ///
-    /// Phase 3b: word storage is now `bytes::Bytes`. Use [`word_at`] for
+    /// Phase 3b: word storage is now `bytes::Bytes`. Use [`Self::get`] for
     /// indexed access; this returns the concatenated little-endian word
     /// bytes for serializers that need to write the storage out.
     #[must_use]
