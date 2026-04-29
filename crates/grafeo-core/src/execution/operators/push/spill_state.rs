@@ -121,6 +121,19 @@ impl MemoryConsumer for OperatorConsumerAdapter {
         self.state.request_eviction(target_bytes);
         Ok(0)
     }
+
+    fn current_tier(&self) -> grafeo_common::memory::buffer::StorageTier {
+        // Operator-internal state lives in heap buffers managed by the
+        // operator itself; the buffer manager only sees an aggregate
+        // memory_usage. We surface that as `InMemory`/`Uninitialized` and
+        // let `reload_eligible` skip these consumers (operators do not
+        // expose a reload entry point).
+        if self.memory_usage() == 0 {
+            grafeo_common::memory::buffer::StorageTier::Uninitialized
+        } else {
+            grafeo_common::memory::buffer::StorageTier::InMemory
+        }
+    }
 }
 
 #[cfg(test)]

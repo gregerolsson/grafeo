@@ -673,6 +673,14 @@ mod tests {
             self.evicted.fetch_add(to_evict, Ordering::Relaxed);
             to_evict
         }
+
+        fn current_tier(&self) -> super::super::tiered::StorageTier {
+            if self.memory_usage() == 0 {
+                super::super::tiered::StorageTier::Uninitialized
+            } else {
+                super::super::tiered::StorageTier::InMemory
+            }
+        }
     }
 
     #[test]
@@ -929,6 +937,16 @@ mod tests {
             self.usage.fetch_sub(to_spill, Ordering::Relaxed);
             self.spilled.fetch_add(to_spill, Ordering::Relaxed);
             Ok(to_spill)
+        }
+
+        fn current_tier(&self) -> super::super::tiered::StorageTier {
+            if self.spilled.load(Ordering::Relaxed) > 0 {
+                super::super::tiered::StorageTier::OnDisk
+            } else if self.memory_usage() == 0 {
+                super::super::tiered::StorageTier::Uninitialized
+            } else {
+                super::super::tiered::StorageTier::InMemory
+            }
         }
     }
 
@@ -1222,6 +1240,14 @@ mod tests {
             Err(crate::memory::buffer::consumer::SpillError::IoError(
                 "disk full".to_string(),
             ))
+        }
+
+        fn current_tier(&self) -> super::super::tiered::StorageTier {
+            if self.memory_usage() == 0 {
+                super::super::tiered::StorageTier::Uninitialized
+            } else {
+                super::super::tiered::StorageTier::InMemory
+            }
         }
     }
 

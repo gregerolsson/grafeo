@@ -702,6 +702,15 @@ impl MemoryConsumer for CdcLog {
         // No disk spill needed.
         false
     }
+
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        // CDC log is never spilled to disk.
+        if self.memory_usage() == 0 {
+            grafeo_common::memory::StorageTier::Uninitialized
+        } else {
+            grafeo_common::memory::StorageTier::InMemory
+        }
+    }
 }
 
 /// Computes a stable-within-process content hash for an RDF triple.

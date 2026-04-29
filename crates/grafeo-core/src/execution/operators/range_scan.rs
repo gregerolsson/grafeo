@@ -153,6 +153,14 @@ impl RangeScanOperator {
             return;
         }
 
+        // Pre-compute the label set once (avoids repeated lookups in the
+        // hot path).
+        let label_set: Option<FxHashSet<NodeId>> = self
+            .label_filter
+            .as_ref()
+            .map(|label| self.store.nodes_by_label(label).into_iter().collect());
+        let tx_ctx = self.transaction_context;
+
         let iter = self.store.find_nodes_in_range_iter(
             &self.property,
             self.min.as_ref(),
@@ -160,19 +168,28 @@ impl RangeScanOperator {
             self.min_inclusive,
             self.max_inclusive,
         );
-        let mut collected: Vec<NodeId> = match self.limit {
-            Some(n) => iter.take(n).collect(),
-            None => iter.collect(),
-        };
 
-        if let Some(label) = &self.label_filter {
-            let label_set: FxHashSet<NodeId> =
-                self.store.nodes_by_label(label).into_iter().collect();
-            collected.retain(|n| label_set.contains(n));
-        }
-
-        if let Some((epoch, tx)) = self.transaction_context {
-            collected.retain(|id| self.store.get_node_versioned(*id, epoch, tx).is_some());
+        // Filter inline (label + MVCC) and stop only after `limit` matches
+        // *survive* the filters. Applying limit before filtering would
+        // under-return rows when early range hits are filtered out.
+        let mut collected: Vec<NodeId> = Vec::new();
+        for id in iter {
+            if let Some(set) = label_set.as_ref()
+                && !set.contains(&id)
+            {
+                continue;
+            }
+            if let Some((epoch, tx)) = tx_ctx
+                && self.store.get_node_versioned(id, epoch, tx).is_none()
+            {
+                continue;
+            }
+            collected.push(id);
+            if let Some(n) = self.limit
+                && collected.len() >= n
+            {
+                break;
+            }
         }
 
         self.materialized = Some(collected);
@@ -191,11 +208,14 @@ impl Operator for RangeScanOperator {
             return Ok(None);
         }
 
-        let end = (self.position + self.chunk_capacity).min(nodes.len());
+        // Guard against `chunk_capacity == 0`: that would set `end == position`,
+        // emit empty chunks, and never advance — an infinite loop for callers.
+        let step = self.chunk_capacity.max(1);
+        let end = (self.position + step).min(nodes.len());
         let count = end - self.position;
 
         let schema = [LogicalType::Node];
-        let mut chunk = DataChunk::with_capacity(&schema, self.chunk_capacity);
+        let mut chunk = DataChunk::with_capacity(&schema, step);
         {
             let col = chunk
                 .column_mut(0)

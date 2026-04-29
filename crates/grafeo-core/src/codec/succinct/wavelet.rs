@@ -36,6 +36,73 @@
 use super::super::BitVectorBuilder;
 use super::rank_select::SuccinctBitVector;
 
+/// Structural-invariant violation surfaced by
+/// [`WaveletTree::from_packed_parts`] when the supplied parts cannot
+/// describe a well-formed wavelet tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaveletInvariantError {
+    /// `levels.len()` does not equal `height`.
+    LevelHeightMismatch {
+        /// Number of bitvector levels supplied.
+        levels_len: usize,
+        /// Tree height declared in the packed metadata.
+        height: usize,
+    },
+    /// A bitvector level's length disagrees with the declared sequence
+    /// length.
+    LevelLenMismatch {
+        /// Level index that disagreed.
+        level: usize,
+        /// Declared sequence length.
+        expected: usize,
+        /// Bit count actually carried by that level.
+        actual: usize,
+    },
+    /// Symbol table is not sorted ascending (or contains duplicates),
+    /// which would alias two distinct codes onto the same alphabet
+    /// entry.
+    SymbolsNotSorted {
+        /// First index where the order broke.
+        index: usize,
+    },
+    /// Symbol table holds more entries than the alphabet size declared
+    /// in `sigma` allows.
+    SymbolsExceedSigma {
+        /// Symbols supplied.
+        symbols_len: usize,
+        /// Alphabet size claimed in the packed header.
+        sigma: u64,
+    },
+}
+
+impl std::fmt::Display for WaveletInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LevelHeightMismatch { levels_len, height } => write!(
+                f,
+                "wavelet levels length ({levels_len}) does not match height ({height})"
+            ),
+            Self::LevelLenMismatch {
+                level,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "wavelet level {level} bit count ({actual}) does not match declared len ({expected})"
+            ),
+            Self::SymbolsNotSorted { index } => {
+                write!(f, "wavelet symbol table not sorted at index {index}")
+            }
+            Self::SymbolsExceedSigma { symbols_len, sigma } => write!(
+                f,
+                "wavelet symbol table size ({symbols_len}) exceeds sigma ({sigma})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WaveletInvariantError {}
+
 /// Wavelet tree for sequence rank/select/access operations.
 ///
 /// Supports sequences of u64 symbols. Internally builds a binary tree
@@ -214,26 +281,65 @@ impl WaveletTree {
     /// after parsing the packed format. Skips the `WaveletTree::new`
     /// build path because the levels and symbol table are already
     /// authoritative.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WaveletInvariantError`] if the supplied parts violate
+    /// any structural invariant: levels count must match height, every
+    /// level's bit count must equal `len`, the symbol table must be
+    /// sorted, and `symbols.len()` must not exceed `sigma`. Without
+    /// these checks malformed packed data could create a tree whose
+    /// `access` and `rank` queries return inconsistent results.
     pub fn from_packed_parts(
         levels: Vec<SuccinctBitVector>,
         height: usize,
         sigma: u64,
         len: usize,
         symbols: Vec<u64>,
-    ) -> Self {
+    ) -> Result<Self, WaveletInvariantError> {
+        // An empty tree (built from `&[]`) carries no levels and zero
+        // height. The validation below treats those cases uniformly.
+        if levels.len() != height {
+            return Err(WaveletInvariantError::LevelHeightMismatch {
+                levels_len: levels.len(),
+                height,
+            });
+        }
+        for (level_idx, bv) in levels.iter().enumerate() {
+            if bv.len() != len {
+                return Err(WaveletInvariantError::LevelLenMismatch {
+                    level: level_idx,
+                    expected: len,
+                    actual: bv.len(),
+                });
+            }
+        }
+        if (symbols.len() as u64) > sigma {
+            return Err(WaveletInvariantError::SymbolsExceedSigma {
+                symbols_len: symbols.len(),
+                sigma,
+            });
+        }
+        // Symbols must be sorted ascending so that index = code maps
+        // back to the original alphabet (mirrors `WaveletTree::new`).
+        for i in 1..symbols.len() {
+            if symbols[i - 1] >= symbols[i] {
+                return Err(WaveletInvariantError::SymbolsNotSorted { index: i });
+            }
+        }
+
         let mut symbol_to_code = hashbrown::HashMap::with_capacity(symbols.len());
         for (code, &sym) in symbols.iter().enumerate() {
             symbol_to_code.insert(sym, code as u64);
         }
-        Self {
+        Ok(Self {
             levels,
             height,
             sigma,
             len,
             symbols,
             symbol_to_code,
-        }
+        })
     }
 
     /// Returns the symbol at position i.

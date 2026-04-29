@@ -527,6 +527,16 @@ impl MemoryConsumer for TextIndexConsumer {
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
         Err(SpillError::NotSupported)
     }
+
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        // Text indexes never actually move to disk today: `spill` returns
+        // `NotSupported`, so the consumer is always in-memory while alive.
+        if self.memory_usage() == 0 {
+            grafeo_common::memory::StorageTier::Uninitialized
+        } else {
+            grafeo_common::memory::StorageTier::InMemory
+        }
+    }
 }
 
 /// Memory consumer for the CompactStore base under a `LayeredStore`.
@@ -657,7 +667,9 @@ impl MemoryConsumer for CompactStoreConsumer {
             return Ok(());
         }
 
-        tiered.reload_to_ram();
+        tiered
+            .reload_to_ram()
+            .map_err(|e| SpillError::IoError(e.to_string()))?;
         if let Some(layered) = self.layered.upgrade() {
             layered.swap_base(tiered.store());
         }
@@ -745,6 +757,16 @@ impl MemoryConsumer for OverlayConsumer {
             .map_err(SpillError::IoError)?;
         let after = layered.overlay_memory_bytes();
         Ok(before.saturating_sub(after))
+    }
+
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        // Overlay "spills" by merging into the base store; it never moves
+        // to disk on its own (the base may, separately).
+        if self.memory_usage() == 0 {
+            grafeo_common::memory::StorageTier::Uninitialized
+        } else {
+            grafeo_common::memory::StorageTier::InMemory
+        }
     }
 }
 

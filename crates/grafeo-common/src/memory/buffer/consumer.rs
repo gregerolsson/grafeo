@@ -72,20 +72,21 @@ pub trait MemoryConsumer: Send + Sync {
 
     /// Reports the consumer's current storage tier (Phase 8b introspection).
     ///
-    /// Default: [`StorageTier::InMemory`] for any consumer that has nonzero
-    /// `memory_usage()`, [`StorageTier::Uninitialized`] otherwise. Specialized
-    /// consumers that maintain explicit on-disk state (e.g. `CompactStoreConsumer`,
-    /// `VectorIndexConsumer`) override this with their own tier-tracking logic.
+    /// No default: tier cannot be inferred from `memory_usage()` alone
+    /// because a spillable consumer can be on disk with zero heap usage,
+    /// and [`crate::memory::buffer::BufferManager::reload_eligible`] only
+    /// reloads consumers reporting [`StorageTier::OnDisk`]. Implementors
+    /// that never spill should return [`StorageTier::InMemory`] when
+    /// `memory_usage() > 0` and [`StorageTier::Uninitialized`] otherwise.
+    ///
+    /// [`StorageTier`]: super::tiered::StorageTier
+    /// [`StorageTier::OnDisk`]: super::tiered::StorageTier::OnDisk
+    /// [`StorageTier::InMemory`]: super::tiered::StorageTier::InMemory
+    /// [`StorageTier::Uninitialized`]: super::tiered::StorageTier::Uninitialized
     ///
     /// Used by [`crate::memory::buffer::BufferManager::snapshot_consumer_tiers`]
     /// for observability and tests; not on any hot path.
-    fn current_tier(&self) -> super::tiered::StorageTier {
-        if self.memory_usage() == 0 {
-            super::tiered::StorageTier::Uninitialized
-        } else {
-            super::tiered::StorageTier::InMemory
-        }
-    }
+    fn current_tier(&self) -> super::tiered::StorageTier;
 }
 
 /// Standard priority levels for common consumer types.
@@ -187,6 +188,14 @@ mod tests {
             let to_evict = target_bytes.min(current);
             self.usage.fetch_sub(to_evict, Ordering::Relaxed);
             to_evict
+        }
+
+        fn current_tier(&self) -> super::super::tiered::StorageTier {
+            if self.memory_usage() == 0 {
+                super::super::tiered::StorageTier::Uninitialized
+            } else {
+                super::super::tiered::StorageTier::InMemory
+            }
         }
     }
 

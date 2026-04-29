@@ -1004,7 +1004,13 @@ impl ColumnCodec {
                 buf.extend_from_slice(&dimensions.to_le_bytes());
                 let dims = *dimensions as usize;
                 let row_byte_size = dims.checked_mul(4).unwrap_or(0);
-                let row_count_total = bytes.len().checked_div(row_byte_size.max(1)).unwrap_or(0);
+                // Match `len()` exactly: a zero-dimension column has no
+                // logical rows, regardless of any (spurious) bytes. Using
+                // `.max(1)` here would emit nonzero per-block row counts
+                // while no body bytes are written, leaving the block index
+                // out of sync with `len()` and the empty-column block
+                // count.
+                let row_count_total = bytes.len().checked_div(row_byte_size).unwrap_or(0);
                 for i in 0..block_count {
                     let start_row = i * block_rows;
                     let end_row = (start_row + block_rows).min(row_count_total);
@@ -1478,8 +1484,36 @@ fn read_block_index(data: &[u8], pos: &mut usize) -> Result<(Vec<BlockMeta>, usi
             row_count,
         });
     }
+    validate_block_metas(&metas)?;
     let bodies_start = *pos;
     Ok((metas, bodies_start))
+}
+
+/// Validates that block metas describe a tightly-packed, gap-free,
+/// non-overlapping body region.
+///
+/// Zero-copy readers slice `bodies_start..bodies_start + total_bodies_len`
+/// and rely on the block layout being contiguous from offset 0; without
+/// this check, malformed input could decode into off-by-one or
+/// overlapping body slices and produce silent corruption rather than an
+/// error.
+fn validate_block_metas(metas: &[BlockMeta]) -> Result<(), &'static str> {
+    let mut expected_offset: u64 = 0;
+    for meta in metas {
+        if u64::from(meta.byte_offset) != expected_offset {
+            return Err("non-contiguous block index (gap or overlap)");
+        }
+        expected_offset = expected_offset
+            .checked_add(u64::from(meta.byte_len))
+            .ok_or("block byte_len overflow")?;
+    }
+    // Cap the total at u32::MAX so callers using `total_bodies_len() as
+    // u32` (writers, future readers) do not silently truncate. The on-disk
+    // BlockMeta uses u32 fields, so overflow here means malformed input.
+    if expected_offset > u64::from(u32::MAX) {
+        return Err("block bodies exceed u32 range");
+    }
+    Ok(())
 }
 
 /// Reads the v3 block index (v2 layout + inline per-block ZoneMap) and
@@ -1504,6 +1538,7 @@ fn read_block_index_v3(
         });
         stats.push(zm);
     }
+    validate_block_metas(&metas)?;
     let bodies_start = *pos;
     Ok((metas, stats, bodies_start))
 }
@@ -3116,6 +3151,79 @@ mod tests {
         // Empty columns should still serialize/deserialize cleanly with v2.
         let col = ColumnCodec::raw_i64(Vec::new());
         assert_round_trip_v2_equals(&col);
+    }
+
+    #[test]
+    fn beatrix_v2_block_index_with_gap_is_rejected() {
+        // Build a v2 buffer for a 2-block RawI64 column, then poke the
+        // second block's byte_offset to leave a 16-byte gap. The reader
+        // must reject this rather than zero-copy slice into the gap and
+        // misinterpret bodies.
+        let col =
+            ColumnCodec::raw_i64((0..(crate::codec::DEFAULT_BLOCK_ROWS as i64) + 4).collect());
+        assert!(col.block_count() >= 2, "need a multi-block column");
+        let mut buf = Vec::new();
+        col.write_to_v2(&mut buf);
+
+        // Layout of the block index for RawI64:
+        //   [discriminant:1][block_count:4][meta0:12][meta1:12]...
+        // discriminant is at index 0, block_count at index 1..5,
+        // first meta at 5..17, second meta at 17..29. Patch the second
+        // meta's byte_offset (the first u32 of meta1) to skip past where
+        // it should start.
+        let original_offset = u32::from_le_bytes(buf[17..21].try_into().unwrap());
+        let bumped = original_offset + 16;
+        buf[17..21].copy_from_slice(&bumped.to_le_bytes());
+
+        let mut pos = 0;
+        let result = ColumnCodec::read_from_v2(&bytes::Bytes::copy_from_slice(&buf), &mut pos);
+        assert!(
+            result.is_err(),
+            "reader must reject block index with a gap, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn shosanna_v2_block_index_with_overlap_is_rejected() {
+        // Build a v2 buffer for a 2-block Float64 column, then make the
+        // second block's byte_offset overlap the first by setting it to 0.
+        let col = ColumnCodec::float64(
+            (0..(crate::codec::DEFAULT_BLOCK_ROWS as i64) + 8)
+                .map(|i| i as f64)
+                .collect(),
+        );
+        assert!(col.block_count() >= 2);
+        let mut buf = Vec::new();
+        col.write_to_v2(&mut buf);
+
+        // Float64 has the same per-block index layout as RawI64; second
+        // meta's byte_offset is at buf[17..21]. Force overlap.
+        buf[17..21].copy_from_slice(&0u32.to_le_bytes());
+
+        let mut pos = 0;
+        let result = ColumnCodec::read_from_v2(&bytes::Bytes::copy_from_slice(&buf), &mut pos);
+        assert!(
+            result.is_err(),
+            "reader must reject overlapping block index, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn vincent_zero_dimension_float32_vector_v2_round_trip() {
+        // Zero-dimension Float32Vector must serialize as an empty column
+        // (no body bytes, block index reports zero rows). The writer used
+        // to .max(1) the row stride and emit `bytes.len()` rows, leaving
+        // the block index inconsistent with `len()`.
+        let col = ColumnCodec::float32_vector(Vec::new(), 0);
+        assert_eq!(col.len(), 0);
+        assert_round_trip_v2_equals(&col);
+
+        let mut buf = Vec::new();
+        col.write_to_v2(&mut buf);
+        let mut pos = 0;
+        let recovered = ColumnCodec::read_from_v2(&bytes::Bytes::copy_from_slice(&buf), &mut pos)
+            .expect("v2 round-trip");
+        assert_eq!(recovered.len(), 0);
     }
 
     #[test]

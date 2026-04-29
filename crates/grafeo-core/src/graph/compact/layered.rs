@@ -109,11 +109,48 @@ impl LayeredStore {
     /// database whose overlay data was just deserialized into the engine's
     /// `LpgStore`.
     ///
+    /// Scans the overlay against the base to reconstruct
+    /// `dirty_node_ids` / `dirty_edge_ids`: any id that exists in both
+    /// layers is a base modification whose overlay copy must take
+    /// precedence in `get_node` / `get_edge`. Without this reseed,
+    /// `get_node` would route through the dirty-check fast path,
+    /// observe an empty set, and return the stale base version of any
+    /// modified base node.
+    ///
+    /// **Note on deletions:** `deleted_from_base_nodes` /
+    /// `deleted_from_base_edges` are NOT reconstructable from the
+    /// in-memory state alone — a base node that was deleted simply has
+    /// no overlay entry, so the scan can't tell it apart from a base
+    /// node that was never touched. Persisting the deletion log is
+    /// tracked separately; callers that depend on durable deletes
+    /// across reload must call `compact()` before close so the merged
+    /// base reflects the deletes.
+    ///
     /// The overlay's id allocator state is preserved as-is; callers
     /// should ensure it has been seeded correctly during deserialization.
     #[must_use]
     pub fn with_overlay(base: Arc<CompactStore>, overlay: Arc<LpgStore>) -> Self {
-        Self::from_parts(base, overlay)
+        let mut dirty_nodes: FxHashSet<NodeId> = FxHashSet::default();
+        for nid in overlay.all_node_ids() {
+            if base.get_node(nid).is_some() {
+                dirty_nodes.insert(nid);
+            }
+        }
+        let mut dirty_edges: FxHashSet<EdgeId> = FxHashSet::default();
+        for edge in overlay.all_edges() {
+            if base.get_edge(edge.id).is_some() {
+                dirty_edges.insert(edge.id);
+            }
+        }
+        Self {
+            base: ArcSwap::new(base),
+            overlay: ArcSwap::new(overlay),
+            dirty_node_ids: RwLock::new(dirty_nodes),
+            dirty_edge_ids: RwLock::new(dirty_edges),
+            deleted_from_base_nodes: RwLock::new(FxHashSet::default()),
+            deleted_from_base_edges: RwLock::new(FxHashSet::default()),
+            merge_guard: RwLock::new(()),
+        }
     }
 
     fn from_parts(base: Arc<CompactStore>, overlay: Arc<LpgStore>) -> Self {
@@ -717,16 +754,22 @@ impl GraphStore for LayeredStore {
     }
 
     fn statistics(&self) -> Arc<Statistics> {
-        // Combine base + overlay statistics.
+        // Combine base + overlay statistics. Snapshot the overlay once
+        // so the labels we enumerate and the per-label counts we read
+        // observe the same `LpgStore` revision — otherwise a concurrent
+        // `merge_overlay_in_place` (which swaps the overlay) could let
+        // us see a label and then read its count from the post-swap
+        // empty overlay.
         let base_stats = self.base.load().statistics();
+        let overlay = self.overlay.load();
 
         let mut combined = (*base_stats).clone();
         combined.total_nodes = self.node_count() as u64;
         combined.total_edges = self.edge_count() as u64;
 
-        // Merge label stats from overlay.
-        for label in self.overlay.load().all_labels() {
-            let count = self.overlay.load().nodes_by_label(&label).len() as u64;
+        // Merge label stats from the snapshotted overlay.
+        for label in overlay.all_labels() {
+            let count = overlay.nodes_by_label(&label).len() as u64;
             if let Some(existing) = combined.get_label(&label) {
                 combined.update_label(
                     &label,

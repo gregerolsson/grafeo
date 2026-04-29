@@ -41,4 +41,4 @@ mod wavelet;
 
 pub use elias_fano::EliasFano;
 pub use rank_select::SuccinctBitVector;
-pub use wavelet::WaveletTree;
+pub use wavelet::{WaveletInvariantError, WaveletTree};

@@ -1644,7 +1644,9 @@ mod tests {
 
     #[test]
     fn test_limit_pushdown_blocked_by_sort_in_between() {
-        use grafeo_core::execution::operators::{LimitOperator, RangeScanOperator};
+        use grafeo_core::execution::operators::{
+            LimitOperator, ProjectOperator, RangeScanOperator, SortOperator,
+        };
         let store = create_test_store();
         let planner = Planner::new(store);
 
@@ -1684,43 +1686,53 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → RangeScan
+        // Walk down: Limit → Sort → RangeScan, asserting at each step.
         let limit_op = root
             .into_any()
             .downcast::<LimitOperator>()
             .expect("top operator is LimitOperator");
         let (after_limit, _cap) = limit_op.into_parts();
 
-        // Skip past Sort by downcasting and unwrapping. Sort has its
-        // own structure; we only care that the eventual RangeScan has
-        // no limit set.
-        let sort_any = after_limit.into_any();
-        // SortOperator may not expose into_parts; we navigate by name.
-        // We accept any operator type here; the assertion is that we
-        // can traverse to a RangeScanOperator that lacks a pushdown.
-        // Instead of downcasting Sort, we plan a parallel "no-Sort"
-        // graph and verify directly: see assertion below.
+        let sort_op = after_limit
+            .into_any()
+            .downcast::<SortOperator>()
+            .expect("operator under Limit must be Sort (Sort blocks pushdown)");
+        let (after_sort, _keys) = sort_op.into_parts();
 
-        // The clean assertion is structural: under Sort, the inner
-        // op must NOT have its limit set. We do this via planning a
-        // companion query without Sort and confirming pushdown DID
-        // fire there — establishing baseline — then arguing by
-        // construction that the Sort branch did not pushdown.
-        //
-        // Pragmatic alternative: assert the pushdown is OFF by
-        // inspecting `limit_hint` on the planner after planning.
-        // After plan_limit completes, the hint must be cleared.
-        let _ = sort_any; // suppress unused warning
+        // Sort wraps its input in a Project that materializes the sort
+        // keys. The fold from Filter+NodeScan to RangeScan happens
+        // inside that Project.
+        let project_op = after_sort
+            .into_any()
+            .downcast::<ProjectOperator>()
+            .expect("operator under Sort must be Project (Sort materializes sort keys)");
+        let (after_project, _projs, _types) = project_op.into_parts();
 
-        // The structural assertion: planner.limit_hint is reset.
+        let range_op = after_project
+            .into_any()
+            .downcast::<RangeScanOperator>()
+            .expect("operator under Project must be RangeScan (Filter folded into scan)");
+
+        // Core assertion of the test: with a Sort between the Limit and
+        // the range scan, LIMIT must NOT be pushed into the scan —
+        // doing so would let Sort observe a truncated input and lose
+        // the globally-smallest rows.
+        assert_eq!(
+            range_op.limit(),
+            None,
+            "Sort between Limit and RangeScan must block LIMIT pushdown"
+        );
+
+        // Sanity: the planner cleared its scratch limit-hint after
+        // planning, so subsequent plans aren't contaminated.
         assert_eq!(
             planner.limit_hint.get(),
             None,
             "limit_hint must be cleared after plan_limit returns"
         );
 
-        // The semantic assertion: re-plan a Limit-over-Filter version
-        // and confirm pushdown fires (sanity of the fixture).
+        // Fixture sanity: a Limit-over-Filter (no Sort) DOES push down,
+        // proving the negative result above isn't a misconfigured fixture.
         let direct = LogicalPlan::new(LogicalOperator::Limit(LogicalLimitOp {
             count: 5.into(),
             input: Box::new(LogicalOperator::Filter(FilterOp {

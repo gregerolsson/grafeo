@@ -10,6 +10,62 @@ use crate::graph::rdf::{Term, Triple, TriplePattern};
 use hashbrown::HashMap;
 use std::sync::Arc;
 
+/// Structural-invariant violation surfaced by
+/// [`TripleRing::from_packed_parts`] when malformed packed metadata is
+/// detected during reconstruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TripleRingInvariantError {
+    /// Per-component sequence length disagrees with `num_triples`.
+    ComponentLengthMismatch {
+        /// Which component disagreed: "subjects", "predicates",
+        /// "objects", "spo_to_pos", or "spo_to_osp".
+        component: &'static str,
+        /// `num_triples` value declared in the header.
+        expected: usize,
+        /// Length actually carried by the component.
+        actual: usize,
+    },
+    /// Packed dictionary's count exceeds `u32::MAX`, so a term id
+    /// cannot fit into the `u32` term-id space the heap
+    /// [`TermDictionary`] uses.
+    DictionaryOverflow {
+        /// Reported dictionary length.
+        len: usize,
+    },
+    /// Packed dictionary reported a length but `get_term(id)` returned
+    /// `None` for an id within `0..len`. Indicates corrupted dict
+    /// payload — would otherwise have panicked in the original code.
+    DictionaryMissingTerm {
+        /// Id where the lookup failed.
+        id: u32,
+    },
+}
+
+impl std::fmt::Display for TripleRingInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ComponentLengthMismatch {
+                component,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "triple ring {component} length ({actual}) does not match num_triples ({expected})"
+            ),
+            Self::DictionaryOverflow { len } => write!(
+                f,
+                "triple ring packed dictionary length ({len}) exceeds u32::MAX"
+            ),
+            Self::DictionaryMissingTerm { id } => write!(
+                f,
+                "triple ring packed dictionary missing term for id {id} (corrupt payload)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TripleRingInvariantError {}
+
 /// Term dictionary mapping terms to compact integer IDs.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TermDictionary {
@@ -266,12 +322,14 @@ impl TripleRing {
     /// A future pass can teach the query path to read directly from
     /// the packed dict for true zero-copy.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the packed dictionary contains more than `u32::MAX`
-    /// terms — but that's already enforced at packed-dict build time
-    /// (Phase 6b), so this can only fire on a manually-corrupted dict.
-    #[must_use]
+    /// Returns [`TripleRingInvariantError`] if any of these structural
+    /// invariants is broken: per-component lengths must equal
+    /// `num_triples`, the packed dictionary's count must fit in `u32`,
+    /// and every id `< len` must resolve to a term. Without these
+    /// checks, a corrupt or hand-crafted payload could cause `get_spo`
+    /// to panic on out-of-bounds wavelet/permutation access.
     pub fn from_packed_parts(
         packed_dict: super::PackedTermDictionary,
         num_triples: usize,
@@ -280,21 +338,46 @@ impl TripleRing {
         objects: WaveletTree,
         spo_to_pos: SuccinctPermutation,
         spo_to_osp: SuccinctPermutation,
-    ) -> Self {
+    ) -> Result<Self, TripleRingInvariantError> {
+        // Per-component length must equal num_triples; otherwise
+        // `get_spo` would index out of bounds against the wavelet trees
+        // or permutations.
+        let lengths: [(&'static str, usize); 5] = [
+            ("subjects", subjects.len()),
+            ("predicates", predicates.len()),
+            ("objects", objects.len()),
+            ("spo_to_pos", spo_to_pos.len()),
+            ("spo_to_osp", spo_to_osp.len()),
+        ];
+        for (component, actual) in lengths {
+            if actual != num_triples {
+                return Err(TripleRingInvariantError::ComponentLengthMismatch {
+                    component,
+                    expected: num_triples,
+                    actual,
+                });
+            }
+        }
+
         // Materialize the packed dictionary into a heap TermDictionary.
         // get_or_insert preserves insertion order, so id N in the
         // packed dict ends up as id N in the heap dict.
-        let mut dict = TermDictionary::with_capacity(packed_dict.len());
-        for id in 0..packed_dict.len() {
-            let id_u32 =
-                u32::try_from(id).expect("packed dict count fits u32 (validated at build)");
+        let dict_len = packed_dict.len();
+        if u32::try_from(dict_len).is_err() {
+            return Err(TripleRingInvariantError::DictionaryOverflow { len: dict_len });
+        }
+        let mut dict = TermDictionary::with_capacity(dict_len);
+        for id in 0..dict_len {
+            // Cast is bounds-checked above.
+            #[allow(clippy::cast_possible_truncation)]
+            let id_u32 = id as u32;
             let term = packed_dict
                 .get_term(id_u32)
-                .expect("id < packed_dict.len()");
+                .ok_or(TripleRingInvariantError::DictionaryMissingTerm { id: id_u32 })?;
             dict.get_or_insert(term);
         }
 
-        Self {
+        Ok(Self {
             dict,
             num_triples,
             subjects,
@@ -302,7 +385,7 @@ impl TripleRing {
             objects,
             spo_to_pos,
             spo_to_osp,
-        }
+        })
     }
 
     /// Returns the triple at position i in SPO order.

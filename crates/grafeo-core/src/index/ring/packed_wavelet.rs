@@ -65,6 +65,10 @@ pub enum PackedWaveletError {
         /// Bit count observed in the level.
         actual: u64,
     },
+    /// Reconstructed parts violated a structural [`WaveletTree`]
+    /// invariant — caught here rather than letting the tree return
+    /// inconsistent answers from `access`/`rank`.
+    InvariantViolation(crate::codec::succinct::WaveletInvariantError),
 }
 
 impl std::fmt::Display for PackedWaveletError {
@@ -83,6 +87,7 @@ impl std::fmt::Display for PackedWaveletError {
                 f,
                 "packed wavelet bit count mismatch at level {level}: expected {expected}, got {actual}"
             ),
+            Self::InvariantViolation(e) => write!(f, "packed wavelet invariant violation: {e}"),
         }
     }
 }
@@ -182,25 +187,36 @@ pub fn deserialize_wavelet_tree(data: Bytes) -> Result<WaveletTree, PackedWavele
     let symbols_bytes = symbol_count
         .checked_mul(8)
         .ok_or(PackedWaveletError::SizeOverflow)?;
-    if cursor + symbols_bytes > data.len() {
+    let symbols_end = cursor
+        .checked_add(symbols_bytes)
+        .ok_or(PackedWaveletError::SizeOverflow)?;
+    if symbols_end > data.len() {
         return Err(PackedWaveletError::Truncated { region: "symbols" });
     }
     let mut symbols: Vec<u64> = Vec::with_capacity(symbol_count);
     for i in 0..symbol_count {
+        // Inner offsets are safe: `symbols_end = cursor + symbols_bytes`
+        // is bounds-checked above, and i < symbol_count implies
+        // `cursor + i*8 + 8 <= symbols_end`.
         let off = cursor + i * 8;
         let chunk: [u8; 8] = data[off..off + 8].try_into().expect("8-byte slice");
         symbols.push(u64::from_le_bytes(chunk));
     }
-    cursor += symbols_bytes;
+    cursor = symbols_end;
 
     // Levels region.
     let mut levels: Vec<SuccinctBitVector> = Vec::with_capacity(height);
     for level_idx in 0..height {
-        if cursor + 16 > data.len() {
+        let level_header_end = cursor
+            .checked_add(16)
+            .ok_or(PackedWaveletError::SizeOverflow)?;
+        if level_header_end > data.len() {
             return Err(PackedWaveletError::Truncated {
                 region: "level header",
             });
         }
+        // Header bounds verified above: `level_header_end = cursor + 16`
+        // doesn't overflow and is in range.
         let bit_count =
             u64::from_le_bytes(data[cursor..cursor + 8].try_into().expect("8-byte slice"));
         let word_count = u64::from_le_bytes(
@@ -208,7 +224,7 @@ pub fn deserialize_wavelet_tree(data: Bytes) -> Result<WaveletTree, PackedWavele
                 .try_into()
                 .expect("8-byte slice"),
         );
-        cursor += 16;
+        cursor = level_header_end;
 
         if bit_count != len_raw {
             return Err(PackedWaveletError::BitCountMismatch {
@@ -224,13 +240,16 @@ pub fn deserialize_wavelet_tree(data: Bytes) -> Result<WaveletTree, PackedWavele
                 .ok_or(PackedWaveletError::SizeOverflow)?,
         )
         .map_err(|_| PackedWaveletError::SizeOverflow)?;
-        if cursor + level_bytes > data.len() {
+        let level_data_end = cursor
+            .checked_add(level_bytes)
+            .ok_or(PackedWaveletError::SizeOverflow)?;
+        if level_data_end > data.len() {
             return Err(PackedWaveletError::Truncated {
                 region: "level data",
             });
         }
-        let level_slice = data.slice(cursor..cursor + level_bytes);
-        cursor += level_bytes;
+        let level_slice = data.slice(cursor..level_data_end);
+        cursor = level_data_end;
 
         let bv = BitVector::from_mmap(level_slice, len_usize).map_err(|_| {
             PackedWaveletError::Truncated {
@@ -240,9 +259,8 @@ pub fn deserialize_wavelet_tree(data: Bytes) -> Result<WaveletTree, PackedWavele
         levels.push(SuccinctBitVector::from_bitvec(bv));
     }
 
-    Ok(WaveletTree::from_packed_parts(
-        levels, height, sigma, len_usize, symbols,
-    ))
+    WaveletTree::from_packed_parts(levels, height, sigma, len_usize, symbols)
+        .map_err(PackedWaveletError::InvariantViolation)
 }
 
 #[cfg(test)]

@@ -130,11 +130,19 @@ fn write_inline_value(buf: &mut Vec<u8>, v: &Option<Value>) {
             buf.push(u8::from(*b));
         }
         Some(Value::String(s)) => {
-            buf.push(3);
             let bytes = s.as_str().as_bytes();
-            let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
-            buf.extend_from_slice(&len.to_le_bytes());
-            buf.extend_from_slice(bytes);
+            // Strings whose byte length exceeds u32::MAX cannot be encoded
+            // in the inline format. Writing a saturated length while still
+            // emitting the full bytes would corrupt the trailing values; emit
+            // tag 0 (absent) instead so the column simply loses its zone-map
+            // stat for this side of the range.
+            if let Ok(len) = u32::try_from(bytes.len()) {
+                buf.push(3);
+                buf.extend_from_slice(&len.to_le_bytes());
+                buf.extend_from_slice(bytes);
+            } else {
+                buf.push(0);
+            }
         }
         Some(_) => buf.push(0),
     }
@@ -389,5 +397,28 @@ mod tests {
         assert!(zm.max.is_none());
         assert_eq!(zm.null_count, 0);
         assert_eq!(zm.row_count, 0);
+    }
+
+    #[test]
+    fn test_inline_value_round_trip_keeps_following_field_aligned() {
+        // The string min plus an Int64 max must round-trip exactly: this
+        // pins down the contract that `write_inline_value`/`read_inline_value`
+        // never desynchronize the cursor (saturating an oversize length
+        // while still emitting the bytes used to corrupt the next field).
+        let zm = ZoneMap {
+            min: Some(Value::from("apple")),
+            max: Some(Value::Int64(99)),
+            null_count: 1,
+            row_count: 12,
+        };
+        let mut buf = Vec::new();
+        zm.write_inline(&mut buf);
+        let mut pos = 0;
+        let recovered = ZoneMap::read_inline(&buf, &mut pos).expect("round-trip");
+        assert_eq!(pos, buf.len(), "reader must consume the entire buffer");
+        assert_eq!(recovered.min, zm.min);
+        assert_eq!(recovered.max, zm.max);
+        assert_eq!(recovered.null_count, zm.null_count);
+        assert_eq!(recovered.row_count, zm.row_count);
     }
 }

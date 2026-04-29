@@ -91,6 +91,10 @@ pub enum PackedRingError {
         /// Value implied by the parsed sub-sections.
         observed: usize,
     },
+    /// Reconstructed sub-components violated a [`TripleRing`]
+    /// structural invariant — caught here rather than letting the ring
+    /// panic on a later query.
+    RingInvariantViolation(super::triple_ring::TripleRingInvariantError),
 }
 
 impl std::fmt::Display for PackedRingError {
@@ -114,6 +118,9 @@ impl std::fmt::Display for PackedRingError {
                 f,
                 "ring v2 num_triples mismatch: declared {declared}, observed {observed}"
             ),
+            Self::RingInvariantViolation(e) => {
+                write!(f, "ring v2 ring invariant violation: {e}")
+            }
         }
     }
 }
@@ -135,6 +142,12 @@ impl From<PackedWaveletError> for PackedRingError {
 impl From<PackedPermutationError> for PackedRingError {
     fn from(e: PackedPermutationError) -> Self {
         Self::Permutation(e)
+    }
+}
+
+impl From<super::triple_ring::TripleRingInvariantError> for PackedRingError {
+    fn from(e: super::triple_ring::TripleRingInvariantError) -> Self {
+        Self::RingInvariantViolation(e)
     }
 }
 
@@ -306,7 +319,7 @@ pub fn deserialize_triple_ring(data: Bytes) -> Result<TripleRing, PackedRingErro
         });
     }
 
-    Ok(TripleRing::from_packed_parts(
+    TripleRing::from_packed_parts(
         dict,
         num_triples,
         subjects,
@@ -314,7 +327,8 @@ pub fn deserialize_triple_ring(data: Bytes) -> Result<TripleRing, PackedRingErro
         objects,
         spo_to_pos,
         spo_to_osp,
-    ))
+    )
+    .map_err(PackedRingError::RingInvariantViolation)
 }
 
 #[cfg(test)]

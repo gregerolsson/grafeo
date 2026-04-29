@@ -63,4 +63,4 @@ pub use packed_permutation::{
 pub use packed_wavelet::{PackedWaveletError, deserialize_wavelet_tree, serialize_wavelet_tree};
 pub use permutation::SuccinctPermutation;
 pub use section::RdfRingSection;
-pub use triple_ring::TripleRing;
+pub use triple_ring::{TripleRing, TripleRingInvariantError};
