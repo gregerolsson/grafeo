@@ -294,6 +294,84 @@ impl BitPackedInts {
         Some((word >> bit_offset) & mask)
     }
 
+    /// Returns the row offsets where the unpacked value equals `target`.
+    ///
+    /// Hoists the `WordStore` discriminant check, the `bits_per_value`
+    /// constants, and the `values_per_word` / `mask` computation out of the
+    /// per-row loop. CodSpeed callgrind counts every retired instruction, so
+    /// re-deriving these per row (as `(0..len).filter(|i| get(*i) == ...)` did)
+    /// inflated the instruction count materially even though wall-time on
+    /// real CPUs was unaffected.
+    #[must_use]
+    pub fn scan_eq(&self, target: u64) -> Vec<usize> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+
+        if self.bits_per_value == 0 {
+            return if target == 0 {
+                (0..self.count).collect()
+            } else {
+                Vec::new()
+            };
+        }
+
+        let bits = self.bits_per_value as usize;
+        // bits is in 1..=64 here (constructor guarantees), so values_per_word is 1..=64.
+        let values_per_word = 64 / bits;
+        let mask = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+
+        // Bail if the target can't be represented in `bits` bits — no row
+        // can possibly match. Saves the entire scan.
+        if mask != u64::MAX && target & !mask != 0 {
+            return Vec::new();
+        }
+
+        match &self.data {
+            WordStore::Inline(words) => {
+                let mut out = Vec::new();
+                for i in 0..self.count {
+                    let word_idx = i / values_per_word;
+                    let bit_offset = (i % values_per_word) * bits;
+                    // `word_idx < words.len()` is guaranteed by the
+                    // count/bits invariant set up at construction time;
+                    // use `get` defensively rather than panic-on-malformed.
+                    let Some(&word) = words.get(word_idx) else {
+                        break;
+                    };
+                    if (word >> bit_offset) & mask == target {
+                        out.push(i);
+                    }
+                }
+                out
+            }
+            WordStore::Mapped(b) => {
+                let mut out = Vec::new();
+                let bytes = b.as_ref();
+                for i in 0..self.count {
+                    let word_idx = i / values_per_word;
+                    let bit_offset = (i % values_per_word) * bits;
+                    let start = word_idx * 8;
+                    let Some(slice) = bytes.get(start..start + 8) else {
+                        break;
+                    };
+                    let Ok(chunk) = <[u8; 8]>::try_from(slice) else {
+                        break;
+                    };
+                    let word = u64::from_le_bytes(chunk);
+                    if (word >> bit_offset) & mask == target {
+                        out.push(i);
+                    }
+                }
+                out
+            }
+        }
+    }
+
     /// Returns the number of values.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -838,5 +916,67 @@ mod tests {
         }
         assert_eq!(inline.get(values.len()), None);
         assert_eq!(mapped.get(values.len()), None);
+    }
+
+    #[test]
+    fn test_scan_eq_matches_get_filter_inline() {
+        let values: Vec<u64> = (0..5_000).map(|i| (i * 13) % 97).collect();
+        let packed = BitPackedInts::pack(&values);
+
+        for target in [0u64, 1, 50, 96, 97, u64::MAX] {
+            let scan: Vec<usize> = packed.scan_eq(target);
+            let getf: Vec<usize> = (0..values.len())
+                .filter(|&i| packed.get(i) == Some(target))
+                .collect();
+            assert_eq!(scan, getf, "scan_eq vs get-filter for target {target}");
+        }
+    }
+
+    #[test]
+    fn test_scan_eq_matches_get_filter_mapped() {
+        let values: Vec<u64> = (0..5_000).map(|i| (i * 13) % 97).collect();
+        let inline = BitPackedInts::pack(&values);
+        let bytes = inline.data_bytes();
+        let mapped =
+            BitPackedInts::from_bytes_storage(bytes, inline.bits_per_value(), values.len());
+
+        for target in [0u64, 1, 50, 96, 97, u64::MAX] {
+            let scan: Vec<usize> = mapped.scan_eq(target);
+            let getf: Vec<usize> = (0..values.len())
+                .filter(|&i| mapped.get(i) == Some(target))
+                .collect();
+            assert_eq!(
+                scan, getf,
+                "mapped scan_eq vs get-filter for target {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_eq_all_zeros_short_circuit() {
+        // bits_per_value == 0 path: every row stores 0.
+        let packed = BitPackedInts::pack(&vec![0u64; 64]);
+        assert_eq!(packed.bits_per_value(), 1);
+        // Force the zero-bits path by constructing manually.
+        let zero_bits = BitPackedInts::from_raw_parts(Vec::new(), 0, 64);
+        assert_eq!(zero_bits.scan_eq(0), (0..64).collect::<Vec<_>>());
+        assert!(zero_bits.scan_eq(1).is_empty());
+    }
+
+    #[test]
+    fn test_scan_eq_target_exceeds_mask_returns_empty() {
+        // 4-bit packing can hold 0..=15. A target of 100 must be rejected
+        // up-front without scanning.
+        let values: Vec<u64> = (0..10).map(|i| i % 16).collect();
+        let packed = BitPackedInts::pack(&values);
+        assert!(packed.bits_per_value() <= 4);
+        assert!(packed.scan_eq(100).is_empty());
+    }
+
+    #[test]
+    fn test_scan_eq_empty_column() {
+        let packed = BitPackedInts::pack(&[]);
+        assert!(packed.scan_eq(0).is_empty());
+        assert!(packed.scan_eq(42).is_empty());
     }
 }

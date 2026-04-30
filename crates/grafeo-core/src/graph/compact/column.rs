@@ -563,9 +563,13 @@ impl ColumnCodec {
                 // reason: v >= 0 checked above
                 #[allow(clippy::cast_sign_loss)]
                 let target_u64 = v as u64;
-                (0..bp.len())
-                    .filter(|&i| bp.get(i) == Some(target_u64))
-                    .collect()
+                // `scan_eq` hoists the WordStore discriminant + bit-packing
+                // constants out of the per-row loop. The previous
+                // `(0..len).filter(|i| bp.get(i) == ...)` form forced LLVM
+                // to re-check the variant tag and re-derive `values_per_word`
+                // / `mask` per iteration, which CodSpeed callgrind counted
+                // as real instruction cost (Tasks 1-8 follow-up).
+                bp.scan_eq(target_u64)
             }
             (Self::Dict(dict), Value::String(s)) => match dict.encode(s.as_str()) {
                 Some(code) => dict.filter_by_code(|c| c == code),
