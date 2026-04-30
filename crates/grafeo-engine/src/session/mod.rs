@@ -350,6 +350,22 @@ impl Session {
         self.wal_graph_context = Some(wal_graph_context);
     }
 
+    /// Logs a WAL record if WAL is enabled. No-op for in-memory sessions.
+    ///
+    /// Mirrors `GrafeoDB::log_wal`: WAL write failures are logged via
+    /// `grafeo_warn!` and not propagated, so a transient WAL error never
+    /// fails a Session mutation. The caller is responsible for invoking
+    /// this immediately after the in-memory LPG mutation so that recovery
+    /// replays records in the same order writes happened.
+    #[cfg(all(feature = "wal", feature = "lpg"))]
+    pub(crate) fn log_wal_record(&self, record: &grafeo_storage::wal::WalRecord) {
+        if let Some(ref wal) = self.wal
+            && let Err(e) = wal.log(record)
+        {
+            grafeo_warn!("Session: failed to log WAL record: {}", e);
+        }
+    }
+
     /// Sets the CDC log for this session (shared with the database).
     ///
     /// Wraps the current write store with a `CdcGraphStore` decorator so
@@ -4830,11 +4846,19 @@ impl Session {
     #[cfg(feature = "lpg")]
     pub fn create_node(&self, labels: &[&str]) -> NodeId {
         let (epoch, transaction_id) = self.get_transaction_context();
-        self.active_lpg_store().create_node_versioned(
+        let id = self.active_lpg_store().create_node_versioned(
             labels,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
-        )
+        );
+
+        #[cfg(feature = "wal")]
+        self.log_wal_record(&grafeo_storage::wal::WalRecord::CreateNode {
+            id,
+            labels: labels.iter().map(|s| (*s).to_string()).collect(),
+        });
+
+        id
     }
 
     /// Creates a node with properties.
@@ -4854,13 +4878,40 @@ impl Session {
         for (key, value) in &props {
             self.check_property_size(key, value)?;
         }
+
+        // Snapshot the props for WAL before passing them to the LPG store.
+        // The LPG store consumes `props` by value; we need owned copies for
+        // post-hoc WAL emission.
+        #[cfg(feature = "wal")]
+        let wal_props: Vec<(String, Value)> = props
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+
         let (epoch, transaction_id) = self.get_transaction_context();
-        Ok(self.active_lpg_store().create_node_with_props_versioned(
+        let id = self.active_lpg_store().create_node_with_props_versioned(
             labels,
             props,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
-        ))
+        );
+
+        #[cfg(feature = "wal")]
+        {
+            self.log_wal_record(&grafeo_storage::wal::WalRecord::CreateNode {
+                id,
+                labels: labels.iter().map(|s| (*s).to_string()).collect(),
+            });
+            for (key, value) in wal_props {
+                self.log_wal_record(&grafeo_storage::wal::WalRecord::SetNodeProperty {
+                    id,
+                    key,
+                    value,
+                });
+            }
+        }
+
+        Ok(id)
     }
 
     /// Creates an edge between two nodes.
@@ -4875,13 +4926,23 @@ impl Session {
         edge_type: &str,
     ) -> grafeo_common::types::EdgeId {
         let (epoch, transaction_id) = self.get_transaction_context();
-        self.active_lpg_store().create_edge_versioned(
+        let eid = self.active_lpg_store().create_edge_versioned(
             src,
             dst,
             edge_type,
             epoch,
             transaction_id.unwrap_or(TransactionId::SYSTEM),
-        )
+        );
+
+        #[cfg(feature = "wal")]
+        self.log_wal_record(&grafeo_storage::wal::WalRecord::CreateEdge {
+            id: eid,
+            src,
+            dst,
+            edge_type: edge_type.to_string(),
+        });
+
+        eid
     }
 
     /// Creates an edge with properties within the active transaction context.
@@ -4905,9 +4966,27 @@ impl Session {
         let tid = transaction_id.unwrap_or(TransactionId::SYSTEM);
         let store = self.active_lpg_store();
         let eid = store.create_edge_versioned(src, dst, edge_type, epoch, tid);
-        for (key, value) in props {
-            store.set_edge_property_versioned(eid, key, value, tid);
+        for (key, value) in &props {
+            store.set_edge_property_versioned(eid, key, value.clone(), tid);
         }
+
+        #[cfg(feature = "wal")]
+        {
+            self.log_wal_record(&grafeo_storage::wal::WalRecord::CreateEdge {
+                id: eid,
+                src,
+                dst,
+                edge_type: edge_type.to_string(),
+            });
+            for (key, value) in props {
+                self.log_wal_record(&grafeo_storage::wal::WalRecord::SetEdgeProperty {
+                    id: eid,
+                    key: key.to_string(),
+                    value,
+                });
+            }
+        }
+
         Ok(eid)
     }
 
@@ -4920,12 +4999,24 @@ impl Session {
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
         self.check_property_size(key, &value)?;
         let (_, transaction_id) = self.get_transaction_context();
+
+        #[cfg(feature = "wal")]
+        let value_for_wal = value.clone();
+
         if let Some(tid) = transaction_id {
             self.active_lpg_store()
                 .set_node_property_versioned(id, key, value, tid);
         } else {
             self.active_lpg_store().set_node_property(id, key, value);
         }
+
+        #[cfg(feature = "wal")]
+        self.log_wal_record(&grafeo_storage::wal::WalRecord::SetNodeProperty {
+            id,
+            key: key.to_string(),
+            value: value_for_wal,
+        });
+
         Ok(())
     }
 
@@ -4943,12 +5034,24 @@ impl Session {
     ) -> Result<()> {
         self.check_property_size(key, &value)?;
         let (_, transaction_id) = self.get_transaction_context();
+
+        #[cfg(feature = "wal")]
+        let value_for_wal = value.clone();
+
         if let Some(tid) = transaction_id {
             self.active_lpg_store()
                 .set_edge_property_versioned(id, key, value, tid);
         } else {
             self.active_lpg_store().set_edge_property(id, key, value);
         }
+
+        #[cfg(feature = "wal")]
+        self.log_wal_record(&grafeo_storage::wal::WalRecord::SetEdgeProperty {
+            id,
+            key: key.to_string(),
+            value: value_for_wal,
+        });
+
         Ok(())
     }
 
@@ -4956,24 +5059,38 @@ impl Session {
     #[cfg(feature = "lpg")]
     pub fn delete_node(&self, id: NodeId) -> bool {
         let (epoch, transaction_id) = self.get_transaction_context();
-        if let Some(tid) = transaction_id {
+        let deleted = if let Some(tid) = transaction_id {
             self.active_lpg_store()
                 .delete_node_versioned(id, epoch, tid)
         } else {
             self.active_lpg_store().delete_node(id)
+        };
+
+        #[cfg(feature = "wal")]
+        if deleted {
+            self.log_wal_record(&grafeo_storage::wal::WalRecord::DeleteNode { id });
         }
+
+        deleted
     }
 
     /// Deletes an edge within the active transaction context.
     #[cfg(feature = "lpg")]
     pub fn delete_edge(&self, id: grafeo_common::types::EdgeId) -> bool {
         let (epoch, transaction_id) = self.get_transaction_context();
-        if let Some(tid) = transaction_id {
+        let deleted = if let Some(tid) = transaction_id {
             self.active_lpg_store()
                 .delete_edge_versioned(id, epoch, tid)
         } else {
             self.active_lpg_store().delete_edge(id)
+        };
+
+        #[cfg(feature = "wal")]
+        if deleted {
+            self.log_wal_record(&grafeo_storage::wal::WalRecord::DeleteEdge { id });
         }
+
+        deleted
     }
 
     // =========================================================================
