@@ -35,6 +35,69 @@ fn words_to_bytes(words: &[u64]) -> Bytes {
     buf.freeze()
 }
 
+/// Two-variant backing for the packed `u64` words.
+///
+/// `Inline` is used when the column is built in RAM (the common path for
+/// `pack`, `from_raw_parts`, and any in-memory constructor): scans can
+/// iterate the `&[u64]` slice directly with no per-element decode.
+///
+/// `Mapped` is used when the column is constructed from a slice of an
+/// mmap-backed file (`from_bytes_storage`). Per-element access pays an
+/// 8-byte little-endian decode but no copy occurs.
+#[derive(Debug, Clone)]
+enum WordStore {
+    Inline(Vec<u64>),
+    Mapped(Bytes),
+}
+
+impl WordStore {
+    #[inline]
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len() * 8,
+            Self::Mapped(b) => b.len(),
+        }
+    }
+
+    #[inline]
+    fn word_count(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len(),
+            Self::Mapped(b) => b.len() / 8,
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> Option<&[u64]> {
+        match self {
+            Self::Inline(v) => Some(v.as_slice()),
+            Self::Mapped(_) => None,
+        }
+    }
+
+    #[inline]
+    fn word_at(&self, idx: usize) -> Option<u64> {
+        match self {
+            Self::Inline(v) => v.get(idx).copied(),
+            Self::Mapped(b) => {
+                let start = idx.checked_mul(8)?;
+                let end = start.checked_add(8)?;
+                let chunk: [u8; 8] = b.get(start..end)?.try_into().ok()?;
+                Some(u64::from_le_bytes(chunk))
+            }
+        }
+    }
+
+    /// Returns a `Bytes` view for serialization. `Inline` materialises a
+    /// fresh LE-encoded buffer; `Mapped` returns the existing refcount.
+    fn to_bytes(&self) -> Bytes {
+        match self {
+            Self::Inline(v) => words_to_bytes(v),
+            Self::Mapped(b) => b.clone(),
+        }
+    }
+}
+
 /// Stores integers using only as many bits as the largest value needs.
 ///
 /// Pass your values to [`pack()`](Self::pack) and we'll figure out the optimal
@@ -42,15 +105,21 @@ fn words_to_bytes(words: &[u64]) -> Bytes {
 ///
 /// # Storage
 ///
-/// Phase 3b: word storage is a refcounted `bytes::Bytes` slice carrying
-/// the packed `u64` words in little-endian byte order. Heap-owned and
-/// mmap-backed columns share the same type; only the constructor differs.
-/// Word access goes through [`word_at`](Self::word_at) (`from_le_bytes`
-/// from the slice).
+/// Phase 3c: word storage is a [`WordStore`] enum with two shapes.
+/// `Inline(Vec<u64>)` is used for in-RAM builds (`pack`, `from_raw_parts`)
+/// so scans can iterate the `&[u64]` slice directly with no per-element
+/// decode. `Mapped(Bytes)` is used for mmap-backed loads
+/// (`from_bytes_storage`) so the column shares the underlying allocation
+/// without copying. Per-element access via [`word_at`](Self::word_at)
+/// works for both; callers that want zero-decode iteration should use
+/// [`as_words_slice`](Self::as_words_slice) and fall back to `word_at`
+/// when it returns `None`.
 #[derive(Debug, Clone)]
 pub struct BitPackedInts {
-    /// Packed data: little-endian `u64` words concatenated, refcounted.
-    data: Bytes,
+    /// Packed `u64` words: `Inline(Vec<u64>)` for RAM builds, `Mapped(Bytes)`
+    /// for mmap-backed loads. Scans branch once at the call site to use the
+    /// slice fast path when available.
+    data: WordStore,
     /// Number of bits per value.
     bits_per_value: u8,
     /// Number of values.
@@ -65,7 +134,7 @@ impl BitPackedInts {
     #[must_use]
     pub fn from_raw_parts(data: Vec<u64>, bits_per_value: u8, count: usize) -> Self {
         Self {
-            data: words_to_bytes(&data),
+            data: WordStore::Inline(data),
             bits_per_value,
             count,
         }
@@ -79,7 +148,7 @@ impl BitPackedInts {
     #[must_use]
     pub fn from_bytes_storage(data: Bytes, bits_per_value: u8, count: usize) -> Self {
         Self {
-            data,
+            data: WordStore::Mapped(data),
             bits_per_value,
             count,
         }
@@ -90,7 +159,7 @@ impl BitPackedInts {
     pub fn pack(values: &[u64]) -> Self {
         if values.is_empty() {
             return Self {
-                data: Bytes::new(),
+                data: WordStore::Inline(Vec::new()),
                 bits_per_value: 0,
                 count: 0,
             };
@@ -110,7 +179,7 @@ impl BitPackedInts {
     pub fn pack_with_bits(values: &[u64], bits_per_value: u8) -> Self {
         if values.is_empty() {
             return Self {
-                data: Bytes::new(),
+                data: WordStore::Inline(Vec::new()),
                 bits_per_value,
                 count: 0,
             };
@@ -120,7 +189,7 @@ impl BitPackedInts {
             // All values must be 0
             debug_assert!(values.iter().all(|&v| v == 0));
             return Self {
-                data: Bytes::new(),
+                data: WordStore::Inline(Vec::new()),
                 bits_per_value: 0,
                 count: values.len(),
             };
@@ -151,7 +220,7 @@ impl BitPackedInts {
         }
 
         Self {
-            data: words_to_bytes(&words),
+            data: WordStore::Inline(words),
             bits_per_value,
             count: values.len(),
         }
@@ -191,6 +260,7 @@ impl BitPackedInts {
 
     /// Gets a single value at the given index.
     #[must_use]
+    #[inline]
     pub fn get(&self, index: usize) -> Option<u64> {
         if index >= self.count {
             return None;
@@ -210,7 +280,17 @@ impl BitPackedInts {
             (1u64 << bits) - 1
         };
 
-        let word = self.word_at(word_idx)?;
+        let word = match &self.data {
+            WordStore::Inline(v) => *v.get(word_idx)?,
+            // Duplicates WordStore::word_at's Mapped arm intentionally so LLVM sees
+            // the full hot path without a call boundary. Keep in sync.
+            WordStore::Mapped(b) => {
+                let start = word_idx.checked_mul(8)?;
+                let end = start.checked_add(8)?;
+                let chunk: [u8; 8] = b.get(start..end)?.try_into().ok()?;
+                u64::from_le_bytes(chunk)
+            }
+        };
         Some((word >> bit_offset) & mask)
     }
 
@@ -234,30 +314,36 @@ impl BitPackedInts {
 
     /// Returns the raw packed bytes.
     ///
-    /// Phase 3b: word storage is now `bytes::Bytes`. Use [`Self::get`] for
-    /// indexed access; this returns the concatenated little-endian word
-    /// bytes for serializers that need to write the storage out.
+    /// Phase 3b/3c: when storage is `Inline`, we materialise an LE-encoded
+    /// view; when storage is `Mapped`, we return the existing refcount.
+    /// Callers that hold the result must accept either ownership shape.
     #[must_use]
-    pub fn data_bytes(&self) -> &Bytes {
-        &self.data
+    pub fn data_bytes(&self) -> Bytes {
+        self.data.to_bytes()
     }
 
     /// Returns the number of `u64` words backing this column.
     #[must_use]
     pub fn word_count(&self) -> usize {
-        self.data.len() / 8
+        self.data.word_count()
+    }
+
+    /// Returns a direct `&[u64]` view when the column lives in RAM.
+    ///
+    /// `Some(slice)` means the caller can iterate words without per-element
+    /// decode. `None` means the column is mmap-backed; callers should fall
+    /// back to [`Self::word_at`] (one safe LE decode per access).
+    #[must_use]
+    #[inline]
+    pub fn as_words_slice(&self) -> Option<&[u64]> {
+        self.data.as_slice()
     }
 
     /// Returns the word at `idx`, or `None` if out of range.
-    ///
-    /// Reads via `from_le_bytes`; supports unaligned `Bytes` slices
-    /// (e.g., mmap-backed sub-slices in Phase 3c).
     #[must_use]
+    #[inline]
     pub fn word_at(&self, idx: usize) -> Option<u64> {
-        let start = idx.checked_mul(8)?;
-        let end = start.checked_add(8)?;
-        let chunk: [u8; 8] = self.data.get(start..end)?.try_into().ok()?;
-        Some(u64::from_le_bytes(chunk))
+        self.data.word_at(idx)
     }
 
     /// Returns the compression ratio compared to storing full u64s.
@@ -268,7 +354,7 @@ impl BitPackedInts {
         }
 
         let original_size = self.count * 8; // 8 bytes per u64
-        let packed_size = self.data.len();
+        let packed_size = self.data.byte_len();
 
         if packed_size == 0 {
             return f64::INFINITY; // All zeros, perfect compression
@@ -311,11 +397,13 @@ impl BitPackedInts {
                 ),
             )
         })?;
-        let mut buf = Vec::with_capacity(1 + 4 + self.data.len());
+        let mut buf = Vec::with_capacity(1 + 4 + self.data.byte_len());
         buf.push(self.bits_per_value);
         buf.extend_from_slice(&count_u32.to_le_bytes());
-        // Storage is already LE bytes — append directly.
-        buf.extend_from_slice(&self.data);
+        // Storage is little-endian words: borrow from `Mapped`, or build a
+        // fresh LE buffer for `Inline`.
+        let body = self.data.to_bytes();
+        buf.extend_from_slice(&body);
         Ok(buf)
     }
 
@@ -360,7 +448,10 @@ impl BitPackedInts {
             ));
         }
 
-        let data = Bytes::copy_from_slice(&bytes[5..needed]);
+        // Note: this always produces Mapped storage. Callers performing
+        // in-memory deserialisation that have a Vec<u64> in hand should
+        // prefer from_raw_parts() to keep the slice fast path.
+        let data = WordStore::Mapped(Bytes::copy_from_slice(&bytes[5..needed]));
 
         Ok(Self {
             data,
@@ -690,5 +781,62 @@ mod tests {
         assert_eq!(packed.unpack(), restored.unpack());
         assert_eq!(packed.bits_per_value(), restored.bits_per_value());
         assert_eq!(packed.len(), restored.len());
+    }
+
+    // ── Inline/Mapped storage variants (Task 1: failing tests for as_words_slice) ──
+
+    #[test]
+    fn test_bitpack_inline_storage_word_slice_via_pack() {
+        let values: Vec<u64> = (0..1000).map(|i| i % 16).collect();
+        let packed = BitPackedInts::pack(&values);
+
+        let slice = packed.as_words_slice();
+        assert!(
+            slice.is_some(),
+            "BitPackedInts::pack must produce Inline storage so scans skip per-element decode"
+        );
+    }
+
+    #[test]
+    fn test_bitpack_inline_storage_word_slice_matches_input() {
+        let words = vec![0xDEAD_BEEFu64, 0xCAFE_BABE];
+        let packed = BitPackedInts::from_raw_parts(words.clone(), 8, 16);
+        let slice = packed.as_words_slice().expect("Vec input is Inline");
+        assert_eq!(slice, words.as_slice());
+    }
+
+    #[test]
+    fn test_bitpack_mapped_storage_no_word_slice() {
+        let words: Vec<u64> = vec![1, 2, 3];
+        let mut buf = bytes::BytesMut::with_capacity(words.len() * 8);
+        for &w in &words {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+        let packed = BitPackedInts::from_bytes_storage(buf.freeze(), 8, 24);
+
+        assert!(
+            packed.as_words_slice().is_none(),
+            "Bytes-backed (mmap) storage cannot expose a u64 slice"
+        );
+        assert_eq!(packed.word_at(0), Some(1));
+        assert_eq!(packed.word_at(2), Some(3));
+    }
+
+    #[test]
+    fn test_bitpack_get_matches_between_inline_and_mapped_storage() {
+        let values: Vec<u64> = (0..2_000).map(|i| (i * 7) % 31).collect();
+        let inline = BitPackedInts::pack(&values);
+
+        // Build a Mapped equivalent by re-encoding through bytes.
+        let bytes = inline.data_bytes();
+        let mapped =
+            BitPackedInts::from_bytes_storage(bytes, inline.bits_per_value(), values.len());
+
+        for i in 0..values.len() {
+            assert_eq!(inline.get(i), Some(values[i]), "inline mismatch at {i}");
+            assert_eq!(mapped.get(i), Some(values[i]), "mapped mismatch at {i}");
+        }
+        assert_eq!(inline.get(values.len()), None);
+        assert_eq!(mapped.get(values.len()), None);
     }
 }

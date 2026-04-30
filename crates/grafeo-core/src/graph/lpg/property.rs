@@ -801,7 +801,7 @@ impl CompressedColumnData {
                 id_to_index,
                 index_to_id,
             } => {
-                encoding.codes_bytes().len()
+                encoding.code_count() * 4
                     + encoding.dictionary().iter().map(|s| s.len()).sum::<usize>()
                     + id_to_index.len() * std::mem::size_of::<u64>()
                     + index_to_id.len() * std::mem::size_of::<u64>()

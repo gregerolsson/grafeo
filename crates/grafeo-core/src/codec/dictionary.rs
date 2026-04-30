@@ -59,13 +59,82 @@ fn null_bit_at(bitmap: &Bytes, index: usize) -> bool {
     (u64::from_le_bytes(arr) & (1 << bit_idx)) != 0
 }
 
-/// Encodes a `Vec<u64>` null bitmap as LE bytes wrapped in `Bytes`.
-fn null_bitmap_to_bytes(bitmap: &[u64]) -> Bytes {
-    let mut buf = BytesMut::with_capacity(bitmap.len() * 8);
-    for &w in bitmap {
-        buf.extend_from_slice(&w.to_le_bytes());
+/// Two-variant backing for u32 dictionary codes.
+#[derive(Debug, Clone)]
+enum CodeStore {
+    Inline(Vec<u32>),
+    Mapped(Bytes),
+}
+
+impl CodeStore {
+    #[inline]
+    fn as_slice(&self) -> Option<&[u32]> {
+        match self {
+            Self::Inline(v) => Some(v.as_slice()),
+            Self::Mapped(_) => None,
+        }
     }
-    buf.freeze()
+
+    #[inline]
+    fn code_at(&self, idx: usize) -> Option<u32> {
+        match self {
+            Self::Inline(v) => v.get(idx).copied(),
+            Self::Mapped(b) => read_code_at(b, idx),
+        }
+    }
+
+    fn to_bytes(&self) -> Bytes {
+        match self {
+            Self::Inline(v) => codes_to_bytes(v),
+            Self::Mapped(b) => b.clone(),
+        }
+    }
+
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len() * 4,
+            Self::Mapped(b) => b.len(),
+        }
+    }
+
+    #[inline]
+    fn len_codes(&self, code_count: usize) -> usize {
+        match self {
+            Self::Inline(v) => v.len(),
+            Self::Mapped(_) => code_count,
+        }
+    }
+}
+
+/// Two-variant backing for the LE-u64 null bitmap.
+#[derive(Debug, Clone)]
+enum NullBitmap {
+    Inline(Vec<u64>),
+    Mapped(Bytes),
+}
+
+impl NullBitmap {
+    #[inline]
+    fn as_slice(&self) -> Option<&[u64]> {
+        match self {
+            Self::Inline(v) => Some(v.as_slice()),
+            Self::Mapped(_) => None,
+        }
+    }
+
+    #[inline]
+    fn is_null(&self, index: usize) -> bool {
+        match self {
+            Self::Inline(words) => {
+                let word_idx = index / 64;
+                let bit_idx = index % 64;
+                words
+                    .get(word_idx)
+                    .is_some_and(|w| (*w & (1u64 << bit_idx)) != 0)
+            }
+            Self::Mapped(b) => null_bit_at(b, index),
+        }
+    }
 }
 
 /// Stores repeated strings efficiently by referencing them with integer codes.
@@ -78,12 +147,12 @@ fn null_bitmap_to_bytes(bitmap: &[u64]) -> Bytes {
 pub struct DictionaryEncoding {
     /// The dictionary of unique strings.
     dictionary: Arc<[Arc<str>]>,
-    /// Encoded values as LE u32 indices into the dictionary.
-    codes: Bytes,
-    /// Number of code values (== `codes.len() / 4`; cached for clarity).
+    /// Encoded values: `Inline(Vec<u32>)` or `Mapped(Bytes)`.
+    codes: CodeStore,
+    /// Number of code values.
     code_count: usize,
-    /// Null bitmap (bit set = null), LE u64 words.
-    null_bitmap: Option<Bytes>,
+    /// Optional null bitmap: `Inline(Vec<u64>)` or `Mapped(Bytes)`.
+    null_bitmap: Option<NullBitmap>,
 }
 
 impl DictionaryEncoding {
@@ -93,7 +162,7 @@ impl DictionaryEncoding {
         let code_count = codes.len();
         Self {
             dictionary,
-            codes: codes_to_bytes(&codes),
+            codes: CodeStore::Inline(codes),
             code_count,
             null_bitmap: None,
         }
@@ -110,7 +179,7 @@ impl DictionaryEncoding {
     ) -> Self {
         Self {
             dictionary,
-            codes: codes_bytes,
+            codes: CodeStore::Mapped(codes_bytes),
             code_count,
             null_bitmap: None,
         }
@@ -118,24 +187,24 @@ impl DictionaryEncoding {
 
     /// Adds a null bitmap to this encoding (legacy `Vec<u64>` input).
     pub fn with_nulls(mut self, null_bitmap: Vec<u64>) -> Self {
-        self.null_bitmap = Some(null_bitmap_to_bytes(&null_bitmap));
+        self.null_bitmap = Some(NullBitmap::Inline(null_bitmap));
         self
     }
 
     /// Adds a pre-encoded null bitmap (Phase 3c entry point).
     pub fn with_null_bytes(mut self, null_bitmap: Bytes) -> Self {
-        self.null_bitmap = Some(null_bitmap);
+        self.null_bitmap = Some(NullBitmap::Mapped(null_bitmap));
         self
     }
 
     /// Returns the number of values.
     pub fn len(&self) -> usize {
-        self.code_count
+        self.codes.len_codes(self.code_count)
     }
 
     /// Returns whether the encoding is empty.
     pub fn is_empty(&self) -> bool {
-        self.code_count == 0
+        self.codes.len_codes(self.code_count) == 0
     }
 
     /// Returns the number of unique strings in the dictionary.
@@ -148,13 +217,29 @@ impl DictionaryEncoding {
         &self.dictionary
     }
 
-    /// Returns the encoded codes as raw LE u32 bytes.
+    /// Returns the encoded codes as raw LE u32 bytes (always materialised).
     ///
     /// Phase 3b: codes storage is `bytes::Bytes`. Use [`Self::code_at`] for
     /// indexed access; this returns the raw byte storage for serializers
     /// that write the storage out directly.
-    pub fn codes_bytes(&self) -> &Bytes {
-        &self.codes
+    #[must_use]
+    pub fn codes_bytes(&self) -> Bytes {
+        self.codes.to_bytes()
+    }
+
+    /// Returns a direct `&[u32]` slice when the codes live in RAM.
+    #[must_use]
+    #[inline]
+    pub fn as_codes_slice(&self) -> Option<&[u32]> {
+        self.codes.as_slice()
+    }
+
+    /// Returns a direct `&[u64]` view of the null bitmap when it lives in
+    /// RAM. `None` when there is no null bitmap or the bitmap is mmap-backed.
+    #[must_use]
+    #[inline]
+    pub fn as_null_words_slice(&self) -> Option<&[u64]> {
+        self.null_bitmap.as_ref().and_then(NullBitmap::as_slice)
     }
 
     /// Number of u32 codes stored.
@@ -163,11 +248,10 @@ impl DictionaryEncoding {
     }
 
     /// Returns the code at `idx`, or `None` if out of range.
+    #[must_use]
+    #[inline]
     pub fn code_at(&self, idx: usize) -> Option<u32> {
-        if idx >= self.code_count {
-            return None;
-        }
-        read_code_at(&self.codes, idx)
+        self.codes.code_at(idx)
     }
 
     /// Returns the codes as a materialized `Vec<u32>` (allocates).
@@ -177,14 +261,16 @@ impl DictionaryEncoding {
     /// (e.g., legacy serialization paths).
     pub fn codes(&self) -> Vec<u32> {
         (0..self.code_count)
-            .map(|i| read_code_at(&self.codes, i).unwrap_or(0))
+            .map(|i| self.codes.code_at(i).unwrap_or(0))
             .collect()
     }
 
     /// Returns whether the value at index is null.
+    #[must_use]
+    #[inline]
     pub fn is_null(&self, index: usize) -> bool {
         match &self.null_bitmap {
-            Some(bitmap) => null_bit_at(bitmap, index),
+            Some(b) => b.is_null(index),
             None => false,
         }
     }
@@ -222,14 +308,14 @@ impl DictionaryEncoding {
         // Estimate original size: sum of string lengths
         let original_size: usize = (0..self.code_count)
             .map(|i| {
-                let code = read_code_at(&self.codes, i).unwrap_or(0) as usize;
+                let code = self.codes.code_at(i).unwrap_or(0) as usize;
                 self.dictionary.get(code).map_or(0, |s| s.len())
             })
             .sum();
 
         // Compressed size: dictionary + codes
         let dict_size: usize = self.dictionary.iter().map(|s| s.len()).sum();
-        let codes_size = self.codes.len();
+        let codes_size = self.codes.byte_len();
         let compressed_size = dict_size + codes_size;
 
         if compressed_size == 0 {
@@ -247,19 +333,53 @@ impl DictionaryEncoding {
             .and_then(|i| u32::try_from(i).ok())
     }
 
-    /// Filters the encoding to only include rows matching a predicate code.
+    /// Returns the row offsets where the code matches `predicate` and the
+    /// row is not null.
+    ///
+    /// Branches once on the storage variants so the per-row body is a tight
+    /// loop over native slices in the common in-memory case.
     pub fn filter_by_code(&self, predicate: impl Fn(u32) -> bool) -> Vec<usize> {
-        (0..self.code_count)
-            .filter(|&i| {
-                if self.is_null(i) {
-                    return false;
+        if self.code_count == 0 {
+            return Vec::new();
+        }
+
+        let null_words: Option<&[u64]> = self.as_null_words_slice();
+
+        match (self.codes.as_slice(), null_words, &self.null_bitmap) {
+            // Hot path: codes inline, no nulls.
+            (Some(codes), _, None) => codes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &c)| predicate(c).then_some(i))
+                .collect(),
+
+            // Hot path: codes inline, null bitmap inline.
+            (Some(codes), Some(nulls), Some(_)) => codes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &c)| {
+                    let word = nulls.get(i / 64).copied().unwrap_or(0);
+                    let is_null = (word & (1u64 << (i % 64))) != 0;
+                    (!is_null && predicate(c)).then_some(i)
+                })
+                .collect(),
+
+            // Mixed / mmap path: fall back to per-element decode.
+            _ => {
+                let mut out = Vec::new();
+                for i in 0..self.code_count {
+                    if self.is_null(i) {
+                        continue;
+                    }
+                    if let Some(c) = self.codes.code_at(i)
+                        && predicate(c)
+                    {
+                        out.push(i);
+                    }
                 }
-                let Some(code) = read_code_at(&self.codes, i) else {
-                    return false;
-                };
-                predicate(code)
-            })
-            .collect()
+                out
+            }
+        }
     }
 }
 
@@ -573,5 +693,113 @@ mod tests {
         assert_eq!(dict.len(), 10);
         assert_eq!(dict.dictionary_size(), 1);
         assert!(dict.codes().iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn test_dict_inline_codes_slice_via_builder() {
+        let mut b = DictionaryBuilder::new();
+        for s in ["alpha", "beta", "alpha", "gamma", "beta"] {
+            b.add(s);
+        }
+        let dict = b.build();
+
+        let slice = dict.as_codes_slice();
+        assert!(
+            slice.is_some(),
+            "DictionaryBuilder must produce Inline codes for fast scan"
+        );
+        let codes = slice.unwrap();
+        assert_eq!(codes.len(), 5);
+        assert_eq!(codes[0], codes[2]); // both "alpha"
+        assert_eq!(codes[1], codes[4]); // both "beta"
+    }
+
+    #[test]
+    fn test_dict_mapped_codes_yield_no_slice() {
+        let dictionary: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("a"), Arc::from("b")]);
+        let codes_le: Vec<u8> = [0u32, 1, 0, 1]
+            .iter()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let dict =
+            DictionaryEncoding::from_bytes_storage(dictionary, bytes::Bytes::from(codes_le), 4);
+        assert!(dict.as_codes_slice().is_none());
+        assert_eq!(dict.code_at(0), Some(0));
+        assert_eq!(dict.code_at(3), Some(1));
+    }
+
+    #[test]
+    fn test_dict_inline_null_words_slice_via_with_nulls() {
+        let mut b = DictionaryBuilder::new();
+        for s in ["x", "y", "z"] {
+            b.add(s);
+        }
+        let dict = b.build().with_nulls(vec![0b0000_0010_u64]); // index 1 is null
+
+        assert!(
+            dict.as_null_words_slice().is_some(),
+            "with_nulls(Vec<u64>) must produce Inline null bitmap"
+        );
+        assert!(!dict.is_null(0));
+        assert!(dict.is_null(1));
+        assert!(!dict.is_null(2));
+    }
+
+    #[test]
+    fn test_dict_filter_by_code_matches_between_inline_and_mapped() {
+        let strings = ["a", "b", "c", "a", "a", "b", "c", "a", "b", "a"];
+        let mut b = DictionaryBuilder::new();
+        for s in strings {
+            b.add(s);
+        }
+        let inline = b.build();
+
+        let codes_b = inline.codes_bytes();
+        let dict_arc = inline.dictionary().clone();
+        let mapped = DictionaryEncoding::from_bytes_storage(dict_arc, codes_b, strings.len());
+
+        let target = inline.encode("a").unwrap();
+        let from_inline = inline.filter_by_code(|c| c == target);
+        let from_mapped = mapped.filter_by_code(|c| c == target);
+        assert_eq!(from_inline, from_mapped);
+        assert_eq!(from_inline, vec![0, 3, 4, 7, 9]);
+    }
+
+    #[test]
+    fn test_dict_filter_by_code_respects_inline_null_bitmap() {
+        let mut b = DictionaryBuilder::new();
+        for s in ["x", "y", "x", "y"] {
+            b.add(s);
+        }
+        // Mark index 2 ("x") as null.
+        let dict = b.build().with_nulls(vec![0b0000_0100_u64]);
+        let target = dict.encode("x").unwrap();
+        let hits = dict.filter_by_code(|c| c == target);
+        assert_eq!(hits, vec![0]); // index 2 excluded by null bit
+    }
+
+    #[test]
+    fn test_dict_filter_by_code_fallback_with_mapped_codes_and_mapped_nulls() {
+        let dictionary: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("a"), Arc::from("b")]);
+
+        // Codes: a, b, a, b, a -> 0, 1, 0, 1, 0
+        let codes_le: Vec<u8> = [0u32, 1, 0, 1, 0]
+            .iter()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let codes_bytes = bytes::Bytes::from(codes_le);
+
+        // Null bitmap as LE u64 bytes: mark index 2 (the third "a") as null.
+        // 0b0000_0100 -> bit 2 set
+        let null_le: Vec<u8> = 0b0000_0100_u64.to_le_bytes().to_vec();
+        let null_bytes = bytes::Bytes::from(null_le);
+
+        let dict = DictionaryEncoding::from_bytes_storage(dictionary, codes_bytes, 5)
+            .with_null_bytes(null_bytes);
+
+        let target_a = dict.encode("a").expect("'a' is in dictionary");
+        // "a" is at indices 0, 2, 4. Index 2 is null. So result should be [0, 4].
+        let hits = dict.filter_by_code(|c| c == target_a);
+        assert_eq!(hits, vec![0, 4]);
     }
 }

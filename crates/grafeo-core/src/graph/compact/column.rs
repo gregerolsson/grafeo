@@ -86,6 +86,136 @@ fn vec_to_bytes_i8(values: &[i8]) -> Bytes {
     buf.freeze()
 }
 
+/// Two-variant backing for `i64` columns. `Inline(Vec<i64>)` is used
+/// when the column is built in RAM; `Mapped(Bytes)` carries an mmap
+/// slice. Scans branch once to use the slice fast path when available.
+#[derive(Debug, Clone)]
+pub enum I64Store {
+    /// In-memory `Vec<i64>` backing (built fresh in RAM).
+    Inline(Vec<i64>),
+    /// Refcounted byte buffer backing (mmap or pre-encoded bytes).
+    Mapped(Bytes),
+}
+
+impl I64Store {
+    /// Returns the number of `i64` elements stored.
+    #[inline]
+    #[must_use]
+    pub fn len_elements(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len(),
+            Self::Mapped(b) => b.len() / 8,
+        }
+    }
+
+    /// Returns the underlying slice when the data is held inline, or
+    /// `None` when it is mmap-backed (no native slice available).
+    #[inline]
+    #[must_use]
+    pub fn as_slice(&self) -> Option<&[i64]> {
+        match self {
+            Self::Inline(v) => Some(v.as_slice()),
+            Self::Mapped(_) => None,
+        }
+    }
+
+    /// Returns the value at `idx`, or `None` if `idx` is out of bounds.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, idx: usize) -> Option<i64> {
+        match self {
+            Self::Inline(v) => v.get(idx).copied(),
+            Self::Mapped(b) => read_le_i64(b, idx.checked_mul(8)?),
+        }
+    }
+
+    /// Materialises the contents as a [`Bytes`] buffer.
+    ///
+    /// `Mapped` returns a cheap refcount clone; `Inline` allocates and
+    /// encodes to little-endian bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Bytes {
+        match self {
+            Self::Inline(v) => vec_to_bytes_i64(v),
+            Self::Mapped(b) => b.clone(),
+        }
+    }
+
+    /// Returns the byte length of the encoded data.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len() * 8,
+            Self::Mapped(b) => b.len(),
+        }
+    }
+}
+
+/// Two-variant backing for `f64` columns. `Inline(Vec<f64>)` is used
+/// when the column is built in RAM; `Mapped(Bytes)` carries an mmap
+/// slice. Scans branch once to use the slice fast path when available.
+#[derive(Debug, Clone)]
+pub enum F64Store {
+    /// In-memory `Vec<f64>` backing (built fresh in RAM).
+    Inline(Vec<f64>),
+    /// Refcounted byte buffer backing (mmap or pre-encoded bytes).
+    Mapped(Bytes),
+}
+
+impl F64Store {
+    /// Returns the number of `f64` elements stored.
+    #[inline]
+    #[must_use]
+    pub fn len_elements(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len(),
+            Self::Mapped(b) => b.len() / 8,
+        }
+    }
+
+    /// Returns the underlying slice when the data is held inline, or
+    /// `None` when it is mmap-backed (no native slice available).
+    #[inline]
+    #[must_use]
+    pub fn as_slice(&self) -> Option<&[f64]> {
+        match self {
+            Self::Inline(v) => Some(v.as_slice()),
+            Self::Mapped(_) => None,
+        }
+    }
+
+    /// Returns the value at `idx`, or `None` if `idx` is out of bounds.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, idx: usize) -> Option<f64> {
+        match self {
+            Self::Inline(v) => v.get(idx).copied(),
+            Self::Mapped(b) => read_le_f64(b, idx.checked_mul(8)?),
+        }
+    }
+
+    /// Materialises the contents as a [`Bytes`] buffer.
+    ///
+    /// `Mapped` returns a cheap refcount clone; `Inline` allocates and
+    /// encodes to little-endian bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Bytes {
+        match self {
+            Self::Inline(v) => vec_to_bytes_f64(v),
+            Self::Mapped(b) => b.clone(),
+        }
+    }
+
+    /// Returns the byte length of the encoded data.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Self::Inline(v) => v.len() * 8,
+            Self::Mapped(b) => b.len(),
+        }
+    }
+}
+
 /// A single column of data backed by one of Grafeo's storage codecs.
 ///
 /// Each variant wraps an existing primitive via composition: the
@@ -112,9 +242,11 @@ pub enum ColumnCodec {
         /// Number of dimensions per vector.
         dimensions: u16,
     },
-    /// Native IEEE 754 double-precision floats. Bytes-backed (Phase 3a):
-    /// LE `f64` values, 8 bytes per logical row.
-    Float64(Bytes),
+    /// Native IEEE 754 double-precision floats. Two-variant backing
+    /// (Phase 3d): [`F64Store::Inline`] keeps a `Vec<f64>` for
+    /// in-memory builds (preserves native slice access); [`F64Store::Mapped`]
+    /// holds LE `f64` bytes from mmap or pre-encoded buffers.
+    Float64(F64Store),
     /// Float32 vectors (flat array with stride), for embedding / vector search.
     /// Bytes-backed (Phase 3a): LE `f32` components, `4 * dimensions`
     /// bytes per row.
@@ -130,28 +262,80 @@ pub enum ColumnCodec {
     /// `BitPacked` can't represent negatives correctly in its ordered
     /// operations (`find_eq`, `find_in_range`, zone maps) because it operates
     /// on `u64`; `RawI64` stores the values natively to preserve both the
-    /// GQL type and signed ordering semantics on round-trip. Bytes-backed
-    /// (Phase 3a): LE `i64` values, 8 bytes per logical row.
-    RawI64(Bytes),
+    /// GQL type and signed ordering semantics on round-trip. Two-variant
+    /// backing (Phase 3d): [`I64Store::Inline`] keeps a `Vec<i64>` for
+    /// in-memory builds (preserves native slice access); [`I64Store::Mapped`]
+    /// holds LE `i64` bytes from mmap or pre-encoded buffers.
+    RawI64(I64Store),
 }
 
 impl ColumnCodec {
     // ── Phase 3a: Bytes-backed constructors ─────────────────────────
 
-    /// Constructs a [`RawI64`](Self::RawI64) column from a `Vec<i64>`.
+    /// Constructs a [`RawI64`](Self::RawI64) column from a `Vec<i64>`
+    /// (in-memory path).
     ///
-    /// The values are encoded as little-endian `i64` bytes and stored in
-    /// a refcounted [`Bytes`] buffer. Phase 3c will add a parallel
-    /// constructor that builds from a mmap slice without copying.
+    /// The values are kept as a native `Vec<i64>` so scans can take the
+    /// slice fast path via [`as_raw_i64_slice`](Self::as_raw_i64_slice).
+    /// Use [`raw_i64_from_bytes`](Self::raw_i64_from_bytes) when loading
+    /// from a mmap-backed [`Bytes`] buffer.
     #[must_use]
     pub fn raw_i64(values: Vec<i64>) -> Self {
-        Self::RawI64(vec_to_bytes_i64(&values))
+        Self::RawI64(I64Store::Inline(values))
     }
 
-    /// Constructs a [`Float64`](Self::Float64) column from a `Vec<f64>`.
+    /// Constructs a [`RawI64`](Self::RawI64) column from pre-encoded
+    /// little-endian `i64` bytes (mmap / on-disk load path).
+    #[must_use]
+    pub fn raw_i64_from_bytes(bytes: Bytes) -> Self {
+        Self::RawI64(I64Store::Mapped(bytes))
+    }
+
+    /// Constructs a [`Float64`](Self::Float64) column from a `Vec<f64>`
+    /// (in-memory path).
+    ///
+    /// The values are kept as a native `Vec<f64>` so scans can take the
+    /// slice fast path via [`as_float64_slice`](Self::as_float64_slice).
+    /// Use [`float64_from_bytes`](Self::float64_from_bytes) when loading
+    /// from a mmap-backed [`Bytes`] buffer.
     #[must_use]
     pub fn float64(values: Vec<f64>) -> Self {
-        Self::Float64(vec_to_bytes_f64(&values))
+        Self::Float64(F64Store::Inline(values))
+    }
+
+    /// Constructs a [`Float64`](Self::Float64) column from pre-encoded
+    /// little-endian `f64` bytes (mmap / on-disk load path).
+    #[must_use]
+    pub fn float64_from_bytes(bytes: Bytes) -> Self {
+        Self::Float64(F64Store::Mapped(bytes))
+    }
+
+    /// Returns the underlying `i64` slice for a [`RawI64`](Self::RawI64)
+    /// column when it lives in RAM.
+    ///
+    /// Returns `None` when the column is mmap-backed
+    /// ([`I64Store::Mapped`]) or when this codec is not `RawI64`.
+    #[must_use]
+    #[inline]
+    pub fn as_raw_i64_slice(&self) -> Option<&[i64]> {
+        match self {
+            Self::RawI64(s) => s.as_slice(),
+            _ => None,
+        }
+    }
+
+    /// Returns the underlying `f64` slice for a [`Float64`](Self::Float64)
+    /// column when it lives in RAM.
+    ///
+    /// Returns `None` when the column is mmap-backed
+    /// ([`F64Store::Mapped`]) or when this codec is not `Float64`.
+    #[must_use]
+    #[inline]
+    pub fn as_float64_slice(&self) -> Option<&[f64]> {
+        match self {
+            Self::Float64(s) => s.as_slice(),
+            _ => None,
+        }
     }
 
     /// Constructs an [`Int8Vector`](Self::Int8Vector) column from a flat
@@ -219,8 +403,8 @@ impl ColumnCodec {
                     .collect();
                 Some(Value::List(Arc::from(values)))
             }
-            Self::Float64(bytes) => read_le_f64(bytes, index.checked_mul(8)?).map(Value::Float64),
-            Self::RawI64(bytes) => read_le_i64(bytes, index.checked_mul(8)?).map(Value::Int64),
+            Self::Float64(store) => store.get(index).map(Value::Float64),
+            Self::RawI64(store) => store.get(index).map(Value::Int64),
             Self::Float32Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
                 if dims == 0 {
@@ -297,12 +481,12 @@ impl ColumnCodec {
                 let dims = *dimensions as usize;
                 bytes.len().checked_div(dims).unwrap_or(0)
             }
-            Self::Float64(bytes) => bytes.len() / 8,
+            Self::Float64(store) => store.len_elements(),
             Self::Float32Vector { bytes, dimensions } => {
                 let dims = *dimensions as usize;
                 bytes.len().checked_div(dims * 4).unwrap_or(0)
             }
-            Self::RawI64(bytes) => bytes.len() / 8,
+            Self::RawI64(store) => store.len_elements(),
         }
     }
 
@@ -390,12 +574,28 @@ impl ColumnCodec {
             (Self::Bitmap(bv), &Value::Bool(target_bool)) => (0..bv.len())
                 .filter(|&i| bv.get(i) == Some(target_bool))
                 .collect(),
-            (Self::Float64(bytes), &Value::Float64(target)) => (0..bytes.len() / 8)
-                .filter(|&i| read_le_f64(bytes, i * 8) == Some(target))
-                .collect(),
-            (Self::RawI64(bytes), &Value::Int64(target)) => (0..bytes.len() / 8)
-                .filter(|&i| read_le_i64(bytes, i * 8) == Some(target))
-                .collect(),
+            (Self::Float64(store), &Value::Float64(target)) => match store.as_slice() {
+                Some(slice) => slice
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &v)| v == target)
+                    .map(|(i, _)| i)
+                    .collect(),
+                None => (0..store.len_elements())
+                    .filter(|&i| store.get(i) == Some(target))
+                    .collect(),
+            },
+            (Self::RawI64(store), &Value::Int64(target)) => match store.as_slice() {
+                Some(slice) => slice
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &v)| v == target)
+                    .map(|(i, _)| i)
+                    .collect(),
+                None => (0..store.len_elements())
+                    .filter(|&i| store.get(i) == Some(target))
+                    .collect(),
+            },
             _ => (0..self.len())
                 .filter(|&i| self.get(i).as_ref() == Some(target))
                 .collect(),
@@ -452,8 +652,8 @@ impl ColumnCodec {
                 .collect();
         }
 
-        if let Self::RawI64(bytes) = self {
-            // Native i64 comparison — signed ordering semantics "for free".
+        if let Self::RawI64(store) = self {
+            // Native i64 comparison: signed ordering semantics for free.
             let min_i64 = match min {
                 Some(&Value::Int64(v)) => Some(v),
                 None => None,
@@ -465,22 +665,30 @@ impl ColumnCodec {
                 _ => return self.find_in_range_fallback(min, max, min_inclusive, max_inclusive),
             };
 
-            return (0..bytes.len() / 8)
-                .filter(|&i| {
-                    let v = read_le_i64(bytes, i * 8).unwrap_or(0);
-                    let above_min = match min_i64 {
-                        Some(lo) if min_inclusive => v >= lo,
-                        Some(lo) => v > lo,
-                        None => true,
-                    };
-                    let below_max = match max_i64 {
-                        Some(hi) if max_inclusive => v <= hi,
-                        Some(hi) => v < hi,
-                        None => true,
-                    };
-                    above_min && below_max
-                })
-                .collect();
+            let pred = |v: i64| {
+                let above_min = match min_i64 {
+                    Some(lo) if min_inclusive => v >= lo,
+                    Some(lo) => v > lo,
+                    None => true,
+                };
+                let below_max = match max_i64 {
+                    Some(hi) if max_inclusive => v <= hi,
+                    Some(hi) => v < hi,
+                    None => true,
+                };
+                above_min && below_max
+            };
+
+            return match store.as_slice() {
+                Some(slice) => slice
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &v)| pred(v).then_some(i))
+                    .collect(),
+                None => (0..store.len_elements())
+                    .filter_map(|i| store.get(i).and_then(|v| pred(v).then_some(i)))
+                    .collect(),
+            };
         }
 
         self.find_in_range_fallback(min, max, min_inclusive, max_inclusive)
@@ -628,7 +836,7 @@ impl ColumnCodec {
                 buf.push(bp.bits_per_value());
                 write_usize_as_u32(buf, bp.len());
                 write_usize_as_u32(buf, bp.word_count());
-                buf.extend_from_slice(bp.data_bytes());
+                buf.extend_from_slice(bp.data_bytes().as_ref());
             }
             Self::Dict(dict) => {
                 buf.push(1); // discriminant
@@ -640,7 +848,7 @@ impl ColumnCodec {
                     buf.extend_from_slice(s);
                 }
                 write_usize_as_u32(buf, dict.code_count());
-                buf.extend_from_slice(dict.codes_bytes());
+                buf.extend_from_slice(dict.codes_bytes().as_ref());
             }
             Self::Bitmap(bv) => {
                 buf.push(2); // discriminant
@@ -654,10 +862,11 @@ impl ColumnCodec {
                 write_usize_as_u32(buf, bytes.len());
                 buf.extend_from_slice(bytes);
             }
-            Self::Float64(bytes) => {
+            Self::Float64(store) => {
                 buf.push(4); // discriminant
-                write_usize_as_u32(buf, bytes.len() / 8);
-                buf.extend_from_slice(bytes);
+                let body = store.to_bytes();
+                write_usize_as_u32(buf, body.len() / 8);
+                buf.extend_from_slice(&body);
             }
             Self::Float32Vector { bytes, dimensions } => {
                 buf.push(5); // discriminant
@@ -669,10 +878,11 @@ impl ColumnCodec {
                 let _ = dims_bytes;
                 buf.extend_from_slice(bytes);
             }
-            Self::RawI64(bytes) => {
+            Self::RawI64(store) => {
                 buf.push(6); // discriminant
-                write_usize_as_u32(buf, bytes.len() / 8);
-                buf.extend_from_slice(bytes);
+                let body = store.to_bytes();
+                write_usize_as_u32(buf, body.len() / 8);
+                buf.extend_from_slice(&body);
             }
         }
     }
@@ -778,7 +988,7 @@ impl ColumnCodec {
                 }
                 let storage = data.slice(*pos..*pos + byte_need);
                 *pos += byte_need;
-                Ok(Self::Float64(storage))
+                Ok(Self::Float64(F64Store::Mapped(storage)))
             }
             5 => {
                 // Float32Vector: total component count (rows * dims).
@@ -806,7 +1016,7 @@ impl ColumnCodec {
                 }
                 let storage = data.slice(*pos..*pos + byte_need);
                 *pos += byte_need;
-                Ok(Self::RawI64(storage))
+                Ok(Self::RawI64(I64Store::Mapped(storage)))
             }
             _ => Err("unknown codec discriminant"),
         }
@@ -891,7 +1101,7 @@ impl ColumnCodec {
                     let block_packed =
                         crate::codec::BitPackedInts::pack_with_bits(&row_values, bits_per_value);
                     write_usize_as_u32(&mut bodies, block_packed.word_count());
-                    bodies.extend_from_slice(block_packed.data_bytes());
+                    bodies.extend_from_slice(block_packed.data_bytes().as_ref());
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
                     metas.push(BlockMeta {
@@ -979,9 +1189,10 @@ impl ColumnCodec {
                     });
                 }
             }
-            Self::Float64(bytes) => {
+            Self::Float64(store) => {
                 buf.push(4);
-                let total_rows = bytes.len() / 8;
+                let body = store.to_bytes();
+                let total_rows = body.len() / 8;
                 for i in 0..block_count {
                     let start = i * block_rows;
                     let end = (start + block_rows).min(total_rows);
@@ -989,7 +1200,7 @@ impl ColumnCodec {
                     let row_count = (end - start) as u32;
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = bodies.len() as u32;
-                    bodies.extend_from_slice(&bytes[start * 8..end * 8]);
+                    bodies.extend_from_slice(&body[start * 8..end * 8]);
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
                     metas.push(BlockMeta {
@@ -1032,9 +1243,10 @@ impl ColumnCodec {
                     });
                 }
             }
-            Self::RawI64(bytes) => {
+            Self::RawI64(store) => {
                 buf.push(6);
-                let total_rows = bytes.len() / 8;
+                let body = store.to_bytes();
+                let total_rows = body.len() / 8;
                 for i in 0..block_count {
                     let start = i * block_rows;
                     let end = (start + block_rows).min(total_rows);
@@ -1042,7 +1254,7 @@ impl ColumnCodec {
                     let row_count = (end - start) as u32;
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = bodies.len() as u32;
-                    bodies.extend_from_slice(&bytes[start * 8..end * 8]);
+                    bodies.extend_from_slice(&body[start * 8..end * 8]);
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_len = (bodies.len() as u32) - byte_offset;
                     metas.push(BlockMeta {
@@ -1190,7 +1402,7 @@ impl ColumnCodec {
                 }
                 let storage = data.slice(bodies_start..bodies_start + total);
                 *pos = bodies_start + total;
-                Ok(Self::Float64(storage))
+                Ok(Self::Float64(F64Store::Mapped(storage)))
             }
             5 => {
                 // Float32Vector: contiguous LE bytes → zero-copy slice.
@@ -1216,7 +1428,7 @@ impl ColumnCodec {
                 }
                 let storage = data.slice(bodies_start..bodies_start + total);
                 *pos = bodies_start + total;
-                Ok(Self::RawI64(storage))
+                Ok(Self::RawI64(I64Store::Mapped(storage)))
             }
             _ => Err("unknown codec discriminant"),
         }
@@ -1359,7 +1571,7 @@ impl ColumnCodec {
                 }
                 let storage = data.slice(bodies_start..bodies_start + total);
                 *pos = bodies_start + total;
-                Ok((Self::Float64(storage), stats))
+                Ok((Self::Float64(F64Store::Mapped(storage)), stats))
             }
             5 => {
                 let dimensions = read_u16_le(bytes, pos)?;
@@ -1386,7 +1598,7 @@ impl ColumnCodec {
                 }
                 let storage = data.slice(bodies_start..bodies_start + total);
                 *pos = bodies_start + total;
-                Ok((Self::RawI64(storage), stats))
+                Ok((Self::RawI64(I64Store::Mapped(storage)), stats))
             }
             _ => Err("unknown codec discriminant"),
         }
@@ -1398,15 +1610,15 @@ impl ColumnCodec {
         match self {
             Self::BitPacked(bp) => bp.data_bytes().len(),
             Self::Dict(d) => {
-                let codes_bytes = d.codes_bytes().len();
+                let codes_bytes = d.code_count() * 4;
                 let dict_bytes: usize = d.dictionary().iter().map(|s| s.len()).sum();
                 codes_bytes + dict_bytes
             }
             Self::Bitmap(bv) => bv.data_bytes().len(),
             Self::Int8Vector { bytes, .. } => bytes.len(),
-            Self::Float64(bytes) => bytes.len(),
+            Self::Float64(store) => store.byte_len(),
             Self::Float32Vector { bytes, .. } => bytes.len(),
-            Self::RawI64(bytes) => bytes.len(),
+            Self::RawI64(store) => store.byte_len(),
         }
     }
 }
@@ -3255,6 +3467,69 @@ mod tests {
         for i in 0..col.len() {
             assert_eq!(recovered.get(i), col.get(i));
         }
+    }
+
+    // ── v3 round-trips for fixed-width bytes-backed codecs ────────────
+    //
+    // v3 extends v2's block index with an inline ZoneMap per block. The
+    // body layout is identical to v2, so RawI64 / Float64 fixed-width
+    // bodies are zero-copy slices of the original buffer. These tests
+    // pin the v3 reader paths for those two codecs (Task 8 reworked
+    // them) so a future regression in the writer/reader pair is caught
+    // element-wise rather than only via the cross-variant find_eq
+    // smoke test.
+
+    #[test]
+    fn test_column_codec_raw_i64_v3_round_trip() {
+        // Mix of negative, positive, and edge values across 200 rows.
+        let values: Vec<i64> = (0..200i64).map(|i| (i * 7 - 100) % 991).collect();
+        let col = ColumnCodec::raw_i64(values);
+
+        let mut buf = Vec::new();
+        col.write_to_v3(&mut buf, None);
+
+        let mut pos = 0;
+        let (decoded, _stats) =
+            ColumnCodec::read_from_v3(&bytes::Bytes::copy_from_slice(&buf), &mut pos)
+                .expect("v3 round-trip");
+        assert_eq!(pos, buf.len(), "v3 reader should consume entire buffer");
+        assert_eq!(decoded.len(), col.len());
+        for i in 0..col.len() {
+            assert_eq!(decoded.get(i), col.get(i), "value at row {i}");
+        }
+
+        // Pick a target known to occur in the generated sequence and
+        // verify find_eq agrees on both forms.
+        let target = col.get(42).expect("row 42 exists");
+        assert_eq!(decoded.find_eq(&target), col.find_eq(&target));
+        assert!(!col.find_eq(&target).is_empty());
+    }
+
+    #[test]
+    fn test_column_codec_float64_v3_round_trip() {
+        let values: Vec<f64> = (0..200u32)
+            .map(|i| f64::from(i) * std::f64::consts::PI)
+            .collect();
+        let col = ColumnCodec::float64(values);
+
+        let mut buf = Vec::new();
+        col.write_to_v3(&mut buf, None);
+
+        let mut pos = 0;
+        let (decoded, _stats) =
+            ColumnCodec::read_from_v3(&bytes::Bytes::copy_from_slice(&buf), &mut pos)
+                .expect("v3 round-trip");
+        assert_eq!(pos, buf.len(), "v3 reader should consume entire buffer");
+        assert_eq!(decoded.len(), col.len());
+        for i in 0..col.len() {
+            assert_eq!(decoded.get(i), col.get(i), "value at row {i}");
+        }
+
+        // Row 0 is 0.0 * PI == 0.0; check find_eq agreement on a value
+        // we know is present.
+        let target = Value::Float64(0.0);
+        assert_eq!(decoded.find_eq(&target), col.find_eq(&target));
+        assert!(!col.find_eq(&target).is_empty());
     }
 
     // ── Phase 3a: Bytes-backed fixed-width codecs ─────────────────────

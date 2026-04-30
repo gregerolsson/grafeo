@@ -1784,3 +1784,43 @@ fn test_preserving_ids_empty_store() {
     assert_eq!(compact.node_count(), 0);
     assert_eq!(compact.edge_count(), 0);
 }
+
+// ── Task 7: failing tests for ColumnCodec slice accessors (Task 8 adds impl) ──
+
+#[test]
+fn test_raw_i64_column_built_from_vec_exposes_slice() {
+    use crate::graph::compact::column::ColumnCodec;
+    let values: Vec<i64> = (0..100).collect();
+    let col = ColumnCodec::raw_i64(values.clone());
+    let slice = col.as_raw_i64_slice();
+    assert_eq!(slice, Some(values.as_slice()));
+}
+
+#[test]
+fn test_float64_column_built_from_vec_exposes_slice() {
+    use crate::graph::compact::column::ColumnCodec;
+    let values: Vec<f64> = (0..50).map(|i| i as f64 * 0.5).collect();
+    let col = ColumnCodec::float64(values.clone());
+    let slice = col.as_float64_slice();
+    assert_eq!(slice, Some(values.as_slice()));
+}
+
+#[test]
+fn test_raw_i64_inline_and_mapped_find_eq_match() {
+    use crate::graph::compact::column::ColumnCodec;
+    use grafeo_common::types::Value;
+
+    let values: Vec<i64> = (0..1_000).map(|i| i % 13).collect();
+    let inline = ColumnCodec::raw_i64(values.clone());
+
+    // Serialize Inline to bytes and rebuild via the Mapped path.
+    let mut buf = bytes::BytesMut::with_capacity(values.len() * 8);
+    for &v in &values {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    let mapped = ColumnCodec::raw_i64_from_bytes(buf.freeze());
+
+    let target = Value::Int64(7);
+    assert_eq!(inline.find_eq(&target), mapped.find_eq(&target));
+    assert!(!inline.find_eq(&target).is_empty());
+}
