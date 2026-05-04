@@ -309,4 +309,48 @@ mod session_wal_durability {
             "delete via Session::delete_edge was not durable across reopen"
         );
     }
+
+    /// Rollback must not leak rolled-back records into a subsequent committed
+    /// transaction's WAL window.
+    ///
+    /// WAL recovery buffers records until it sees `TransactionCommit`, at which
+    /// point the entire buffer is flushed. If `Session::rollback` does not emit
+    /// `TransactionAbort` to clear the buffer, rolled-back mutations are
+    /// resurrected when the next transaction commits.
+    #[test]
+    fn session_rollback_does_not_resurrect_on_next_commit() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("testdb");
+
+        {
+            let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
+            let db = GrafeoDB::with_config(config).expect("open for write");
+
+            // tx1: create a node, then rollback. The node must NOT survive reopen.
+            let mut session = db.session();
+            session.begin_transaction().expect("begin tx1");
+            session
+                .create_node_with_props(&["RolledBack"], [("name", Value::String("ghost".into()))])
+                .expect("create rolled-back node");
+            session.rollback().expect("rollback tx1");
+
+            // tx2: create a different node and commit. This commit's WAL marker
+            // must not flush tx1's records.
+            session.begin_transaction().expect("begin tx2");
+            session
+                .create_node_with_props(&["Committed"], [("name", Value::String("kept".into()))])
+                .expect("create committed node");
+            session.commit().expect("commit tx2");
+            drop(session);
+            db.close().expect("close");
+        }
+
+        let config = Config::persistent(&path).with_storage_format(StorageFormat::WalDirectory);
+        let db = GrafeoDB::with_config(config).expect("reopen");
+        assert_eq!(
+            db.node_count(),
+            1,
+            "rolled-back node was resurrected by a later commit (TransactionAbort missing from rollback path)"
+        );
+    }
 }

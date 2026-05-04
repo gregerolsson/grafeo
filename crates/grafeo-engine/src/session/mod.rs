@@ -4224,6 +4224,19 @@ impl Session {
         // Mark transaction as aborted in the manager
         let result = self.transaction_manager.abort(transaction_id);
 
+        // Log transaction abort to WAL so recovery clears any data records
+        // emitted during this transaction (e.g. via session-direct mutation
+        // APIs). Without this marker, recovery's per-transaction buffer
+        // would carry the rolled-back records into the next
+        // `TransactionCommit` and resurrect them on reopen.
+        #[cfg(feature = "wal")]
+        if let Some(ref wal) = self.wal {
+            use grafeo_storage::wal::WalRecord;
+            if let Err(e) = wal.log(&WalRecord::TransactionAbort { transaction_id }) {
+                grafeo_warn!("Failed to log transaction abort to WAL: {}", e);
+            }
+        }
+
         #[cfg(feature = "metrics")]
         if result.is_ok() {
             crate::metrics::record_metric!(self.metrics, tx_active, dec);
