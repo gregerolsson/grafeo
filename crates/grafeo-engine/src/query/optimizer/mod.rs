@@ -1157,17 +1157,39 @@ impl Optimizer {
             }),
 
             // Filters commute (boolean conjunction is associative/commutative),
-            // so we can push the new predicate past an existing Filter and
-            // continue trying to push further down. Without this case, a
-            // pattern like `Filter(r.id IN [...], Filter(hasLabel(d), Expand))`
-            // (emitted by Cypher when the WHERE clause is conjoined with
-            // automatic label filters) gets stuck at the top, missing the
-            // chance to anchor the filter on r's NodeScan and trigger the
-            // property-index fast path.
-            LogicalOperator::Filter(mut inner_filter) => {
-                inner_filter.input =
-                    Box::new(self.try_push_filter_into(predicate, *inner_filter.input));
-                LogicalOperator::Filter(inner_filter)
+            // so we can push the outer predicate past an existing inner
+            // Filter and continue trying to push further down. Without this
+            // case, a pattern like
+            // `Filter(r.id IN [...], Filter(hasLabel(d), Expand))` (emitted
+            // by Cypher when the WHERE clause is conjoined with automatic
+            // label filters) gets stuck at the top, missing the chance to
+            // anchor the filter on r's NodeScan and trigger the property-
+            // index fast path.
+            //
+            // Only commute when the outer predicate references variables
+            // that are bound at or below the inner filter's input. If the
+            // inner filter is a final scope-narrowing step that introduces
+            // synthetic columns the outer predicate depends on (e.g. path
+            // variables produced by a variable-length expand wrapped in a
+            // label filter), pushing past it would evaluate the outer
+            // predicate against rows where those columns aren't bound and
+            // every row would be filtered out.
+            LogicalOperator::Filter(inner_filter) => {
+                let predicate_vars = self.extract_variables(&predicate);
+                let inner_input_vars = self.collect_output_variables(&inner_filter.input);
+                let safe_to_commute = predicate_vars.iter().all(|v| inner_input_vars.contains(v));
+                if safe_to_commute {
+                    let mut inner_filter = inner_filter;
+                    inner_filter.input =
+                        Box::new(self.try_push_filter_into(predicate, *inner_filter.input));
+                    LogicalOperator::Filter(inner_filter)
+                } else {
+                    LogicalOperator::Filter(FilterOp {
+                        predicate,
+                        pushdown_hint: None,
+                        input: Box::new(LogicalOperator::Filter(inner_filter)),
+                    })
+                }
             }
 
             // For other operators, keep filter on top
