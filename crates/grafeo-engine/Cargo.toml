@@ -145,3 +145,7 @@ harness = false
 [[bench]]
 name = "memory_bench"
 harness = false
+
+[[bench]]
+name = "topk_e2e"
+harness = false
