@@ -1,5 +1,7 @@
 //! Projection, RETURN, sort, limit, and skip planning.
 
+use grafeo_common::collections::GrafeoSet;
+
 use super::{
     Arc, Error, FilterExpression, GraphStoreSearch, HashMap, LimitOp, LogicalExpression,
     LogicalOperator, LogicalType, NullOrder, Operator, PhysicalSortKey, ProjectExpr,
@@ -490,20 +492,39 @@ impl super::Planner {
     }
 
     /// Plans a LIMIT operator.
+    ///
+    /// The order of `try_*_topk_rewrite` attempts is load-bearing, not a
+    /// performance tweak:
+    ///
+    /// 1. The PROFILE gate (`!self.profiling.get()`) comes first. Every
+    ///    fused-operator rewrite must skip under PROFILE because
+    ///    `build_profile_tree` expects one `ProfileEntry` per logical
+    ///    operator. Without the gate, PROFILE panics with the same
+    ///    failure mode as the absorbed-NodeScan case in `filter.rs`
+    ///    (see [`Self::record_absorbed_scan_entry`]).
+    /// 2. The vector/text rewrite ([`Self::try_topk_rewrite`]) fires
+    ///    before the heap rewrite because it bypasses the input scan
+    ///    entirely via HNSW or BM25 indexes, strictly better than heap
+    ///    top-K when both could match (e.g. `ORDER BY cosine_similarity(...)`).
+    /// 3. The heap rewrite ([`Self::try_heap_topk_rewrite`]) is the
+    ///    generic fallback. It always wins memory vs. the unfused
+    ///    `Sort + Limit`, and modestly wins CPU. It accepts any input
+    ///    subtree shape that doesn't need an augmenting projection.
+    /// 4. Phase 2 (separate spec) would slot `try_index_topk_rewrite`
+    ///    between vector/text and heap when a sorted property index is
+    ///    applicable; the heap path remains the safety net.
+    ///
+    /// Changing this order needs a correctness argument, not just a benchmark.
     pub(super) fn plan_limit(&self, limit: &LimitOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Top-K optimization: Limit(k) -> Sort(score_fn) -> NodeScan
-        // can be rewritten to VectorScan(k) or TextScan(k). GQL emits the plan as
-        // Limit-above-Sort, so the check belongs here rather than in plan_sort.
-        //
-        // The rewrite is disabled under PROFILE because it fuses three logical
-        // operators into one physical operator without updating the logical tree.
-        // PROFILE walks the logical tree to build its output and would panic on
-        // the entry-count mismatch (see `try_topk_rewrite` docstring).
         if !self.profiling.get()
             && let LogicalOperator::Sort(sort) = limit.input.as_ref()
-            && let Some(result) = self.try_topk_rewrite(sort, &limit.count)?
         {
-            return Ok(result);
+            if let Some(result) = self.try_topk_rewrite(sort, &limit.count)? {
+                return Ok(result);
+            }
+            if let Some(result) = self.try_heap_topk_rewrite(sort, &limit.count)? {
+                return Ok(result);
+            }
         }
 
         // Phase 4e LIMIT pushdown: when this LIMIT sits directly above a
@@ -561,50 +582,10 @@ impl super::Planner {
         // Top-K rewrite is wired from plan_limit (the actual plan shape is
         // Limit-above-Sort), so plan_sort only handles the standard path.
 
-        // Collect variable references from an expression tree (e.g., `n` in `labels(n)[0]`).
-        fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
-            match expr {
-                LogicalExpression::Variable(v)
-                | LogicalExpression::Property { variable: v, .. }
-                | LogicalExpression::Labels(v)
-                | LogicalExpression::Type(v)
-                | LogicalExpression::Id(v) => out.push(v.clone()),
-                LogicalExpression::FunctionCall { args, .. } => {
-                    for a in args {
-                        collect_vars(a, out);
-                    }
-                }
-                LogicalExpression::IndexAccess { base, .. } => collect_vars(base, out),
-                LogicalExpression::Binary { left, right, .. } => {
-                    collect_vars(left, out);
-                    collect_vars(right, out);
-                }
-                LogicalExpression::Unary { operand, .. } => collect_vars(operand, out),
-                _ => {}
-            }
-        }
-
         // Check if we need pre-Return property/entity projections. This is
         // necessary when ORDER BY references a variable (e.g. p.age, labels(n))
         // that is not included in the RETURN clause.
-        let needs_pre_return = if let LogicalOperator::Return(ret) = sort.input.as_ref() {
-            sort.keys.iter().any(|key| {
-                let mut vars = Vec::new();
-                collect_vars(&key.expression, &mut vars);
-                vars.iter().any(|variable| {
-                    // Check if the Return items produce a column matching this variable
-                    !ret.items.iter().any(|item| {
-                        item.alias.as_deref() == Some(variable)
-                            || matches!(
-                                &item.expression,
-                                LogicalExpression::Variable(v) if v == variable
-                            )
-                    })
-                })
-            })
-        } else {
-            false
-        };
+        let needs_pre_return = sort_needs_augmenting_projection(sort);
 
         // Number of extra sort-key columns appended after Return items
         let mut sort_extra_count: usize = 0;
@@ -628,10 +609,36 @@ impl super::Planner {
             // complex expressions (labels(n)[0], type(r), etc.).
             let mut augmented_items = ret.items.clone();
             let mut extra_columns = Vec::new();
-            let mut seen = std::collections::HashSet::new();
+            let mut seen: GrafeoSet<String> = GrafeoSet::default();
             for key in &sort.keys {
                 match &key.expression {
-                    LogicalExpression::Variable(_) => continue,
+                    LogicalExpression::Variable(variable) => {
+                        // ORDER BY referencing a WITH-clause alias that the
+                        // outer RETURN drops: e.g. `WITH x AS s ... RETURN x
+                        // ORDER BY s`. The Variable is in inner_vars (Return's
+                        // input columns) but not in ret.items, so without a
+                        // passthrough Sort sees a missing column at runtime.
+                        if !inner_vars.contains_key(variable) {
+                            continue;
+                        }
+                        let already_in_return = ret.items.iter().any(|item| {
+                            item.alias.as_deref() == Some(variable.as_str())
+                                || matches!(
+                                    &item.expression,
+                                    LogicalExpression::Variable(v) if v == variable
+                                )
+                        });
+                        if already_in_return {
+                            continue;
+                        }
+                        if seen.insert(variable.clone()) {
+                            augmented_items.push(crate::query::plan::ReturnItem {
+                                expression: key.expression.clone(),
+                                alias: Some(variable.clone()),
+                            });
+                            extra_columns.push(variable.clone());
+                        }
+                    }
                     LogicalExpression::Property { variable, property } => {
                         if !inner_vars.contains_key(variable) {
                             continue;
@@ -680,9 +687,16 @@ impl super::Planner {
                 input: ret.input.clone(),
             };
 
-            // Plan the augmented Return with the original inner operator
-            let (op, columns) =
-                self.plan_return_with_input(&augmented_ret, inner_op, inner_columns)?;
+            // Plan the augmented Return with the original inner operator.
+            // Route through `maybe_profile` so that under PROFILE, this fused
+            // physical op contributes a ProfileEntry attributed to the
+            // logical `Return` node. `build_profile_tree` walks the logical
+            // tree and otherwise panics with a count mismatch at the
+            // ancestor (typically Limit) once entries run out.
+            let (op, columns) = self.maybe_profile(
+                self.plan_return_with_input(&augmented_ret, inner_op, inner_columns),
+                sort.input.as_ref(),
+            )?;
             sort_extra_count = extra_columns.len();
             (op, columns)
         } else {
@@ -949,7 +963,7 @@ impl super::Planner {
     /// - **Bare scan only**. The rewrite produces a physical operator whose
     ///   columns are `[NodeId, score]`. If the original tree had a `Return` or
     ///   `Project` between Sort and NodeScan (which GQL emits for any RETURN
-    ///   clause), substituting the rewrite drops that projection — output rows
+    ///   clause), substituting the rewrite drops that projection: output rows
     ///   would contain raw `Int64` NodeIds instead of resolved nodes / mapped
     ///   columns. To stay correct we therefore require `sort.input` to be a bare
     ///   NodeScan with no wrapping. In practice that means the rewrite never
@@ -1039,7 +1053,7 @@ impl super::Planner {
             SortOrder::Ascending
         };
         if sort_key.order != expected_order {
-            return Ok(None); // Wrong direction — can't use index
+            return Ok(None); // Wrong direction: can't use index
         }
 
         // Extract property and query vector
@@ -1114,7 +1128,7 @@ impl super::Planner {
 
         // Check for text index (required)
         if !self.store.has_text_index(label, property) {
-            return Ok(None); // Silently skip — error will come from text pushdown if used
+            return Ok(None); // Silently skip: error will come from text pushdown if used
         }
 
         let text_scan = super::TextScanOp {
@@ -1217,6 +1231,172 @@ impl super::Planner {
             None
         }
     }
+
+    /// Attempts to rewrite `Limit` over `Sort` into a single [`TopKOperator`].
+    ///
+    /// Phase 1: heap-based, O(k) memory, accepts any input shape but bails
+    /// on the augmenting-projection case (see
+    /// [`sort_needs_augmenting_projection`]). Called from
+    /// [`Self::plan_limit`] when the input is a `Sort`, after the more
+    /// specific vector/text rewrite ([`Self::try_topk_rewrite`]).
+    ///
+    /// PROFILE-mode plans skip this rewrite via the gate in `plan_limit`:
+    /// `build_profile_tree` walks the logical tree expecting one entry per
+    /// logical op, and the rewrite collapses two logical ops
+    /// (`Sort` + `Limit`) into one physical op without recording synthetic
+    /// entries (intentional, see the doc on `plan_limit`).
+    ///
+    /// Returns `Ok(None)` to fall through to the unfused path when:
+    ///
+    /// 1. `count` is not a literal (parameter `LIMIT $k` falls through).
+    /// 2. `count` is zero (no rewrite needed).
+    /// 3. Sort needs an augmenting projection (`plan_sort` handles it).
+    /// 4. Any sort key fails to resolve against the planned input columns.
+    ///
+    /// Otherwise plans the inner subtree as-is (reusing filter pushdown,
+    /// expand-chain fusion, NodeList absorption) and wraps it in a
+    /// `TopKOperator`. `derive_schema_from_columns` is the same helper
+    /// `plan_limit`'s unfused path uses.
+    fn try_heap_topk_rewrite(
+        &self,
+        sort: &SortOp,
+        count: &crate::query::plan::CountExpr,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        let crate::query::plan::CountExpr::Literal(k) = count else {
+            return Ok(None);
+        };
+        let k = *k;
+        if k == 0 {
+            return Ok(None);
+        }
+        if sort_needs_augmenting_projection(sort) {
+            return Ok(None);
+        }
+
+        let (input_op, columns) = self.plan_operator(&sort.input)?;
+
+        let Ok(physical_keys) = resolve_logical_to_physical_keys(&sort.keys, &columns) else {
+            return Ok(None);
+        };
+
+        let schema = self.derive_schema_from_columns(&columns);
+        let op: Box<dyn Operator> = Box::new(grafeo_core::execution::operators::TopKOperator::new(
+            input_op,
+            physical_keys,
+            k,
+            schema,
+        ));
+        Ok(Some((op, columns)))
+    }
+}
+
+/// Resolves logical sort keys to physical sort keys for `TopKOperator`.
+///
+/// For each logical key:
+///   - Looks up the column index via `common::resolve_expression_to_column`.
+///   - Maps `SortOrder` → physical `SortDirection`.
+///   - Maps `Option<NullsOrdering>` → physical `NullOrder` (default `NullsLast`,
+///     matching `SortKey::ascending`'s default).
+///
+/// Returns `Err` if any key references a column not present in `columns`.
+/// Callers translate that to `Ok(None)` to fall through to the unfused path.
+fn resolve_logical_to_physical_keys(
+    keys: &[crate::query::plan::SortKey],
+    columns: &[String],
+) -> Result<Vec<grafeo_core::execution::operators::SortKey>> {
+    use crate::query::plan::{NullsOrdering, SortOrder};
+    use grafeo_core::execution::operators::{NullOrder, SortDirection, SortKey as PhysSortKey};
+    use std::collections::HashMap;
+
+    let variable_columns: HashMap<String, usize> = columns
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect();
+
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let col = crate::query::planner::common::resolve_expression_to_column(
+            &key.expression,
+            &variable_columns,
+            " for ORDER BY",
+        )?;
+
+        let direction = match key.order {
+            SortOrder::Ascending => SortDirection::Ascending,
+            SortOrder::Descending => SortDirection::Descending,
+        };
+
+        let null_order = match key.nulls {
+            Some(NullsOrdering::First) => NullOrder::NullsFirst,
+            Some(NullsOrdering::Last) => NullOrder::NullsLast,
+            None => NullOrder::NullsLast, // default, matches plan_sort
+        };
+
+        out.push(PhysSortKey {
+            column: col,
+            direction,
+            null_order,
+        });
+    }
+    Ok(out)
+}
+
+/// Collects variable references from an expression tree.
+///
+/// Walks `expr` and pushes every referenced variable name into `out`. Used by
+/// `sort_needs_augmenting_projection` and `plan_sort`'s pre-return projection
+/// logic to determine whether ORDER BY references variables that the RETURN
+/// clause has dropped.
+fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
+    match expr {
+        LogicalExpression::Variable(v)
+        | LogicalExpression::Property { variable: v, .. }
+        | LogicalExpression::Labels(v)
+        | LogicalExpression::Type(v)
+        | LogicalExpression::Id(v) => out.push(v.clone()),
+        LogicalExpression::FunctionCall { args, .. } => {
+            for a in args {
+                collect_vars(a, out);
+            }
+        }
+        LogicalExpression::IndexAccess { base, .. } => collect_vars(base, out),
+        LogicalExpression::Binary { left, right, .. } => {
+            collect_vars(left, out);
+            collect_vars(right, out);
+        }
+        LogicalExpression::Unary { operand, .. } => collect_vars(operand, out),
+        _ => {}
+    }
+}
+
+/// True if `sort` requires injecting extra projection columns before sorting.
+///
+/// Mirrors the logic at the top of `plan_sort`: when the sort input is a
+/// `Return` and any sort key references a variable that the RETURN clause has
+/// projected away, the planner must augment the Return with extra columns so
+/// the sort key is available at compare time.
+///
+/// Used by both `plan_sort` (which knows how to inject the augmenting
+/// projection) and `try_heap_topk_rewrite` (which doesn't, and bails out so
+/// `plan_sort`'s unfused path runs instead).
+pub(super) fn sort_needs_augmenting_projection(sort: &SortOp) -> bool {
+    let LogicalOperator::Return(ret) = sort.input.as_ref() else {
+        return false;
+    };
+    sort.keys.iter().any(|key| {
+        let mut vars = Vec::new();
+        collect_vars(&key.expression, &mut vars);
+        vars.iter().any(|variable| {
+            !ret.items.iter().any(|item| {
+                item.alias.as_deref() == Some(variable)
+                    || matches!(
+                        &item.expression,
+                        LogicalExpression::Variable(v) if v == variable
+                    )
+            })
+        })
+    })
 }
 
 // Score-column naming. The hash of the query expression is part of the name so

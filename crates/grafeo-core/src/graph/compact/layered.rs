@@ -731,6 +731,14 @@ impl GraphStore for LayeredStore {
             .or_else(|| self.overlay.load().edge_type(id))
     }
 
+    fn has_property_index(&self, property: &str) -> bool {
+        // Property indexes only live on the overlay LpgStore (the columnar
+        // base has no index store). Without this delegate the trait default
+        // returns false, and the planner's property-index fast path silently
+        // disables itself after `compact()`.
+        self.overlay.load().has_property_index(property)
+    }
+
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
         let deleted = self.deleted_from_base_nodes.read();
         let dirty = self.dirty_node_ids.read();
@@ -3773,5 +3781,22 @@ mod tests {
             layered.overlay_store().get_node(vincent).is_none(),
             "live overlay is empty post-reset"
         );
+    }
+
+    #[test]
+    fn test_has_property_index_false_when_no_index() {
+        let layered = build_test_layered();
+        assert!(!layered.has_property_index("name"));
+    }
+
+    #[test]
+    fn test_has_property_index_true_when_overlay_has_index() {
+        // Regression test: LayeredStore::has_property_index must call
+        // self.overlay.load().has_property_index(), not
+        // self.overlay.has_property_index() (ArcSwap does not impl GraphStore).
+        let layered = build_test_layered();
+        layered.overlay_store().create_property_index("name");
+        assert!(layered.has_property_index("name"));
+        assert!(!layered.has_property_index("age"));
     }
 }

@@ -454,6 +454,214 @@ impl LogicalOperator {
         }
     }
 
+    /// Returns a new `LogicalOperator` with each child replaced by `f(child)`.
+    ///
+    /// Mirrors [`Self::children`] in arm coverage; any new operator variant
+    /// must extend both. Child-recursive optimizer passes (e.g. predicate
+    /// propagation) call this to descend without enumerating every variant
+    /// at every call site, eliminating a "forgot to recurse into the new
+    /// variant" bug class.
+    #[must_use]
+    pub fn map_children<F: FnMut(LogicalOperator) -> LogicalOperator>(self, mut f: F) -> Self {
+        match self {
+            // Optional single input
+            Self::NodeScan(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::NodeScan(op)
+            }
+            Self::EdgeScan(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::EdgeScan(op)
+            }
+            Self::TripleScan(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::TripleScan(op)
+            }
+            Self::VectorScan(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::VectorScan(op)
+            }
+            Self::CreateNode(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::CreateNode(op)
+            }
+            Self::InsertTriple(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::InsertTriple(op)
+            }
+            Self::DeleteTriple(mut op) => {
+                op.input = op.input.map(|i| Box::new(f(*i)));
+                Self::DeleteTriple(op)
+            }
+
+            // Single required input
+            Self::Expand(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Expand(op)
+            }
+            Self::Filter(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Filter(op)
+            }
+            Self::Project(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Project(op)
+            }
+            Self::Aggregate(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Aggregate(op)
+            }
+            Self::Limit(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Limit(op)
+            }
+            Self::Skip(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Skip(op)
+            }
+            Self::Sort(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Sort(op)
+            }
+            Self::Distinct(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Distinct(op)
+            }
+            Self::Return(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Return(op)
+            }
+            Self::Unwind(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Unwind(op)
+            }
+            Self::Bind(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Bind(op)
+            }
+            Self::Construct(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Construct(op)
+            }
+            Self::MapCollect(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::MapCollect(op)
+            }
+            Self::ShortestPath(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::ShortestPath(op)
+            }
+            Self::Merge(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::Merge(op)
+            }
+            Self::MergeRelationship(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::MergeRelationship(op)
+            }
+            Self::CreateEdge(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::CreateEdge(op)
+            }
+            Self::DeleteNode(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::DeleteNode(op)
+            }
+            Self::DeleteEdge(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::DeleteEdge(op)
+            }
+            Self::SetProperty(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::SetProperty(op)
+            }
+            Self::AddLabel(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::AddLabel(op)
+            }
+            Self::RemoveLabel(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::RemoveLabel(op)
+            }
+            Self::HorizontalAggregate(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::HorizontalAggregate(op)
+            }
+            Self::VectorJoin(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::VectorJoin(op)
+            }
+            Self::Modify(mut op) => {
+                op.where_clause = Box::new(f(*op.where_clause));
+                Self::Modify(op)
+            }
+
+            // Two children (left + right)
+            Self::Join(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::Join(op)
+            }
+            Self::LeftJoin(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::LeftJoin(op)
+            }
+            Self::AntiJoin(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::AntiJoin(op)
+            }
+            Self::Except(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::Except(op)
+            }
+            Self::Intersect(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::Intersect(op)
+            }
+            Self::Otherwise(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::Otherwise(op)
+            }
+
+            // Two children (input + subplan)
+            Self::Apply(mut op) => {
+                op.input = Box::new(f(*op.input));
+                op.subplan = Box::new(f(*op.subplan));
+                Self::Apply(op)
+            }
+
+            // Vec children
+            Self::Union(mut op) => {
+                op.inputs = op.inputs.into_iter().map(&mut f).collect();
+                Self::Union(op)
+            }
+            Self::MultiWayJoin(mut op) => {
+                op.inputs = op.inputs.into_iter().map(&mut f).collect();
+                Self::MultiWayJoin(op)
+            }
+
+            // Leaf operators
+            leaf @ (Self::Empty
+            | Self::ParameterScan(_)
+            | Self::CallProcedure(_)
+            | Self::ClearGraph(_)
+            | Self::CreateGraph(_)
+            | Self::DropGraph(_)
+            | Self::LoadGraph(_)
+            | Self::CopyGraph(_)
+            | Self::MoveGraph(_)
+            | Self::AddGraph(_)
+            | Self::CreatePropertyGraph(_)
+            | Self::LoadData(_)
+            | Self::TextScan(_)) => leaf,
+        }
+    }
+
     /// Returns a compact display label for this operator, used in PROFILE output.
     #[must_use]
     pub fn display_label(&self) -> String {
