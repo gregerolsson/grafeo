@@ -89,8 +89,22 @@ impl super::Planner {
             return Ok((empty_op, columns));
         }
 
+        // If the optimizer has already pinned the underlying NodeScan to a
+        // specific id set (via `id(var) = lit` / `id(var) IN [...]` pushdown),
+        // skip every index-rewrite path below. Those paths replace the scan
+        // with their own NodeListOperator built from property/range indexes,
+        // which would silently drop the pinned-id constraint and return wrong
+        // rows. The generic FilterOperator on top of the pinned scan at the
+        // end of this function is correct.
+        let pinned_scan = matches!(
+            filter.input.as_ref(),
+            LogicalOperator::NodeScan(scan) if scan.node_ids.is_some()
+        );
+
         // Try to use property index for equality predicates on indexed properties
-        if let Some(result) = self.try_plan_filter_with_property_index(filter)? {
+        if !pinned_scan
+            && let Some(result) = self.try_plan_filter_with_property_index(filter)?
+        {
             return Ok(result);
         }
 
@@ -99,30 +113,40 @@ impl super::Planner {
         // scan + filter. Empirically this is the difference between ~10ms
         // and multiple seconds on a few thousand reviews when an `id` index
         // exists.
-        if let Some(result) = self.try_plan_filter_with_in_list_index(filter)? {
+        if !pinned_scan
+            && let Some(result) = self.try_plan_filter_with_in_list_index(filter)?
+        {
             return Ok(result);
         }
 
         // Try to use range optimization for range predicates (>, <, >=, <=)
-        if let Some(result) = self.try_plan_filter_with_range_index(filter)? {
+        if !pinned_scan
+            && let Some(result) = self.try_plan_filter_with_range_index(filter)?
+        {
             return Ok(result);
         }
 
         // Try compound hybrid first (both vector AND/OR text in same predicate)
         #[cfg(all(feature = "vector-index", feature = "text-index"))]
-        if let Some(result) = self.try_plan_filter_compound_hybrid(filter)? {
+        if !pinned_scan
+            && let Some(result) = self.try_plan_filter_compound_hybrid(filter)?
+        {
             return Ok(result);
         }
 
         // Try to use vector index for similarity/distance predicates
         #[cfg(feature = "vector-index")]
-        if let Some(result) = self.try_plan_filter_with_vector_index(filter)? {
+        if !pinned_scan
+            && let Some(result) = self.try_plan_filter_with_vector_index(filter)?
+        {
             return Ok(result);
         }
 
         // Try to use text index for text_score/text_match predicates
         #[cfg(feature = "text-index")]
-        if let Some(result) = self.try_plan_filter_with_text_index(filter)? {
+        if !pinned_scan
+            && let Some(result) = self.try_plan_filter_with_text_index(filter)?
+        {
             return Ok(result);
         }
 

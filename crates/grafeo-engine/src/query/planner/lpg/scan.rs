@@ -12,10 +12,16 @@ impl super::Planner {
         &self,
         scan: &NodeScanOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let scan_op = if let Some(label) = &scan.label {
-            ScanOperator::with_label(Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>, label)
+        let store = Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>;
+        let scan_op = if let Some(ids) = &scan.node_ids {
+            // Optimizer absorbed an id(var) = lit / id(var) IN [...] predicate
+            // into this scan. Short-circuit to O(1) per-id lookups instead of
+            // iterating the label/all-nodes index.
+            ScanOperator::with_node_ids(store, ids.clone(), scan.label.clone())
+        } else if let Some(label) = &scan.label {
+            ScanOperator::with_label(store, label)
         } else {
-            ScanOperator::new(Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>)
+            ScanOperator::new(store)
         };
 
         // Apply MVCC context if available

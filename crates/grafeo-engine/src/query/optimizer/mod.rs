@@ -1530,8 +1530,26 @@ fn try_match_id_predicate(pred: &LogicalExpression, scan_var: &str) -> Option<Ve
 }
 
 /// Returns true when `expr` is `id(var)` where `var == scan_var`.
+///
+/// The binder accepts two surface forms for `id()`:
+///   * `LogicalExpression::Id(var)` — a dedicated variant produced by some
+///     paths (notably direct constructors in tests).
+///   * `LogicalExpression::FunctionCall { name: "id", args: [Variable(var)] }`
+///     — what every query-language translator (GQL, Cypher, Gremlin, etc.)
+///     actually emits today.
+///
+/// Match both so the pushdown fires regardless of which form the front-end
+/// chose.
 fn is_id_of(expr: &LogicalExpression, scan_var: &str) -> bool {
-    matches!(expr, LogicalExpression::Id(v) if v == scan_var)
+    match expr {
+        LogicalExpression::Id(v) => v == scan_var,
+        LogicalExpression::FunctionCall { name, args, .. }
+            if name.eq_ignore_ascii_case("id") && args.len() == 1 =>
+        {
+            matches!(&args[0], LogicalExpression::Variable(v) if v == scan_var)
+        }
+        _ => false,
+    }
 }
 
 /// Converts an Int64 literal to a NodeId. Rejects negative values.

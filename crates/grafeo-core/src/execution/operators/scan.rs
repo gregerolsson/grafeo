@@ -12,6 +12,9 @@ pub struct ScanOperator {
     store: Arc<dyn GraphStoreSearch>,
     /// Label filter (None = all nodes).
     label: Option<String>,
+    /// When set, only these ids are visited. The label filter (if any) and
+    /// MVCC visibility filter still apply.
+    pinned_ids: Option<Vec<NodeId>>,
     /// Current position in the scan.
     position: usize,
     /// Batch of node IDs to scan.
@@ -32,6 +35,7 @@ impl ScanOperator {
         Self {
             store,
             label: None,
+            pinned_ids: None,
             position: 0,
             batch: Vec::new(),
             exhausted: false,
@@ -46,6 +50,31 @@ impl ScanOperator {
         Self {
             store,
             label: Some(label.into()),
+            pinned_ids: None,
+            position: 0,
+            batch: Vec::new(),
+            exhausted: false,
+            chunk_capacity: 2048,
+            transaction_id: None,
+            viewing_epoch: None,
+        }
+    }
+
+    /// Creates a scan operator pinned to a fixed id set. Used when the planner
+    /// has absorbed an `id(var) = lit` / `id(var) IN [...]` predicate; the
+    /// executor short-circuits the label/all-nodes iteration in favour of
+    /// O(1) `get_node` lookups per id. Missing ids and label-mismatch ids are
+    /// silently skipped (matches the semantics of the original `Filter` they
+    /// were rewritten from). MVCC visibility filtering still applies.
+    pub fn with_node_ids(
+        store: Arc<dyn GraphStoreSearch>,
+        ids: Vec<NodeId>,
+        label: Option<String>,
+    ) -> Self {
+        Self {
+            store,
+            label,
+            pinned_ids: Some(ids),
             position: 0,
             batch: Vec::new(),
             exhausted: false,
@@ -83,16 +112,20 @@ impl ScanOperator {
         // to include uncommitted/PENDING versions (nodes_by_label already
         // returns unfiltered IDs from the label index, but node_ids()
         // pre-filters by epoch which excludes PENDING nodes).
-        let all_ids = match &self.label {
-            Some(label) => self.store.nodes_by_label(label),
-            None if self.viewing_epoch.is_some() => self.store.all_node_ids(),
-            None => self.store.node_ids(),
+        let all_ids = if let Some(pinned) = &self.pinned_ids {
+            pinned.clone()
+        } else {
+            match &self.label {
+                Some(label) => self.store.nodes_by_label(label),
+                None if self.viewing_epoch.is_some() => self.store.all_node_ids(),
+                None => self.store.node_ids(),
+            }
         };
 
         // Filter by visibility if we have tx context.
         // Uses batch methods that hold a single lock for all IDs instead of
         // acquiring/releasing per node (avoids N+1 lock pattern).
-        self.batch = if let Some(epoch) = self.viewing_epoch {
+        let visible = if let Some(epoch) = self.viewing_epoch {
             if let Some(tx) = self.transaction_id {
                 self.store
                     .filter_visible_node_ids_versioned(&all_ids, epoch, tx)
@@ -101,6 +134,25 @@ impl ScanOperator {
             }
         } else {
             all_ids
+        };
+
+        // For pinned scans we still need to enforce the label (the candidate
+        // set didn't come from the label index) and to drop ids that don't
+        // resolve to a real node. The non-pinned path uses the label index
+        // directly, so this work is skipped.
+        self.batch = if self.pinned_ids.is_some() {
+            visible
+                .into_iter()
+                .filter(|id| match self.store.get_node(*id) {
+                    Some(node) => match &self.label {
+                        Some(label) => node.has_label(label),
+                        None => true,
+                    },
+                    None => false,
+                })
+                .collect()
+        } else {
+            visible
         };
 
         if self.batch.is_empty() {
@@ -258,5 +310,95 @@ mod tests {
         let op = ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person");
         let any = Box::new(op).into_any();
         assert!(any.downcast::<ScanOperator>().is_ok());
+    }
+
+    // ---- with_node_ids: pinned scan ----
+
+    #[test]
+    fn test_pinned_scan_single_id_no_label() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let _ = store.create_node(&["Person"]);
+        let target = store.create_node(&["Person"]);
+        let _ = store.create_node(&["Animal"]);
+
+        let mut scan = ScanOperator::with_node_ids(
+            store.clone() as Arc<dyn GraphStoreSearch>,
+            vec![target],
+            None,
+        );
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+        let col = chunk.column(0).unwrap();
+        assert_eq!(col.get_node_id(0), Some(target));
+        assert!(scan.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_pinned_scan_label_filter_drops_mismatch() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let person = store.create_node(&["Person"]);
+        let animal = store.create_node(&["Animal"]);
+
+        let mut scan = ScanOperator::with_node_ids(
+            store.clone() as Arc<dyn GraphStoreSearch>,
+            vec![person, animal],
+            Some("Person".to_string()),
+        );
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1, "Animal id should be filtered out");
+        assert_eq!(chunk.column(0).unwrap().get_node_id(0), Some(person));
+    }
+
+    #[test]
+    fn test_pinned_scan_missing_id_is_skipped() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let real = store.create_node(&["Person"]);
+
+        let mut scan = ScanOperator::with_node_ids(
+            store.clone() as Arc<dyn GraphStoreSearch>,
+            vec![real, NodeId(9999), NodeId(10_000)],
+            None,
+        );
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 1);
+        assert_eq!(chunk.column(0).unwrap().get_node_id(0), Some(real));
+    }
+
+    #[test]
+    fn test_pinned_scan_multiple_ids_preserves_order() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+
+        let mut scan = ScanOperator::with_node_ids(
+            store.clone() as Arc<dyn GraphStoreSearch>,
+            vec![c, a, b],
+            Some("Person".to_string()),
+        );
+
+        let chunk = scan.next().unwrap().unwrap();
+        assert_eq!(chunk.row_count(), 3);
+        let col = chunk.column(0).unwrap();
+        assert_eq!(col.get_node_id(0), Some(c));
+        assert_eq!(col.get_node_id(1), Some(a));
+        assert_eq!(col.get_node_id(2), Some(b));
+    }
+
+    #[test]
+    fn test_pinned_scan_empty_after_label_filter() {
+        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let animal = store.create_node(&["Animal"]);
+
+        let mut scan = ScanOperator::with_node_ids(
+            store.clone() as Arc<dyn GraphStoreSearch>,
+            vec![animal],
+            Some("Person".to_string()),
+        );
+
+        assert!(scan.next().unwrap().is_none());
     }
 }
