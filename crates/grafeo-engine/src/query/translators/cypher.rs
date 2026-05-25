@@ -521,6 +521,7 @@ impl CypherTranslator {
             variable: variable.clone(),
             label,
             input: input.map(Box::new),
+            node_ids: None,
         });
 
         // Add hasLabel filters for additional labels (AND semantics).
@@ -689,6 +690,7 @@ impl CypherTranslator {
             variable: source_var.clone(),
             label: source_label,
             input: input.map(Box::new),
+            node_ids: None,
         });
 
         // Apply property filters on the source node if any
@@ -719,6 +721,7 @@ impl CypherTranslator {
                 variable: target_var.clone(),
                 label: target_label,
                 input: Some(Box::new(plan)),
+                node_ids: None,
             });
 
             // Apply property filters on the target node if any

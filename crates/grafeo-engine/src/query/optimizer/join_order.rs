@@ -573,6 +573,7 @@ mod tests {
             variable: var.to_string(),
             label: Some(label.to_string()),
             input: None,
+            node_ids: None,
         })
     }
 

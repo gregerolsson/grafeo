@@ -1403,6 +1403,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1427,6 +1428,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1453,6 +1455,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1485,6 +1488,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -1526,6 +1530,7 @@ mod tests {
                     variable: "a".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 path_alias: None,
                 path_mode: PathMode::Walk,
@@ -1568,6 +1573,7 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 path_alias: None,
                 path_mode: PathMode::Walk,
@@ -1609,6 +1615,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1644,6 +1651,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1676,6 +1684,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1708,11 +1717,13 @@ mod tests {
                     variable: "n".to_string(),
                     label: Some("A".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "m".to_string(), // different variable is fine
                     label: Some("B".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Inner,
                 conditions: vec![],
@@ -1747,6 +1758,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1775,6 +1787,7 @@ mod tests {
                 variable: "b".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1800,6 +1813,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1833,11 +1847,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: crate::query::plan::JoinType::Inner,
                 conditions: vec![],
@@ -1865,6 +1881,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1887,6 +1904,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1905,6 +1923,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -1938,6 +1957,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 pass_through_input: false,
             })),
@@ -2172,6 +2192,7 @@ mod tests {
                 variable: "b".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             source_var: "missing".to_string(), // not defined
             target_var: "b".to_string(),
@@ -2199,11 +2220,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Cross,
                 conditions: vec![],
@@ -2271,6 +2294,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2304,6 +2328,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2333,6 +2358,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2358,6 +2384,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2507,6 +2534,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2555,6 +2583,7 @@ mod tests {
                 variable: "person".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2693,11 +2722,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: Some("Company".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Cross,
                 conditions: vec![],
@@ -2734,11 +2765,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Cross,
                 conditions: vec![],
@@ -2815,6 +2848,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 having: None,
             })),
@@ -2908,6 +2942,7 @@ mod tests {
                     variable: "mia".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
             })),
         }));
@@ -2926,6 +2961,7 @@ mod tests {
                 variable: "butch".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             columns: None,
         }));
@@ -2945,6 +2981,7 @@ mod tests {
                 variable: "django".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             }))),
         }));
 
@@ -3010,6 +3047,7 @@ mod tests {
                 variable: "existing".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             }))),
             dataset: None,
         }));
@@ -3037,6 +3075,7 @@ mod tests {
                 variable: "s".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             }))),
             dataset: None,
         }));
@@ -3064,6 +3103,7 @@ mod tests {
                 variable: "hans".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             }))),
         }));
         let mut binder = Binder::new();
@@ -3091,6 +3131,7 @@ mod tests {
                 variable: "shosanna".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             }))),
         }));
         let mut binder3 = Binder::new();
@@ -3120,6 +3161,7 @@ mod tests {
                 variable: "beatrix".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             graph: None,
         }));
@@ -3139,6 +3181,7 @@ mod tests {
                 variable: "node".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         let mut binder = Binder::new();
@@ -3227,11 +3270,13 @@ mod tests {
                     variable: "amsterdam".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 }),
                 LogicalOperator::NodeScan(NodeScanOp {
                     variable: "berlin".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 }),
             ],
         }));
@@ -3252,11 +3297,13 @@ mod tests {
                 variable: "paris".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "prague".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             condition: Some(LogicalExpression::Variable("paris".to_string())),
         }));
@@ -3269,11 +3316,13 @@ mod tests {
                 variable: "paris".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "prague".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             condition: None,
         }));
@@ -3285,11 +3334,13 @@ mod tests {
                 variable: "paris".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "prague".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             condition: Some(LogicalExpression::Variable("missing".to_string())),
         }));
@@ -3305,11 +3356,13 @@ mod tests {
                 variable: "left_side".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "right_side".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         let mut binder = Binder::new();
@@ -3330,6 +3383,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         let mut binder = Binder::new();
@@ -3355,11 +3409,13 @@ mod tests {
                     variable: "l".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "r".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 all: false,
             }),
@@ -3368,11 +3424,13 @@ mod tests {
                     variable: "l".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "r".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 all: false,
             }),
@@ -3381,11 +3439,13 @@ mod tests {
                     variable: "l".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "r".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
             }),
         ] {
@@ -3407,11 +3467,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 }),
                 LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 }),
             ],
             conditions: vec![JoinCondition {
@@ -3429,6 +3491,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })],
             conditions: vec![JoinCondition {
                 left: LogicalExpression::Variable("a".to_string()),
@@ -3474,6 +3537,7 @@ mod tests {
                     variable: "inner_scan".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
             })),
             subplan: Box::new(LogicalOperator::Return(ReturnOp {
@@ -3512,11 +3576,13 @@ mod tests {
                 variable: "outer".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             subplan: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "inner".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             shared_variables: vec![],
             optional: false,
@@ -3548,6 +3614,7 @@ mod tests {
                 variable: "b".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         let err = Binder::new().bind(&plan).unwrap_err();
@@ -3566,6 +3633,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         let err2 = Binder::new().bind(&plan2).unwrap_err();
@@ -3598,11 +3666,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Cross,
                 conditions: vec![],
@@ -3715,6 +3785,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             left_vector_variable: None,
             left_property: None,
@@ -3789,6 +3860,7 @@ mod tests {
                 variable: "xs".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         let err = Binder::new().bind(&plan2).unwrap_err();
@@ -3815,6 +3887,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
         }));
         assert!(Binder::new().bind(&plan3).is_err());
@@ -3923,6 +3996,7 @@ mod tests {
                         variable: "f".to_string(),
                         label: None,
                         input: None,
+                        node_ids: None,
                     })),
                     projection: Box::new(LogicalExpression::Property {
                         variable: "f".to_string(),
@@ -3944,6 +4018,7 @@ mod tests {
                         variable: "f".to_string(),
                         label: None,
                         input: None,
+                        node_ids: None,
                     })),
                     projection: Box::new(LogicalExpression::Variable("ghost".to_string())),
                 },
@@ -4227,6 +4302,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             pass_through_input: false,
         }));
@@ -4270,6 +4346,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             having: None,
         }));
@@ -4303,6 +4380,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 having: None,
             })),
@@ -4363,6 +4441,7 @@ mod tests {
                         variable: "n".to_string(),
                         label: None,
                         input: None,
+                        node_ids: None,
                     })),
                 })),
             })),
@@ -4421,6 +4500,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             path_alias: Some("p".to_string()),
             path_mode: PathMode::Walk,

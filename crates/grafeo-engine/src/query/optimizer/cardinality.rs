@@ -1262,6 +1262,7 @@ mod tests {
             variable: "n".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         });
 
         let cardinality = estimator.estimate(&scan);
@@ -1286,6 +1287,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1307,11 +1309,13 @@ mod tests {
                 variable: "p".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "c".to_string(),
                 label: Some("Company".to_string()),
                 input: None,
+                node_ids: None,
             })),
             join_type: JoinType::Inner,
             conditions: vec![JoinCondition {
@@ -1342,6 +1346,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         });
 
@@ -1362,6 +1367,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             having: None,
         });
@@ -1380,6 +1386,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             having: None,
         });
@@ -1397,6 +1404,7 @@ mod tests {
             variable: "n".to_string(),
             label: Some("Unknown".to_string()),
             input: None,
+            node_ids: None,
         });
 
         let cardinality = estimator.estimate(&scan);
@@ -1412,6 +1420,7 @@ mod tests {
             variable: "n".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         });
 
         let cardinality = estimator.estimate(&scan);
@@ -1437,6 +1446,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1464,6 +1474,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1505,6 +1516,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1548,6 +1560,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1569,6 +1582,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1589,6 +1603,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1612,6 +1627,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1635,6 +1651,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -1661,6 +1678,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             path_alias: None,
             path_mode: PathMode::Walk,
@@ -1688,6 +1706,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             path_alias: None,
             path_mode: PathMode::Walk,
@@ -1715,6 +1734,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             path_alias: None,
             path_mode: PathMode::Walk,
@@ -1736,11 +1756,13 @@ mod tests {
                 variable: "p".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "c".to_string(),
                 label: Some("Company".to_string()),
                 input: None,
+                node_ids: None,
             })),
             join_type: JoinType::Cross,
             conditions: vec![],
@@ -1762,11 +1784,13 @@ mod tests {
                 variable: "p".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "c".to_string(),
                 label: Some("Company".to_string()),
                 input: None,
+                node_ids: None,
             })),
             join_type: JoinType::Left,
             conditions: vec![JoinCondition {
@@ -1791,11 +1815,13 @@ mod tests {
                 variable: "p".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "c".to_string(),
                 label: Some("Company".to_string()),
                 input: None,
+                node_ids: None,
             })),
             join_type: JoinType::Semi,
             conditions: vec![],
@@ -1817,11 +1843,13 @@ mod tests {
                 variable: "p".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "c".to_string(),
                 label: Some("Company".to_string()),
                 input: None,
+                node_ids: None,
             })),
             join_type: JoinType::Anti,
             conditions: vec![],
@@ -1847,6 +1875,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pass_through_input: false,
         });
@@ -1870,6 +1899,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         });
 
@@ -1887,6 +1917,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             columns: None,
         });
@@ -1907,6 +1938,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         });
 
@@ -1929,6 +1961,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
         });
 
@@ -1965,6 +1998,7 @@ mod tests {
             variable: "n".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         });
         let cardinality = estimator.estimate(&scan);
         assert!((cardinality - 1000.0).abs() < 0.001);
@@ -1988,6 +2022,7 @@ mod tests {
                 variable: "a".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             path_alias: None,
             path_mode: PathMode::Walk,
@@ -2016,6 +2051,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             having: None,
         });
@@ -2036,6 +2072,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             having: None,
         });
@@ -2213,6 +2250,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -2251,6 +2289,7 @@ mod tests {
                 variable: "d".to_string(),
                 label: Some("Data".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -2319,6 +2358,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -2361,6 +2401,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });
@@ -2384,6 +2425,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             columns: None,
         });
@@ -2644,6 +2686,7 @@ mod tests {
             variable: "a".to_string(),
             label: Some("Article".to_string()),
             input: None,
+            node_ids: None,
         });
 
         // k=5, no threshold: card = input * k = 40 * 5 = 200.
@@ -2702,16 +2745,19 @@ mod tests {
                     variable: "p".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 }),
                 LogicalOperator::NodeScan(NodeScanOp {
                     variable: "w".to_string(),
                     label: Some("Works".to_string()),
                     input: None,
+                    node_ids: None,
                 }),
                 LogicalOperator::NodeScan(NodeScanOp {
                     variable: "c".to_string(),
                     label: Some("Company".to_string()),
                     input: None,
+                    node_ids: None,
                 }),
             ],
             conditions: vec![],
@@ -2779,6 +2825,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: Some("Person".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });

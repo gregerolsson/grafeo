@@ -795,6 +795,7 @@ mod tests {
             variable: "n".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         };
         let cost = model.node_scan_cost(&scan, 1000.0);
 
@@ -1238,6 +1239,7 @@ mod tests {
             variable: "n".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         };
         let cost = model.estimate(&LogicalOperator::NodeScan(scan), 100.0);
         assert!(cost.total() > 0.0);
@@ -1346,11 +1348,13 @@ mod tests {
             variable: "n".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         };
         let company_scan = NodeScanOp {
             variable: "n".to_string(),
             label: Some("Company".to_string()),
             input: None,
+            node_ids: None,
         };
 
         let person_cost = model.node_scan_cost(&person_scan, 500.0);
@@ -1373,6 +1377,7 @@ mod tests {
             variable: "n".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         };
 
         let cost = model.node_scan_cost(&scan, 10_000.0);
@@ -1499,6 +1504,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -1538,6 +1544,7 @@ mod tests {
             variable: "n".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         };
 
         let default_cost = default_model.node_scan_cost(&scan, 100.0);

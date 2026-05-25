@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{NodeId, Value};
 
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -814,7 +814,23 @@ impl LogicalOperator {
         match self {
             Self::NodeScan(op) => {
                 let label = op.label.as_deref().unwrap_or("*");
-                let _ = writeln!(out, "{indent}NodeScan ({var}:{label})", var = op.variable);
+                let ids = match &op.node_ids {
+                    Some(ids) if ids.len() == 1 => format!(" [id={}]", ids[0].0),
+                    Some(ids) => {
+                        let joined = ids
+                            .iter()
+                            .map(|id| id.0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!(" [ids=[{joined}]]")
+                    }
+                    None => String::new(),
+                };
+                let _ = writeln!(
+                    out,
+                    "{indent}NodeScan ({var}:{label}){ids}",
+                    var = op.variable
+                );
                 if let Some(input) = &op.input {
                     input.fmt_tree(out, depth + 1);
                 }
@@ -1229,6 +1245,12 @@ pub struct NodeScanOp {
     pub label: Option<String>,
     /// Child operator (if any, for chained patterns).
     pub input: Option<Box<LogicalOperator>>,
+    /// When set, the scan visits only this fixed id set instead of iterating
+    /// the label/all-nodes index. Populated by the optimizer when it absorbs
+    /// an `id(var) = lit` or `id(var) IN [...]` predicate from a Filter; lets
+    /// the executor short-circuit to an O(1) `get_node` lookup per id. The
+    /// label filter (if any) still applies to each fetched node.
+    pub node_ids: Option<Vec<NodeId>>,
 }
 
 /// Scan edges from the graph.
@@ -2591,6 +2613,7 @@ mod tests {
                 variable: "n".into(),
                 label: Some("Person".into()),
                 input: None,
+                node_ids: None,
             })),
         }));
 
@@ -2633,6 +2656,7 @@ mod tests {
                     variable: "n".into(),
                     label: Some("Person".into()),
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -2665,6 +2689,7 @@ mod tests {
             variable: "n".into(),
             label: Some("Article".into()),
             input: None,
+            node_ids: None,
         })
     }
 
@@ -2888,6 +2913,7 @@ mod tests {
                         variable: "a".into(),
                         label: Some("Person".into()),
                         input: None,
+                        node_ids: None,
                     })),
                     path_alias: None,
                     path_mode: PathMode::Walk,
@@ -2958,6 +2984,7 @@ mod tests {
                     variable: "n".into(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -2975,6 +3002,7 @@ mod tests {
                 variable: "n".into(),
                 label: Some(label.into()),
                 input: None,
+                node_ids: None,
             })
         };
 
@@ -3103,6 +3131,7 @@ mod tests {
             variable: v.into(),
             label: None,
             input: None,
+            node_ids: None,
         }))
     }
 
@@ -3473,6 +3502,7 @@ mod tests {
             variable: "n".into(),
             label: None,
             input: None,
+            node_ids: None,
         });
         assert_eq!(ns_no_input.children().len(), 0);
 
@@ -3480,6 +3510,7 @@ mod tests {
             variable: "n".into(),
             label: None,
             input: Some(leaf_empty()),
+            node_ids: None,
         });
         assert_eq!(ns_with_input.children().len(), 1);
 
@@ -3534,6 +3565,7 @@ mod tests {
             variable: "vincent".into(),
             label: Some("Person".into()),
             input: None,
+            node_ids: None,
         });
         assert_eq!(ns.display_label(), "vincent:Person");
 
@@ -3541,6 +3573,7 @@ mod tests {
             variable: "mia".into(),
             label: None,
             input: None,
+            node_ids: None,
         });
         assert_eq!(ns_no_label.display_label(), "mia:*");
 
@@ -3940,6 +3973,7 @@ mod tests {
             variable: "n".into(),
             label: Some("Person".into()),
             input: Some(Box::new(LogicalOperator::Empty)),
+            node_ids: None,
         });
         let out = ns.explain_tree();
         assert!(out.contains("NodeScan (n:Person)"));
@@ -3949,6 +3983,7 @@ mod tests {
             variable: "n".into(),
             label: None,
             input: None,
+            node_ids: None,
         });
         assert!(ns_star.explain_tree().contains("NodeScan (n:*)"));
 

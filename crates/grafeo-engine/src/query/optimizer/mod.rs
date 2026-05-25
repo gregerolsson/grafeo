@@ -22,9 +22,11 @@ pub use cost::{Cost, CostModel};
 pub use join_order::{BitSet, DPccp, JoinGraph, JoinGraphBuilder, JoinPlan};
 
 use crate::query::plan::{
-    FilterOp, JoinCondition, LogicalExpression, LogicalOperator, LogicalPlan, MultiWayJoinOp,
+    BinaryOp, FilterOp, JoinCondition, LogicalExpression, LogicalOperator, LogicalPlan,
+    MultiWayJoinOp,
 };
 use grafeo_common::grafeo_debug_span;
+use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Result;
 use std::collections::HashSet;
 
@@ -1149,12 +1151,28 @@ impl Optimizer {
                 input: Box::new(LogicalOperator::Aggregate(agg)),
             }),
 
-            // For NodeScan, we've reached the bottom - keep filter on top
-            LogicalOperator::NodeScan(scan) => LogicalOperator::Filter(FilterOp {
-                predicate,
-                pushdown_hint: None,
-                input: Box::new(LogicalOperator::NodeScan(scan)),
-            }),
+            // For NodeScan, try to absorb `id(var) = lit` / `id(var) IN [...]`
+            // into the scan as a pinned id set so the executor can do an O(1)
+            // `get_node` lookup instead of a full label scan. Any conjunct
+            // that doesn't reference `id(var)` stays as a Filter on top.
+            LogicalOperator::NodeScan(mut scan) => {
+                let (ids, residual) = if scan.node_ids.is_none() {
+                    extract_id_constraint(predicate, &scan.variable)
+                } else {
+                    (None, Some(predicate))
+                };
+                if let Some(ids) = ids {
+                    scan.node_ids = Some(ids);
+                }
+                match residual {
+                    Some(rest) => LogicalOperator::Filter(FilterOp {
+                        predicate: rest,
+                        pushdown_hint: None,
+                        input: Box::new(LogicalOperator::NodeScan(scan)),
+                    }),
+                    None => LogicalOperator::NodeScan(scan),
+                }
+            }
 
             // Filters commute (boolean conjunction is associative/commutative),
             // so we can push the outer predicate past an existing inner
@@ -1428,6 +1446,102 @@ impl Default for Optimizer {
     }
 }
 
+/// If `predicate` constrains `id(scan_var)` to a known finite id set, return
+/// that set plus any residual predicate that wasn't absorbed. Parameters have
+/// already been substituted to literals by the time the optimizer runs (see
+/// `query::processor`), so the only int form we need to recognize here is
+/// `LogicalExpression::Literal(Value::Int64)`.
+///
+/// Patterns recognized:
+/// - `id(v) = N`            → (Some([N]), None)
+/// - `N = id(v)`            → (Some([N]), None)
+/// - `id(v) IN [N1, N2,..]` → (Some([N1,N2,..]), None) when all elements are int literals
+/// - `id(v) = N AND rest`   → (Some([N]), Some(rest))
+/// - `rest AND id(v) = N`   → (Some([N]), Some(rest))
+///
+/// Returns `(None, Some(original))` when nothing matches.
+fn extract_id_constraint(
+    predicate: LogicalExpression,
+    scan_var: &str,
+) -> (Option<Vec<NodeId>>, Option<LogicalExpression>) {
+    if let Some(ids) = try_match_id_predicate(&predicate, scan_var) {
+        return (Some(ids), None);
+    }
+
+    // AND-chain: try each conjunct. We only descend one level of `And` per
+    // call (further conjuncts may match on the next pushdown step since
+    // `try_push_filter_into` is called recursively).
+    if let LogicalExpression::Binary {
+        left,
+        op: BinaryOp::And,
+        right,
+    } = &predicate
+    {
+        if let Some(ids) = try_match_id_predicate(left, scan_var) {
+            return (Some(ids), Some((**right).clone()));
+        }
+        if let Some(ids) = try_match_id_predicate(right, scan_var) {
+            return (Some(ids), Some((**left).clone()));
+        }
+    }
+
+    (None, Some(predicate))
+}
+
+/// Matches a *single* predicate that constrains `id(scan_var)` to a fixed set.
+/// Returns `None` if the predicate does not have this exact shape.
+fn try_match_id_predicate(pred: &LogicalExpression, scan_var: &str) -> Option<Vec<NodeId>> {
+    match pred {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::Eq,
+            right,
+        } => {
+            // `id(v) = N`
+            if is_id_of(left, scan_var)
+                && let Some(id) = literal_as_node_id(right)
+            {
+                return Some(vec![id]);
+            }
+            // `N = id(v)`
+            if is_id_of(right, scan_var)
+                && let Some(id) = literal_as_node_id(left)
+            {
+                return Some(vec![id]);
+            }
+            None
+        }
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::In,
+            right,
+        } if is_id_of(left, scan_var) => match right.as_ref() {
+            LogicalExpression::List(items) => {
+                let mut ids = Vec::with_capacity(items.len());
+                for item in items {
+                    ids.push(literal_as_node_id(item)?);
+                }
+                if ids.is_empty() { None } else { Some(ids) }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Returns true when `expr` is `id(var)` where `var == scan_var`.
+fn is_id_of(expr: &LogicalExpression, scan_var: &str) -> bool {
+    matches!(expr, LogicalExpression::Id(v) if v == scan_var)
+}
+
+/// Converts an Int64 literal to a NodeId. Rejects negative values.
+fn literal_as_node_id(expr: &LogicalExpression) -> Option<NodeId> {
+    if let LogicalExpression::Literal(Value::Int64(n)) = expr {
+        return u64::try_from(*n).ok().map(NodeId);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,6 +1577,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -1515,6 +1630,7 @@ mod tests {
                         variable: "a".to_string(),
                         label: Some("Person".to_string()),
                         input: None,
+                        node_ids: None,
                     })),
                     path_alias: None,
                     path_mode: PathMode::Walk,
@@ -1573,6 +1689,7 @@ mod tests {
                         variable: "a".to_string(),
                         label: Some("Person".to_string()),
                         input: None,
+                        node_ids: None,
                     })),
                     path_alias: None,
                     path_mode: PathMode::Walk,
@@ -1649,6 +1766,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -1697,6 +1815,7 @@ mod tests {
             variable: "n".to_string(),
             label: Some("Test".to_string()),
             input: None,
+            node_ids: None,
         });
         let plan = LogicalPlan::new(scan);
 
@@ -1711,6 +1830,7 @@ mod tests {
             variable: "n".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         }));
 
         let cost = optimizer.estimate_cost(&plan);
@@ -1742,6 +1862,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 pass_through_input: false,
             })),
@@ -1782,6 +1903,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 pass_through_input: false,
             })),
@@ -1811,6 +1933,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
             })),
         }));
@@ -1843,6 +1966,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
             })),
         }));
@@ -1870,6 +1994,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 columns: None,
             })),
@@ -1912,6 +2037,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 having: None,
             })),
@@ -1948,11 +2074,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: Some("Company".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Inner,
                 conditions: vec![],
@@ -1990,11 +2118,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: Some("Company".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Inner,
                 conditions: vec![],
@@ -2035,11 +2165,13 @@ mod tests {
                     variable: "a".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 right: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "b".to_string(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 })),
                 join_type: JoinType::Inner,
                 conditions: vec![],
@@ -2250,6 +2382,7 @@ mod tests {
                         variable: "n".to_string(),
                         label: None,
                         input: None,
+                        node_ids: None,
                     })),
                 })),
             })),
@@ -2296,6 +2429,7 @@ mod tests {
                         variable: "n".to_string(),
                         label: None,
                         input: None,
+                        node_ids: None,
                     })),
                 })),
             })),
@@ -2314,16 +2448,19 @@ mod tests {
             variable: "a".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         });
         let scan_b = LogicalOperator::NodeScan(NodeScanOp {
             variable: "b".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         });
         let scan_c = LogicalOperator::NodeScan(NodeScanOp {
             variable: "c".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         });
 
         // Build: Join(Join(a, b, a=b), c, b=c) with extra condition c=a
@@ -2395,16 +2532,19 @@ mod tests {
             variable: "a".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         });
         let scan_b = LogicalOperator::NodeScan(NodeScanOp {
             variable: "b".to_string(),
             label: Some("Person".to_string()),
             input: None,
+            node_ids: None,
         });
         let scan_c = LogicalOperator::NodeScan(NodeScanOp {
             variable: "c".to_string(),
             label: Some("Company".to_string()),
             input: None,
+            node_ids: None,
         });
 
         let join_ab = LogicalOperator::Join(JoinOp {
@@ -2464,5 +2604,260 @@ mod tests {
             !has_multi_way_join(&optimized.root),
             "Acyclic join should NOT produce MultiWayJoin"
         );
+    }
+
+    // ---- id() pushdown into NodeScan ----
+
+    fn id_eq(var: &str, n: i64) -> LogicalExpression {
+        LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Id(var.to_string())),
+            op: BinaryOp::Eq,
+            right: Box::new(LogicalExpression::Literal(Value::Int64(n))),
+        }
+    }
+
+    fn return_filter_scan(
+        var: &str,
+        label: Option<&str>,
+        predicate: LogicalExpression,
+    ) -> LogicalPlan {
+        LogicalPlan::new(LogicalOperator::Return(ReturnOp {
+            items: vec![ReturnItem {
+                expression: LogicalExpression::Variable(var.to_string()),
+                alias: None,
+            }],
+            distinct: false,
+            input: Box::new(LogicalOperator::Filter(FilterOp {
+                predicate,
+                pushdown_hint: None,
+                input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+                    variable: var.to_string(),
+                    label: label.map(str::to_string),
+                    input: None,
+                    node_ids: None,
+                })),
+            })),
+        }))
+    }
+
+    /// `MATCH (p:Person) WHERE id(p) = 123 RETURN p`
+    /// Expect filter absorbed into scan as `node_ids: Some([123])`.
+    #[test]
+    fn id_eq_literal_absorbed_into_scan() {
+        let plan = return_filter_scan("p", Some("Person"), id_eq("p", 123));
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::NodeScan(scan) = ret.input.as_ref() else {
+            panic!("expected Return -> NodeScan (filter should be gone)");
+        };
+        assert_eq!(scan.variable, "p");
+        assert_eq!(scan.label.as_deref(), Some("Person"));
+        assert_eq!(scan.node_ids.as_deref(), Some(&[NodeId(123)][..]));
+    }
+
+    /// Swapped operands: `123 = id(p)`.
+    #[test]
+    fn id_eq_literal_swapped_operands() {
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Literal(Value::Int64(42))),
+            op: BinaryOp::Eq,
+            right: Box::new(LogicalExpression::Id("p".to_string())),
+        };
+        let plan = return_filter_scan("p", None, predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::NodeScan(scan) = ret.input.as_ref() else {
+            panic!("expected Return -> NodeScan");
+        };
+        assert_eq!(scan.node_ids.as_deref(), Some(&[NodeId(42)][..]));
+    }
+
+    /// `MATCH (p) WHERE id(p) IN [1, 2, 3] RETURN p` → pinned to all three ids.
+    #[test]
+    fn id_in_list_absorbed_into_scan() {
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Id("p".to_string())),
+            op: BinaryOp::In,
+            right: Box::new(LogicalExpression::List(vec![
+                LogicalExpression::Literal(Value::Int64(1)),
+                LogicalExpression::Literal(Value::Int64(2)),
+                LogicalExpression::Literal(Value::Int64(3)),
+            ])),
+        };
+        let plan = return_filter_scan("p", None, predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::NodeScan(scan) = ret.input.as_ref() else {
+            panic!("expected Return -> NodeScan");
+        };
+        assert_eq!(
+            scan.node_ids.as_deref(),
+            Some(&[NodeId(1), NodeId(2), NodeId(3)][..])
+        );
+    }
+
+    /// `id(p) = 7 AND p.age > 30` — id conjunct absorbed, age conjunct kept as Filter.
+    #[test]
+    fn id_eq_with_residual_conjunct() {
+        let age_filter = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Property {
+                variable: "p".to_string(),
+                property: "age".to_string(),
+            }),
+            op: BinaryOp::Gt,
+            right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
+        };
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(id_eq("p", 7)),
+            op: BinaryOp::And,
+            right: Box::new(age_filter.clone()),
+        };
+        let plan = return_filter_scan("p", Some("Person"), predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::Filter(filter) = ret.input.as_ref() else {
+            panic!("expected Return -> Filter -> NodeScan");
+        };
+        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+            panic!("expected Filter -> NodeScan");
+        };
+        assert_eq!(scan.node_ids.as_deref(), Some(&[NodeId(7)][..]));
+        // The residual filter should be just the age predicate, not the And.
+        match &filter.predicate {
+            LogicalExpression::Binary {
+                op: BinaryOp::Gt, ..
+            } => {}
+            other => panic!("expected residual age filter, got {other:?}"),
+        }
+    }
+
+    /// `p.age > 30 AND id(p) = 7` — same as above but id conjunct on the right side.
+    #[test]
+    fn id_eq_with_residual_conjunct_right_side() {
+        let age_filter = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Property {
+                variable: "p".to_string(),
+                property: "age".to_string(),
+            }),
+            op: BinaryOp::Gt,
+            right: Box::new(LogicalExpression::Literal(Value::Int64(30))),
+        };
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(age_filter),
+            op: BinaryOp::And,
+            right: Box::new(id_eq("p", 7)),
+        };
+        let plan = return_filter_scan("p", None, predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::Filter(filter) = ret.input.as_ref() else {
+            panic!("expected Return -> Filter -> NodeScan");
+        };
+        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+            panic!("expected Filter -> NodeScan");
+        };
+        assert_eq!(scan.node_ids.as_deref(), Some(&[NodeId(7)][..]));
+        assert!(matches!(
+            filter.predicate,
+            LogicalExpression::Binary {
+                op: BinaryOp::Gt,
+                ..
+            }
+        ));
+    }
+
+    /// Negative literal must NOT be rewritten — NodeId is unsigned.
+    #[test]
+    fn negative_id_literal_falls_back_to_filter() {
+        let plan = return_filter_scan("p", Some("Person"), id_eq("p", -1));
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::Filter(filter) = ret.input.as_ref() else {
+            panic!("expected Return -> Filter -> NodeScan (no pushdown)");
+        };
+        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+            panic!("expected Filter -> NodeScan");
+        };
+        assert!(scan.node_ids.is_none());
+    }
+
+    /// Non-integer literal must NOT be rewritten.
+    #[test]
+    fn string_literal_falls_back_to_filter() {
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Id("p".to_string())),
+            op: BinaryOp::Eq,
+            right: Box::new(LogicalExpression::Literal(Value::String("nope".into()))),
+        };
+        let plan = return_filter_scan("p", None, predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        assert!(
+            matches!(ret.input.as_ref(), LogicalOperator::Filter(_)),
+            "expected Filter to remain on top"
+        );
+    }
+
+    /// `id(p) IN []` — empty list, fall back to Filter (semantically returns no rows;
+    /// don't accidentally pin to an empty set that may collide with other downstream logic).
+    #[test]
+    fn id_in_empty_list_falls_back_to_filter() {
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Id("p".to_string())),
+            op: BinaryOp::In,
+            right: Box::new(LogicalExpression::List(vec![])),
+        };
+        let plan = return_filter_scan("p", None, predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        assert!(matches!(ret.input.as_ref(), LogicalOperator::Filter(_)));
+    }
+
+    /// id() referencing a different variable must NOT be pushed into this scan.
+    #[test]
+    fn id_of_different_variable_not_absorbed() {
+        // Scan on `p`, predicate is `id(q) = 5`. (Pretend `q` is introduced elsewhere.)
+        let predicate = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::Id("q".to_string())),
+            op: BinaryOp::Eq,
+            right: Box::new(LogicalExpression::Literal(Value::Int64(5))),
+        };
+        let plan = return_filter_scan("p", Some("Person"), predicate);
+        let optimized = Optimizer::new().optimize(plan).unwrap();
+
+        let LogicalOperator::Return(ret) = &optimized.root else {
+            panic!("expected Return root");
+        };
+        let LogicalOperator::Filter(filter) = ret.input.as_ref() else {
+            panic!("expected Return -> Filter (predicate references different var)");
+        };
+        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+            panic!("expected Filter -> NodeScan");
+        };
+        assert!(scan.node_ids.is_none());
     }
 }

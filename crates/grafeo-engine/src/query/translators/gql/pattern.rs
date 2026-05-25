@@ -357,6 +357,7 @@ impl GqlTranslator {
             variable: variable.clone(),
             label,
             input: input.map(Box::new),
+            node_ids: None,
         });
 
         // Add hasLabel filters for additional colon-syntax labels (AND semantics).
@@ -516,6 +517,7 @@ impl GqlTranslator {
             variable: source_var.clone(),
             label: source_label,
             input: input.map(Box::new),
+            node_ids: None,
         });
 
         // Add hasLabel filters for additional source labels (AND semantics)

@@ -338,6 +338,7 @@ impl GraphQLTranslator {
             variable: var.clone(),
             label: Some(capitalize_first(type_name)),
             input: None,
+            node_ids: None,
         });
 
         // Apply filter
@@ -411,6 +412,7 @@ impl GraphQLTranslator {
             variable: var.clone(),
             label: Some(capitalize_first(type_name)),
             input: None,
+            node_ids: None,
         });
 
         // Apply filter
@@ -442,6 +444,7 @@ impl GraphQLTranslator {
             variable: var.clone(),
             label: Some(capitalize_first(&field.name)),
             input: None,
+            node_ids: None,
         });
 
         // Extract special arguments (pagination, orderBy) from regular filters
@@ -501,6 +504,7 @@ impl GraphQLTranslator {
                 variable: var,
                 label: Some(capitalize_first(type_name)),
                 input: None,
+                node_ids: None,
             });
             let agg = LogicalOperator::Aggregate(AggregateOp {
                 group_by: Vec::new(),
@@ -537,6 +541,7 @@ impl GraphQLTranslator {
                 variable: var.clone(),
                 label: Some(capitalize_first(type_name)),
                 input: None,
+                node_ids: None,
             });
 
             let mut agg_exprs = Vec::new();

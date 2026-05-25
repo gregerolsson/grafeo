@@ -576,6 +576,7 @@ impl SqlPgqTranslator {
             variable: variable.clone(),
             label,
             input: input.map(Box::new),
+            node_ids: None,
         });
 
         // Add filters for inline properties (e.g., {city: 'NYC'})

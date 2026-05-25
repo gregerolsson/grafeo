@@ -160,6 +160,7 @@ mod tests {
                     variable: "n".to_string(),
                     label: Some("Person".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -216,6 +217,7 @@ mod tests {
                 variable: "n".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         });

@@ -489,6 +489,7 @@ impl GremlinTranslator {
                 variable: scan_var,
                 label: None,
                 input: None,
+                node_ids: None,
             });
         }
 
@@ -531,6 +532,7 @@ impl GremlinTranslator {
                     variable: target_var.clone(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 });
 
                 // Apply any steps from the sub-traversal
@@ -570,6 +572,7 @@ impl GremlinTranslator {
                     variable: var.clone(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 });
 
                 // If specific IDs, add filter
@@ -590,6 +593,7 @@ impl GremlinTranslator {
                     variable: var.clone(),
                     label: None,
                     input: None,
+                    node_ids: None,
                 });
 
                 let edge_var = self.var_gen.next();
@@ -1710,6 +1714,7 @@ impl GremlinTranslator {
                     variable: new_var.clone(),
                     label: None,
                     input: Some(Box::new(input)),
+                    node_ids: None,
                 });
                 Ok((plan, Some(new_var)))
             }
@@ -2260,6 +2265,7 @@ impl GremlinTranslator {
                             variable: current_var.to_string(),
                             label: None,
                             input: None,
+                            node_ids: None,
                         })),
                         path_alias: None,
                         path_mode: PathMode::Walk,
@@ -3624,6 +3630,7 @@ mod tests {
             variable: "v0".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         });
 
         let (plan, _) = translator
@@ -3673,6 +3680,7 @@ mod tests {
             variable: "v0".to_string(),
             label: None,
             input: None,
+            node_ids: None,
         });
 
         let (plan, new_var) = translator

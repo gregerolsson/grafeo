@@ -743,6 +743,7 @@ mod text_extract_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -776,6 +777,7 @@ mod text_extract_tests {
                 variable: "doc".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -798,6 +800,7 @@ mod text_extract_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -820,6 +823,7 @@ mod text_extract_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -842,6 +846,7 @@ mod text_extract_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -949,6 +954,7 @@ mod compound_hybrid_tests {
                     variable: "doc".to_string(),
                     label: Some("Article".to_string()),
                     input: None,
+                    node_ids: None,
                 })),
                 pushdown_hint: None,
             })),
@@ -968,6 +974,7 @@ mod compound_hybrid_tests {
                 variable: "doc".to_string(),
                 label: None,
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -999,6 +1006,7 @@ mod compound_hybrid_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -1031,6 +1039,7 @@ mod compound_hybrid_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -1059,6 +1068,7 @@ mod compound_hybrid_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };
@@ -1077,6 +1087,7 @@ mod compound_hybrid_tests {
                 variable: "doc".to_string(),
                 label: Some("Article".to_string()),
                 input: None,
+                node_ids: None,
             })),
             pushdown_hint: None,
         };

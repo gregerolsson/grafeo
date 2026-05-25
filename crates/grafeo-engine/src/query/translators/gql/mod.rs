@@ -1679,6 +1679,7 @@ impl GqlTranslator {
             variable: first_var.clone(),
             label: None,
             input: None,
+            node_ids: None,
         });
 
         let plan = self.translate_delete_targets(&delete.targets, delete.detach, scan)?;
@@ -1748,6 +1749,7 @@ impl GqlTranslator {
             variable: var.clone(),
             label: None,
             input: None,
+            node_ids: None,
         });
 
         // Build property assignments for this variable
