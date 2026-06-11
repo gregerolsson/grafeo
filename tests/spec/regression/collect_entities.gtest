@@ -103,6 +103,49 @@ tests:
         - ["[Ann, Bob]"]
 
   # ---------------------------------------------------------------------------
+  # collect lists consumed by expressions in the final RETURN
+  # (e.g. concatenation) materialize before evaluation
+  # ---------------------------------------------------------------------------
+
+  - name: concatenated_collect_lists_return_full_maps
+    setup:
+      - "INSERT (:Person {name: 'Ann'})"
+      - "INSERT (:Hobby {name: 'Chess'})"
+    query: |
+      MATCH (p:Person)
+      OPTIONAL MATCH (h:Hobby)
+      RETURN COLLECT_LIST(p) + COLLECT_LIST(h) AS nodes
+    expect:
+      rows:
+        - ["[{_id: 0, _labels: [Person], name: Ann}, {_id: 1, _labels: [Hobby], name: Chess}]"]
+
+  - name: concatenated_distinct_collect_lists_return_full_maps
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})"
+    query: |
+      MATCH (p:Person)
+      OPTIONAL MATCH (a:Person)-[r:KNOWS]->(b:Person)
+      RETURN COLLECT_LIST(DISTINCT a) + COLLECT_LIST(DISTINCT b) AS nodes,
+             COLLECT_LIST(DISTINCT r) AS edges
+    expect:
+      rows:
+        - ["[{_id: 0, _labels: [Person], name: Ann}, {_id: 1, _labels: [Person], name: Bob}]", "[{_id: 0, _source: 0, _target: 1, _type: KNOWS, since: 2020}]"]
+
+  - name: size_of_concatenated_collect_lists
+    # Expression consumers that do not need entities still work on the
+    # materialized lists.
+    setup:
+      - "INSERT (:Person {name: 'Ann'})"
+      - "INSERT (:Hobby {name: 'Chess'})"
+    query: |
+      MATCH (p:Person)
+      OPTIONAL MATCH (h:Hobby)
+      RETURN size(COLLECT_LIST(p) + COLLECT_LIST(h)) AS cnt
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
   # Guard: collect of scalar values is unchanged
   # ---------------------------------------------------------------------------
 

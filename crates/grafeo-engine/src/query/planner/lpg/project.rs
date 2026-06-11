@@ -94,6 +94,54 @@ impl super::Planner {
             .any(|item| !matches!(&item.expression, LogicalExpression::Variable(_)));
 
         if needs_project {
+            // Collect-of-entity columns referenced inside non-variable
+            // expressions (e.g. `COLLECT_LIST(a) + COLLECT_LIST(b)`) must be
+            // materialized *before* expression evaluation: the evaluator works
+            // on raw column values and would otherwise produce lists of bare
+            // entity IDs in the final output.
+            let mut pre_resolved: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for item in items {
+                if matches!(&item.expression, LogicalExpression::Variable(_)) {
+                    continue; // bare variables get NodeListResolve/EdgeListResolve directly
+                }
+                let mut vars = Vec::new();
+                collect_vars(&item.expression, &mut vars);
+                for v in vars {
+                    if variable_columns.contains_key(&v)
+                        && (self.node_list_columns.borrow().contains(&v)
+                            || self.edge_list_columns.borrow().contains(&v))
+                    {
+                        pre_resolved.insert(v);
+                    }
+                }
+            }
+            let input_op = if pre_resolved.is_empty() {
+                input_op
+            } else {
+                let mut pre_projections = Vec::with_capacity(input_columns.len());
+                for (idx, col) in input_columns.iter().enumerate() {
+                    if !pre_resolved.contains(col) {
+                        pre_projections.push(ProjectExpr::Column(idx));
+                    } else if self.edge_list_columns.borrow().contains(col) {
+                        pre_projections.push(ProjectExpr::EdgeListResolve { column: idx });
+                    } else {
+                        pre_projections.push(ProjectExpr::NodeListResolve { column: idx });
+                    }
+                }
+                let pre_types = vec![LogicalType::Any; input_columns.len()];
+                Box::new(
+                    ProjectOperator::with_store(
+                        input_op,
+                        pre_projections,
+                        pre_types,
+                        Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                    )
+                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
+                    .with_session_context(self.session_context.clone()),
+                ) as Box<dyn Operator>
+            };
+
             // Build project expressions
             let mut projections = Vec::with_capacity(items.len());
             let mut output_types = Vec::with_capacity(items.len());
@@ -105,7 +153,11 @@ impl super::Planner {
                             Error::Internal(format!("Variable '{}' not found in input", name))
                         })?;
                         // Path detail variables and UNWIND/FOR scalar variables pass through as-is
-                        if self.node_list_columns.borrow().contains(name) {
+                        if pre_resolved.contains(name) {
+                            // Already materialized by the pre-resolution projection
+                            projections.push(ProjectExpr::Column(col_idx));
+                            output_types.push(LogicalType::Any);
+                        } else if self.node_list_columns.borrow().contains(name) {
                             projections.push(ProjectExpr::NodeListResolve { column: col_idx });
                             output_types.push(LogicalType::Any);
                         } else if self.edge_list_columns.borrow().contains(name) {
