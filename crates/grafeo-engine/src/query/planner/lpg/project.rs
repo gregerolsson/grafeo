@@ -105,7 +105,13 @@ impl super::Planner {
                             Error::Internal(format!("Variable '{}' not found in input", name))
                         })?;
                         // Path detail variables and UNWIND/FOR scalar variables pass through as-is
-                        if name.starts_with("_path_nodes_")
+                        if self.node_list_columns.borrow().contains(name) {
+                            projections.push(ProjectExpr::NodeListResolve { column: col_idx });
+                            output_types.push(LogicalType::Any);
+                        } else if self.edge_list_columns.borrow().contains(name) {
+                            projections.push(ProjectExpr::EdgeListResolve { column: col_idx });
+                            output_types.push(LogicalType::Any);
+                        } else if name.starts_with("_path_nodes_")
                             || name.starts_with("_path_edges_")
                             || name.starts_with("_path_length_")
                             || self.scalar_columns.borrow().contains(name)
@@ -328,7 +334,13 @@ impl super::Planner {
                     let col_idx = *variable_columns.get(name).ok_or_else(|| {
                         Error::Internal(format!("Variable '{}' not found in input", name))
                     })?;
-                    if self.scalar_columns.borrow().contains(name) {
+                    if self.node_list_columns.borrow().contains(name) {
+                        projections.push(ProjectExpr::NodeListResolve { column: col_idx });
+                        output_types.push(LogicalType::Any);
+                    } else if self.edge_list_columns.borrow().contains(name) {
+                        projections.push(ProjectExpr::EdgeListResolve { column: col_idx });
+                        output_types.push(LogicalType::Any);
+                    } else if self.scalar_columns.borrow().contains(name) {
                         projections.push(ProjectExpr::Column(col_idx));
                         output_types.push(LogicalType::Any);
                     } else if self.edge_columns.borrow().contains(name) {
@@ -431,6 +443,16 @@ impl super::Planner {
                         Error::Internal(format!("Variable '{}' not found in input", name))
                     })?;
                     projections.push(ProjectExpr::Column(col_idx));
+                    // Propagate collect-of-entity list membership through the
+                    // alias so the final RETURN still resolves IDs to maps.
+                    if self.node_list_columns.borrow().contains(name) {
+                        self.node_list_columns.borrow_mut().insert(col_name.clone());
+                    } else if self.edge_list_columns.borrow().contains(name) {
+                        self.edge_list_columns.borrow_mut().insert(col_name.clone());
+                    } else {
+                        self.node_list_columns.borrow_mut().remove(&col_name);
+                        self.edge_list_columns.borrow_mut().remove(&col_name);
+                    }
                     // Use Any for scalar variables so string/numeric values
                     // are not coerced to NodeId by the typed vector push.
                     if self.scalar_columns.borrow().contains(name) {
@@ -471,6 +493,8 @@ impl super::Planner {
                     output_types.push(LogicalType::Any);
                     // Expression results are scalar values
                     self.scalar_columns.borrow_mut().insert(col_name.clone());
+                    self.node_list_columns.borrow_mut().remove(&col_name);
+                    self.edge_list_columns.borrow_mut().remove(&col_name);
                 }
             }
 

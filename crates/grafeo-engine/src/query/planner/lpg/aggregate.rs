@@ -212,10 +212,37 @@ impl super::Planner {
         let mut output_schema = Vec::new();
         let mut output_columns = Vec::new();
 
+        // Returns whether the expression is a bare variable bound to an
+        // entity (node/edge) column, i.e. not a scalar or path-detail value.
+        let entity_variable = |expr: &LogicalExpression| -> Option<(String, bool)> {
+            if let LogicalExpression::Variable(name) = expr
+                && !name.starts_with("_path_")
+                && !self.scalar_columns.borrow().contains(name)
+            {
+                let is_edge = self.edge_columns.borrow().contains(name);
+                Some((name.clone(), is_edge))
+            } else {
+                None
+            }
+        };
+
+        // Group-by columns over entity variables keep their entity identity so
+        // the final RETURN resolves them to full node/edge maps. All other
+        // group-by columns are scalar.
+        let mut group_entity_columns: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         // Add group-by columns
         for expr in &agg.group_by {
+            let col_name = expression_to_string(expr);
+            if let Some((_, is_edge)) = entity_variable(expr) {
+                group_entity_columns.insert(col_name.clone());
+                if is_edge {
+                    self.edge_columns.borrow_mut().insert(col_name.clone());
+                }
+            }
             output_schema.push(LogicalType::Any); // Group-by values can be any type
-            output_columns.push(expression_to_string(expr));
+            output_columns.push(col_name);
         }
 
         // Add aggregate result columns
@@ -257,18 +284,38 @@ impl super::Planner {
                 LogicalAggregateFunction::RegrCount => LogicalType::Int64,
             };
             output_schema.push(result_type);
-            output_columns.push(
-                agg_expr
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase()),
-            );
+            let col_name = agg_expr
+                .alias
+                .clone()
+                .unwrap_or_else(|| format!("{:?}(...)", agg_expr.function).to_lowercase());
+
+            // collect() over a bare node/edge variable produces a list of
+            // entity IDs internally. Track the column so the final RETURN
+            // resolves the IDs to full node/edge maps (lazy materialization;
+            // intermediate WITH/FOREACH consumers keep working on IDs).
+            if agg_expr.function == LogicalAggregateFunction::Collect
+                && let Some((_, is_edge)) = agg_expr.expression.as_ref().and_then(entity_variable)
+            {
+                if is_edge {
+                    self.edge_list_columns.borrow_mut().insert(col_name.clone());
+                } else {
+                    self.node_list_columns.borrow_mut().insert(col_name.clone());
+                }
+            } else {
+                self.node_list_columns.borrow_mut().remove(&col_name);
+                self.edge_list_columns.borrow_mut().remove(&col_name);
+            }
+            output_columns.push(col_name);
         }
 
-        // Register all aggregate output columns as scalar (group-by values and
-        // aggregate results are materialized scalar values, not entity references)
+        // Register aggregate output columns as scalar (group-by values and
+        // aggregate results are materialized scalar values), except group-by
+        // columns that carry node/edge IDs — those keep entity identity so the
+        // final RETURN can resolve them.
         for col in &output_columns {
-            self.scalar_columns.borrow_mut().insert(col.clone());
+            if !group_entity_columns.contains(col) {
+                self.scalar_columns.borrow_mut().insert(col.clone());
+            }
         }
 
         // Choose operator based on whether there are group-by columns

@@ -5,7 +5,9 @@ use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
-use grafeo_common::types::{EpochId, LogicalType, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -43,6 +45,18 @@ pub enum ProjectExpr {
     /// Resolve an edge ID column to a full edge map with metadata and properties.
     EdgeResolve {
         /// The column containing the edge ID.
+        column: usize,
+    },
+    /// Resolve a column holding lists of node IDs (e.g. `collect(n)` output)
+    /// to lists of full node maps with metadata and properties.
+    NodeListResolve {
+        /// The column containing the list of node IDs.
+        column: usize,
+    },
+    /// Resolve a column holding lists of edge IDs (e.g. `collect(r)` output)
+    /// to lists of full edge maps with metadata and properties.
+    EdgeListResolve {
+        /// The column containing the list of edge IDs.
         column: usize,
     },
     /// Returns the first non-null value from two columns (used for RIGHT/FULL join dedup).
@@ -376,6 +390,96 @@ impl Operator for ProjectOperator {
                             edge.map_or(Value::Null, |e| edge_to_map(&e))
                         } else {
                             Value::Null
+                        };
+                        output_col.push_value(value);
+                    }
+                }
+                ProjectExpr::NodeListResolve { column } => {
+                    let input_col = input
+                        .column(*column)
+                        .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
+
+                    let output_col = output
+                        .column_mut(i)
+                        .expect("column exists: index matches projection schema");
+
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        OperatorError::Execution("Store required for node resolution".to_string())
+                    })?;
+
+                    let epoch = self.viewing_epoch;
+                    let tx_id = self.transaction_id;
+                    for row in input.selected_indices() {
+                        let value = match input_col.get_value(row) {
+                            Some(Value::List(items)) => {
+                                let resolved: Vec<Value> = items
+                                    .iter()
+                                    .map(|item| {
+                                        let Value::Int64(id) = item else {
+                                            return item.clone();
+                                        };
+                                        // reason: entity IDs are sequential counters, well within range
+                                        #[allow(clippy::cast_sign_loss)]
+                                        let node_id = NodeId::new(*id as u64);
+                                        let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
+                                            store.get_node_versioned(node_id, ep, tx)
+                                        } else if let Some(ep) = epoch {
+                                            store.get_node_at_epoch(node_id, ep)
+                                        } else {
+                                            store.get_node(node_id)
+                                        };
+                                        node.map_or(Value::Null, |n| node_to_map(&n))
+                                    })
+                                    .collect();
+                                Value::List(resolved.into())
+                            }
+                            Some(other) => other,
+                            None => Value::Null,
+                        };
+                        output_col.push_value(value);
+                    }
+                }
+                ProjectExpr::EdgeListResolve { column } => {
+                    let input_col = input
+                        .column(*column)
+                        .ok_or_else(|| OperatorError::ColumnNotFound(format!("Column {column}")))?;
+
+                    let output_col = output
+                        .column_mut(i)
+                        .expect("column exists: index matches projection schema");
+
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        OperatorError::Execution("Store required for edge resolution".to_string())
+                    })?;
+
+                    let epoch = self.viewing_epoch;
+                    let tx_id = self.transaction_id;
+                    for row in input.selected_indices() {
+                        let value = match input_col.get_value(row) {
+                            Some(Value::List(items)) => {
+                                let resolved: Vec<Value> = items
+                                    .iter()
+                                    .map(|item| {
+                                        let Value::Int64(id) = item else {
+                                            return item.clone();
+                                        };
+                                        // reason: entity IDs are sequential counters, well within range
+                                        #[allow(clippy::cast_sign_loss)]
+                                        let edge_id = EdgeId::new(*id as u64);
+                                        let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
+                                            store.get_edge_versioned(edge_id, ep, tx)
+                                        } else if let Some(ep) = epoch {
+                                            store.get_edge_at_epoch(edge_id, ep)
+                                        } else {
+                                            store.get_edge(edge_id)
+                                        };
+                                        edge.map_or(Value::Null, |e| edge_to_map(&e))
+                                    })
+                                    .collect();
+                                Value::List(resolved.into())
+                            }
+                            Some(other) => other,
+                            None => Value::Null,
                         };
                         output_col.push_value(value);
                     }

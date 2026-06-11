@@ -177,6 +177,14 @@ pub struct Planner {
     /// Variables that hold edge IDs (from MATCH edge patterns).
     /// Used by plan_return to emit `EdgeResolve` instead of `NodeResolve`.
     pub(super) edge_columns: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Variables that hold lists of node IDs (from `collect(n)` over a node
+    /// variable). Used by plan_return to emit `NodeListResolve` so the final
+    /// output contains full node maps instead of raw IDs.
+    pub(super) node_list_columns: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Variables that hold lists of edge IDs (from `collect(r)` over an edge
+    /// variable). Used by plan_return to emit `EdgeListResolve` so the final
+    /// output contains full edge maps instead of raw IDs.
+    pub(super) edge_list_columns: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Optional constraint validator for schema enforcement during mutations.
     pub(super) validator: Option<Arc<dyn ConstraintValidator>>,
     /// Catalog for user-defined procedure lookup.
@@ -236,6 +244,8 @@ impl Planner {
             factorized_execution: true,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            node_list_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            edge_list_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
             catalog: None,
             #[cfg(feature = "lpg")]
@@ -282,6 +292,8 @@ impl Planner {
             factorized_execution: true,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            node_list_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            edge_list_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             validator: None,
             catalog: None,
             #[cfg(feature = "lpg")]
@@ -436,11 +448,70 @@ impl Planner {
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+        let (operator, columns) =
+            self.resolve_root_entity_columns(&logical_plan.root, operator, columns);
         Ok(PhysicalPlan {
             operator,
             columns,
             adaptive_context: None,
         })
+    }
+
+    /// Wraps the root operator in a projection that resolves entity columns
+    /// (node/edge IDs and `collect()` ID lists) to full maps.
+    ///
+    /// Only applies when the logical plan root is an Aggregate: an aggregate
+    /// without aliases is not wrapped in a Return operator (e.g.
+    /// `RETURN collect(n)`), so the resolution normally done by `plan_return`
+    /// has to happen here.
+    fn resolve_root_entity_columns(
+        &self,
+        root: &LogicalOperator,
+        operator: Box<dyn Operator>,
+        columns: Vec<String>,
+    ) -> (Box<dyn Operator>, Vec<String>) {
+        if !matches!(root, LogicalOperator::Aggregate(_)) {
+            return (operator, columns);
+        }
+
+        let mut projections = Vec::with_capacity(columns.len());
+        let mut needs_resolve = false;
+        for (i, name) in columns.iter().enumerate() {
+            if self.node_list_columns.borrow().contains(name) {
+                projections.push(ProjectExpr::NodeListResolve { column: i });
+                needs_resolve = true;
+            } else if self.edge_list_columns.borrow().contains(name) {
+                projections.push(ProjectExpr::EdgeListResolve { column: i });
+                needs_resolve = true;
+            } else if !self.scalar_columns.borrow().contains(name) {
+                // Entity group-by key (only group keys over node/edge
+                // variables are left unmarked as scalar by plan_aggregate).
+                if self.edge_columns.borrow().contains(name) {
+                    projections.push(ProjectExpr::EdgeResolve { column: i });
+                } else {
+                    projections.push(ProjectExpr::NodeResolve { column: i });
+                }
+                needs_resolve = true;
+            } else {
+                projections.push(ProjectExpr::Column(i));
+            }
+        }
+        if !needs_resolve {
+            return (operator, columns);
+        }
+
+        let output_types = vec![LogicalType::Any; columns.len()];
+        let operator: Box<dyn Operator> = Box::new(
+            ProjectOperator::with_store(
+                operator,
+                projections,
+                output_types,
+                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            )
+            .with_transaction_context(self.viewing_epoch, self.transaction_id)
+            .with_session_context(self.session_context.clone()),
+        );
+        (operator, columns)
     }
 
     /// Plans a logical plan with profiling: each physical operator is wrapped
@@ -464,6 +535,8 @@ impl Planner {
 
         self.profiling.set(false);
         let (operator, columns) = result?;
+        let (operator, columns) =
+            self.resolve_root_entity_columns(&logical_plan.root, operator, columns);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
         Ok((
@@ -484,6 +557,8 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan_adaptive(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
+        let (operator, columns) =
+            self.resolve_root_entity_columns(&logical_plan.root, operator, columns);
 
         let mut adaptive_context = AdaptiveContext::new();
         self.collect_cardinality_estimates(&logical_plan.root, &mut adaptive_context, 0);

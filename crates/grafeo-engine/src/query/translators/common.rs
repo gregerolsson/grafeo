@@ -23,6 +23,7 @@ pub(crate) fn is_aggregate_function(name: &str) -> bool {
             | "MIN"
             | "MAX"
             | "COLLECT"
+            | "COLLECT_LIST"
             | "STDEV"
             | "STDDEV"
             | "STDDEV_SAMP"
@@ -63,7 +64,8 @@ pub(crate) fn to_aggregate_function(name: &str) -> Option<AggregateFunction> {
         "AVG" => Some(AggregateFunction::Avg),
         "MIN" => Some(AggregateFunction::Min),
         "MAX" => Some(AggregateFunction::Max),
-        "COLLECT" => Some(AggregateFunction::Collect),
+        // COLLECT_LIST is the ISO GQL name; COLLECT is the openCypher name.
+        "COLLECT" | "COLLECT_LIST" => Some(AggregateFunction::Collect),
         "STDEV" | "STDDEV" | "STDDEV_SAMP" => Some(AggregateFunction::StdDev),
         "STDEVP" | "STDDEVP" | "STDDEV_POP" => Some(AggregateFunction::StdDevPop),
         "VARIANCE" | "VAR_SAMP" => Some(AggregateFunction::Variance),

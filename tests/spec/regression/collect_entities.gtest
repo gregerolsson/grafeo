@@ -1,0 +1,116 @@
+# Regression tests: collect() over node/edge variables returns full entities
+#
+# collect(n) / collect(r) used to return lists of raw entity IDs instead of
+# the materialized node/edge maps (matching what a bare `RETURN n` produces).
+# Same root cause: entity group-by keys (`RETURN p, collect(r)`) also leaked
+# raw IDs. Covers the ISO GQL COLLECT_LIST spelling as well.
+
+meta:
+  language: gql
+  model: lpg
+  section: regression
+  title: Collect entities materialization
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # collect over node / edge variables materializes full maps
+  # ---------------------------------------------------------------------------
+
+  - name: collect_nodes_returns_full_maps
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})"
+    query: "MATCH (p:Person)-[r]->(t) RETURN collect(t) AS nodes"
+    expect:
+      rows:
+        - ["[{_id: 1, _labels: [Person], name: Bob}]"]
+
+  - name: collect_distinct_nodes_and_edges_returns_full_maps
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})"
+    query: |
+      MATCH (p:Person)-[r]->(t)
+      RETURN collect(DISTINCT t) AS nodes, collect(DISTINCT r) AS edges
+    expect:
+      rows:
+        - ["[{_id: 1, _labels: [Person], name: Bob}]", "[{_id: 0, _source: 0, _target: 1, _type: KNOWS, since: 2020}]"]
+
+  - name: collect_nodes_without_alias_returns_full_maps
+    # Without an alias the Aggregate is the plan root (no enclosing RETURN
+    # projection), which used to skip entity resolution entirely.
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS]->(:Person {name: 'Bob'})"
+    query: "MATCH (p:Person)-[r]->(t) RETURN collect(t)"
+    expect:
+      rows:
+        - ["[{_id: 1, _labels: [Person], name: Bob}]"]
+
+  # ---------------------------------------------------------------------------
+  # Entity group-by keys materialize alongside collect
+  # ---------------------------------------------------------------------------
+
+  - name: group_by_node_key_returns_full_map
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})"
+    query: "MATCH (p:Person)-[r]->(t) RETURN p, collect(r) AS edges"
+    expect:
+      rows:
+        - ["{_id: 0, _labels: [Person], name: Ann}", "[{_id: 0, _source: 0, _target: 1, _type: KNOWS, since: 2020}]"]
+
+  # ---------------------------------------------------------------------------
+  # collect carried through WITH still materializes at the final RETURN
+  # ---------------------------------------------------------------------------
+
+  - name: collect_through_with_returns_full_maps
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS]->(:Person {name: 'Bob'})"
+    query: "MATCH (p:Person)-[r]->(t) WITH collect(t) AS ts RETURN ts"
+    expect:
+      rows:
+        - ["[{_id: 1, _labels: [Person], name: Bob}]"]
+
+  - name: collect_through_with_stays_usable_as_id_list
+    # Intermediate consumers (size(), comprehensions, UNWIND) keep operating
+    # on the internal ID list; only the final RETURN materializes.
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS]->(:Person {name: 'Bob'})"
+      - "INSERT (:Person {name: 'Cat'})"
+    query: "MATCH (p:Person) WITH collect(p) AS people RETURN size(people) AS cnt"
+    expect:
+      rows:
+        - [3]
+
+  # ---------------------------------------------------------------------------
+  # ISO GQL COLLECT_LIST spelling
+  # ---------------------------------------------------------------------------
+
+  - name: collect_list_alias_of_collect
+    setup:
+      - "INSERT (:Person {name: 'Ann'})-[:KNOWS]->(:Person {name: 'Bob'})"
+    query: "MATCH (p:Person)-[r]->(t) RETURN COLLECT_LIST(t) AS nodes"
+    expect:
+      rows:
+        - ["[{_id: 1, _labels: [Person], name: Bob}]"]
+
+  - name: collect_list_of_property_stays_scalar
+    setup:
+      - "INSERT (:Person {name: 'Ann'})"
+      - "INSERT (:Person {name: 'Bob'})"
+    query: "MATCH (p:Person) RETURN COLLECT_LIST(p.name) AS names"
+    expect:
+      rows:
+        - ["[Ann, Bob]"]
+
+  # ---------------------------------------------------------------------------
+  # Guard: collect of scalar values is unchanged
+  # ---------------------------------------------------------------------------
+
+  - name: collect_of_property_returns_values
+    setup:
+      - "INSERT (:Person {name: 'Ann'})"
+      - "INSERT (:Person {name: 'Bob'})"
+    query: "MATCH (p:Person) RETURN collect(p.name) AS names"
+    expect:
+      rows:
+        - ["[Ann, Bob]"]
